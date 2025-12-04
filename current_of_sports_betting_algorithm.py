@@ -27,6 +27,37 @@ from datetime import datetime, date
 import numpy as np
 import pandas as pd
 import requests
+SPORTSBOOK_BASE_URL = "https://sportsbook-api2.p.rapidapi.com"
+SPORTSBOOK_HOST = "sportsbook-api2.p.rapidapi.com"
+
+
+def get_sportsbook_api_key():
+    key = os.environ.get("SPORTSBOOK_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError(
+            "SPORTSBOOK_API_KEY is not set. "
+            "Add it as a GitHub Actions secret with your RapidAPI key."
+        )
+    return key
+
+
+def sportsbook_get(path, params=None, api_key=None, timeout=30):
+    """
+    Generic GET helper for Sportsbook API2 via RapidAPI.
+    """
+    if api_key is None:
+        api_key = get_sportsbook_api_key()
+
+    url = SPORTSBOOK_BASE_URL.rstrip("/") + "/" + path.lstrip("/")
+    headers = {
+        "X-RapidAPI-Key": api_key,
+        "X-RapidAPI-Host": SPORTSBOOK_HOST,
+    }
+    resp = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
+    print(f"[SportsbookAPI] GET {url} status={resp.status_code}")
+    resp.raise_for_status()
+    return resp.json()
+
 APISPORTS_BASE_URL = "https://v1.basketapi.com"  # API-Sports Basketball base
 
 def get_apisports_api_key():
