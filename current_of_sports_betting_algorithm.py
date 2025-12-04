@@ -77,7 +77,6 @@ def get_odds_api_key():
         )
     return api_key
 
-
 def odds_get(path, params=None, api_key=None, timeout=30):
     """
     Generic GET for The Odds API v4.
@@ -140,10 +139,10 @@ def fetch_odds_for_date(
         if not bookmakers:
             continue
 
-        # Prefer certain books if present, otherwise just take the first
+        # Preferred bookmaker or fallback
         chosen = None
         by_key = {b["key"]: b for b in bookmakers if "key" in b}
-        for bk in bookmaker_preference:
+        for bk in ["draftkings", "fanduel", "betmgm"]:
             if bk in by_key:
                 chosen = by_key[bk]
                 break
@@ -159,22 +158,16 @@ def fetch_odds_for_date(
             outcomes = m.get("outcomes", []) or []
 
             if mkey == "h2h":
-                # moneyline
                 for o in outcomes:
-                    name = o.get("name")
-                    price = o.get("price")
-                    if name == home_team:
-                        home_ml = price
-                    elif name == away_team:
-                        away_ml = price
+                    if o.get("name") == home_team:
+                        home_ml = o.get("price")
+                    elif o.get("name") == away_team:
+                        away_ml = o.get("price")
 
             elif mkey == "spreads":
-                # spread
                 for o in outcomes:
-                    name = o.get("name")
-                    point = o.get("point")
-                    if name == home_team:
-                        home_spread = point
+                    if o.get("name") == home_team:
+                        home_spread = o.get("point")
 
         odds_dict[(home_team, away_team)] = {
             "home_ml": home_ml,
@@ -185,7 +178,6 @@ def fetch_odds_for_date(
     print(f"[fetch_odds_for_date] Built odds entries for {len(odds_dict)} games.")
     print("[fetch_odds_for_date] Sample keys:", list(odds_dict.keys())[:5])
     return odds_dict
-
 # -----------------------------
 # BallDontLie low-level client
 # -----------------------------
