@@ -2960,7 +2960,7 @@ def calc_stats(df):
 df = calc_stats(df)
 df[["PTS_home", "PTS_away", "home_ORtg", "away_ORtg", "home_eFG", "home_win"]].head()
 
-df_features  df.copy()
+df_features = df.copy()
 
 df_features["Δ_ORtg"]  df_features["home_ORtg"] - df_features["away_ORtg"]
 df_features["Δ_DRtg"]  df_features["away_DRtg"] - df_features["home_DRtg"]
