@@ -1,4 +1,5 @@
 """
+ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 Daily NBA betting model using BallDontLie + ESPN injuries.
 
 Replaces nba_api / stats.nba.com completely.
@@ -61,6 +62,133 @@ def american_to_implied_prob(odds):
     else:
         return 100.0 / (odds + 100.0)
 
+def get_odds_api_key():
+    """
+    Read Odds API key from environment.
+    """
+    api_key = os.environ.get("ODDS_API_KEY", "")
+    if api_key is None:
+        api_key = ""
+    api_key = api_key.strip()
+    if not api_key:
+        raise RuntimeError(
+            "ODDS_API_KEY environment variable is not set or is empty. "
+            "Set it as a GitHub Actions secret."
+        )
+    return api_key
+
+
+def odds_get(path, params=None, api_key=None, timeout=30):
+    """
+    Generic GET for The Odds API v4.
+    """
+    if api_key is None:
+        api_key = get_odds_api_key()
+
+    url = ODDS_API_BASE_URL.rstrip("/") + "/" + path.lstrip("/")
+    params = dict(params or {})
+    params["apiKey"] = api_key
+
+    resp = requests.get(url, params=params, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+def fetch_odds_for_date(
+    game_date_str,
+    sport_key="basketball_nba",
+    region="us",
+    bookmaker_preference=None,
+    api_key=None,
+):
+    """
+    Fetch moneyline + spread odds for a given NBA date from The Odds API v4.
+
+    Returns:
+      odds_dict = {
+        (home_team, away_team): {
+            "home_ml": ...,
+            "away_ml": ...,
+            "home_spread": ...,
+        },
+        ...
+      }
+    """
+    if api_key is None:
+        api_key = get_odds_api_key()
+
+    if bookmaker_preference is None:
+        # We'll prefer these books if present; otherwise take first
+        bookmaker_preference = ["draftkings", "fanduel", "betmgm"]
+
+    # Convert MM/DD/YYYY to ISO boundaries for that day
+    dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
+    from_iso = dt.strftime("%Y-%m-%dT00:00:00Z")
+    to_iso = dt.strftime("%Y-%m-%dT23:59:59Z")
+
+    params = {
+        "regions": region,                   # US books
+        "markets": "h2h,spreads",           # moneyline + spreads
+        "oddsFormat": "american",           # so prices are -110 / +105, etc.
+        "dateFormat": "iso",
+        "commenceTimeFrom": from_iso,
+        "commenceTimeTo": to_iso,
+    }
+
+    events = odds_get(f"sports/{sport_key}/odds", params=params, api_key=api_key)
+
+    odds_dict = {}
+
+    for ev in events:
+        home_team = ev["home_team"]
+        away_team = ev["away_team"]
+        bookmakers = ev.get("bookmakers", []) or []
+
+        if not bookmakers:
+            continue
+
+        # Pick best bookmaker (or just first if none preferred)
+        chosen = None
+        by_key = {b["key"]: b for b in bookmakers if "key" in b}
+        for bk in bookmaker_preference:
+            if bk in by_key:
+                chosen = by_key[bk]
+                break
+        if chosen is None:
+            chosen = bookmakers[0]
+
+        home_ml = None
+        away_ml = None
+        home_spread = None
+
+        for m in chosen.get("markets", []):
+            mkey = m.get("key")
+            outcomes = m.get("outcomes", []) or []
+
+            # Moneyline / head-to-head
+            if mkey == "h2h":
+                for o in outcomes:
+                    name = o.get("name")
+                    price = o.get("price")
+                    if name == home_team:
+                        home_ml = price
+                    elif name == away_team:
+                        away_ml = price
+
+            # Point spread
+            elif mkey == "spreads":
+                for o in outcomes:
+                    name = o.get("name")
+                    point = o.get("point")
+                    # price = o.get("price")  # available if you want it
+                    if name == home_team:
+                        home_spread = point
+
+        odds_dict[(home_team, away_team)] = {
+            "home_ml": home_ml,
+            "away_ml": away_ml,
+            "home_spread": home_spread,
+        }
+
+    return odds_dict
 
 # -----------------------------
 # BallDontLie low-level client
