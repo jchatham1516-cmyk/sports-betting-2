@@ -3990,7 +3990,7 @@ spread_result = predict_spread(
 
 spread_result
 
-pip install nba_api
+
 
 from nba_api.stats.endpoints import leaguedashteamstats
 import pandas as pd
@@ -4263,7 +4263,7 @@ games_today = [
 slate_df = run_daily_slate(games_today)
 slate_df
 
-pip install nba_api
+
 
 games_today = [
     {
@@ -5081,7 +5081,6 @@ def run_daily_card(game_date_str):
     results_df = pd.DataFrame(results)
     return results_df
 
-pip install nba_api
 
 # ==== IMPORTS ====
 import pandas as pd
@@ -5846,8 +5845,8 @@ def run_x_days_stats(
 
     for i in range(num_days):
         day = current_date + timedelta(days=i)
-        date_iso = day.strftime("%Y-%m-%d")   # for dict keys
-        date_nba = day.strftime("%m/%d/%Y")   # for ScoreboardV2
+        date_iso = day.strftime("Y-m-d")   # for dict keys
+        date_nba = day.strftime("m/d/Y")   # for ScoreboardV2
 
         print("\n==============================")
         print(f"Running stats for {date_iso}")
