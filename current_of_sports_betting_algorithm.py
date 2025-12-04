@@ -100,7 +100,10 @@ def fetch_odds_for_date(
     api_key=None,
 ):
     """
-    Fetch moneyline + spread odds for a given NBA date from The Odds API v4.
+    Fetch moneyline + spread odds for NBA games from The Odds API v4.
+
+    We *don't* filter by date here – we get all upcoming NBA odds and let the
+    model match by (home_team, away_team) when it loops through today's games.
 
     Returns:
       odds_dict = {
@@ -118,10 +121,6 @@ def fetch_odds_for_date(
     if bookmaker_preference is None:
         bookmaker_preference = ["draftkings", "fanduel", "betmgm"]
 
-    # Parse the date we care about
-    target_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
-
-    # 1) Get ALL upcoming NBA odds (no commenceTimeFrom/To filter)
     params = {
         "regions": region,
         "markets": "h2h,spreads",
@@ -134,20 +133,6 @@ def fetch_odds_for_date(
     odds_dict = {}
 
     for ev in events:
-        # Filter to only games on target_date using commence_time
-        comm = ev.get("commence_time")
-        if not comm:
-            continue
-        try:
-            # Example format: "2025-12-04T01:30:00Z"
-            ev_dt = datetime.fromisoformat(comm.replace("Z", "+00:00"))
-            ev_date = ev_dt.date()
-        except Exception:
-            continue
-
-        if ev_date != target_date:
-            continue  # skip games not on our day
-
         home_team = ev["home_team"]
         away_team = ev["away_team"]
         bookmakers = ev.get("bookmakers", []) or []
@@ -155,7 +140,7 @@ def fetch_odds_for_date(
         if not bookmakers:
             continue
 
-        # Pick best bookmaker (or just first if none preferred)
+        # Prefer certain books if present, otherwise just take the first
         chosen = None
         by_key = {b["key"]: b for b in bookmakers if "key" in b}
         for bk in bookmaker_preference:
@@ -173,8 +158,8 @@ def fetch_odds_for_date(
             mkey = m.get("key")
             outcomes = m.get("outcomes", []) or []
 
-            # Moneyline
             if mkey == "h2h":
+                # moneyline
                 for o in outcomes:
                     name = o.get("name")
                     price = o.get("price")
@@ -183,8 +168,8 @@ def fetch_odds_for_date(
                     elif name == away_team:
                         away_ml = price
 
-            # Spread
             elif mkey == "spreads":
+                # spread
                 for o in outcomes:
                     name = o.get("name")
                     point = o.get("point")
@@ -197,10 +182,10 @@ def fetch_odds_for_date(
             "home_spread": home_spread,
         }
 
-    print(f"[fetch_odds_for_date] Built odds for {len(odds_dict)} games on {game_date_str}")
-    # Quick debug sample of keys:
+    print(f"[fetch_odds_for_date] Built odds entries for {len(odds_dict)} games.")
     print("[fetch_odds_for_date] Sample keys:", list(odds_dict.keys())[:5])
     return odds_dict
+
 # -----------------------------
 # BallDontLie low-level client
 # -----------------------------
@@ -664,6 +649,17 @@ def run_daily_probs_for_date(
     edge_threshold=0.03,
     lam=0.20,
 ):
+    key = (home_name, away_name)
+odds_info = odds_dict.get(key)
+
+if odds_info is None:
+    # debug: show mismatch if any
+    print(f"[run_daily] No odds found for {home_name} vs {away_name}")
+    odds_info = {}
+
+home_ml = odds_info.get("home_ml")
+away_ml = odds_info.get("away_ml")
+
     """
     Run the full model for one NBA date.
 
