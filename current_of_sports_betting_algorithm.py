@@ -2957,7 +2957,7 @@ def calc_stats(df):
 
     return df
 
-df  calc_stats(df)
+df = calc_stats(df)
 df[["PTS_home", "PTS_away", "home_ORtg", "away_ORtg", "home_eFG", "home_win"]].head()
 
 df_features  df.copy()
