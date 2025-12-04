@@ -27,6 +27,63 @@ from datetime import datetime, date
 import numpy as np
 import pandas as pd
 import requests
+def fetch_odds_for_date_from_csv(game_date_str):
+    """
+    Load odds for a given date from a local CSV file in the 'odds' folder.
+
+    Expects a file named:
+        odds/odds_MM-DD-YYYY.csv
+
+    with columns:
+        date, home, away, home_ml, away_ml, home_spread
+    """
+    fname = os.path.join("odds", f"odds_{game_date_str.replace('/', '-')}.csv")
+    if not os.path.exists(fname):
+        print(f"[odds_csv] No odds file found at {fname}. Using 0.5 market defaults.")
+        return {}, {}
+
+    print(f"[odds_csv] Loading odds from {fname}")
+    df = pd.read_csv(fname)
+
+    required_cols = {"home", "away", "home_ml", "away_ml"}
+    if not required_cols.issubset(set(df.columns)):
+        raise ValueError(
+            f"Odds CSV {fname} must contain columns: {required_cols}. "
+            f"Found: {list(df.columns)}"
+        )
+
+    odds_dict = {}
+    spreads_dict = {}
+
+    for _, row in df.iterrows():
+        home = str(row["home"]).strip()
+        away = str(row["away"]).strip()
+        key = (home, away)
+
+        home_ml = row["home_ml"]
+        away_ml = row["away_ml"]
+        home_spread = row["home_spread"] if "home_spread" in df.columns else None
+
+        # Convert to float if not null
+        home_ml = float(home_ml) if pd.notna(home_ml) else None
+        away_ml = float(away_ml) if pd.notna(away_ml) else None
+        if home_spread is not None and pd.notna(home_spread):
+            home_spread = float(home_spread)
+        else:
+            home_spread = None
+
+        odds_dict[key] = {
+            "home_ml": home_ml,
+            "away_ml": away_ml,
+            "home_spread": home_spread,
+        }
+        if home_spread is not None:
+            spreads_dict[key] = home_spread
+
+    print(f"[odds_csv] Built odds for {len(odds_dict)} games.")
+    print("[odds_csv] Sample keys:", list(odds_dict.keys())[:5])
+    return odds_dict, spreads_dict
+
 SPORTSBOOK_BASE_URL = "https://sportsbook-api2.p.rapidapi.com"
 SPORTSBOOK_HOST = "sportsbook-api2.p.rapidapi.com"
 
