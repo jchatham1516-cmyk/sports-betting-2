@@ -4,3 +4,10 @@ requests
 nba_api
 jupyter
 nbconvert
+nba_api
+pandas
+numpy
+requests
+scikit-learn
+matplotlib
+plotly
