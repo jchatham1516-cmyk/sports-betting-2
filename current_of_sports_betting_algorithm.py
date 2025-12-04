@@ -19,9 +19,11 @@ import sys
 import math
 import argparse
 from datetime import datetime, date
+import time  # <-- ADD THIS
 
 import numpy as np
 import pandas as pd
+import requests  # <-- ADD THIS
 
 from nba_api.stats.endpoints import leaguedashteamstats, ScoreboardV2
 
@@ -60,20 +62,53 @@ def american_to_implied_prob(odds):
 # Team stats
 # -----------------------------
 
-def fetch_team_advanced_stats(season=None):
+def fetch_team_advanced_stats(season=None, max_retries=3, pause_seconds=5):
     """
     Fetch league-wide team advanced stats for a given season and return a DataFrame
     with columns standardized to:
       TEAM_ID, TEAM_NAME, ORtg, DRtg, eFG, TOV, AST, ORB, DRB, FTAr
+
+    Retries a few times if stats.nba.com times out.
     """
     if season is None:
         season = current_season_str()
 
-    stats = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        measure_type_detailed_defense="Advanced",
-        per_mode_detailed="PerGame",
-    ).get_data_frames()[0]
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            stats = leaguedashteamstats.LeagueDashTeamStats(
+                season=season,
+                measure_type_detailed_defense="Advanced",
+                per_mode_detailed="PerGame",
+            ).get_data_frames()[0]
+
+            # If we got here, request succeeded, break out of retry loop
+            last_exc = None
+            break
+
+        except requests.exceptions.ReadTimeout as e:
+            last_exc = e
+            print(
+                f"[fetch_team_advanced_stats] ReadTimeout talking to stats.nba.com "
+                f"(attempt {attempt}/{max_retries})."
+            )
+            if attempt < max_retries:
+                print(f"Sleeping {pause_seconds} seconds before retry...")
+                time.sleep(pause_seconds)
+        except Exception as e:
+            last_exc = e
+            print(
+                f"[fetch_team_advanced_stats] Error talking to stats.nba.com "
+                f"(attempt {attempt}/{max_retries}): {e}"
+            )
+            if attempt < max_retries:
+                print(f"Sleeping {pause_seconds} seconds before retry...")
+                time.sleep(pause_seconds)
+
+    if last_exc is not None:
+        raise RuntimeError(
+            f"Failed to fetch team stats for season {season} after {max_retries} attempts"
+        ) from last_exc
 
     # Keep a manageable subset of columns
     cols = [
@@ -110,6 +145,7 @@ def fetch_team_advanced_stats(season=None):
     stats["FTAr"] = 0.0
 
     return stats
+
 
 
 def find_team_row(team_name_input, stats_df):
@@ -342,17 +378,47 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
 # Schedule / games
 # -----------------------------
 
-def fetch_games_for_date(game_date_str, stats_df):
+def fetch_games_for_date(game_date_str, stats_df, max_retries=3, pause_seconds=5):
     """
     game_date_str format: 'MM/DD/YYYY'
     Returns a DataFrame with GAME_ID, HOME_TEAM_NAME, AWAY_TEAM_NAME
+
+    Retries a few times if stats.nba.com times out.
     """
-    sb = ScoreboardV2(
-        game_date=game_date_str,
-        league_id="00",
-        day_offset=0,
-    )
-    games_header = sb.get_data_frames()[0]  # GameHeader
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            sb = ScoreboardV2(
+                game_date=game_date_str,
+                league_id="00",
+                day_offset=0,
+            )
+            games_header = sb.get_data_frames()[0]  # GameHeader
+            last_exc = None
+            break
+        except requests.exceptions.ReadTimeout as e:
+            last_exc = e
+            print(
+                f"[fetch_games_for_date] ReadTimeout talking to stats.nba.com "
+                f"(attempt {attempt}/{max_retries})."
+            )
+            if attempt < max_retries:
+                print(f"Sleeping {pause_seconds} seconds before retry...")
+                time.sleep(pause_seconds)
+        except Exception as e:
+            last_exc = e
+            print(
+                f"[fetch_games_for_date] Error talking to stats.nba.com "
+                f"(attempt {attempt}/{max_retries}): {e}"
+            )
+            if attempt < max_retries:
+                print(f"Sleeping {pause_seconds} seconds before retry...")
+                time.sleep(pause_seconds)
+
+    if last_exc is not None:
+        raise RuntimeError(
+            f"Failed to fetch games for {game_date_str} after {max_retries} attempts"
+        ) from last_exc
 
     id_to_name = dict(zip(stats_df["TEAM_ID"], stats_df["TEAM_NAME"]))
 
@@ -546,14 +612,27 @@ def main(argv=None):
     odds_dict = {}
     spreads_dict = {}
 
-    season = current_season_str()
-    stats_df = fetch_team_advanced_stats(season=season)
-    results_df = run_daily_probs_for_date(
-        game_date=game_date,
-        odds_dict=odds_dict,
-        spreads_dict=spreads_dict,
-        stats_df=stats_df,
-    )
+           season = current_season_str()
+
+    try:
+        stats_df = fetch_team_advanced_stats(season=season)
+    except Exception as e:
+        print(f"Error: Failed to fetch team stats: {e}")
+        print("Exiting without predictions so the workflow can complete gracefully.")
+        return
+
+    try:
+        results_df = run_daily_probs_for_date(
+            game_date=game_date,
+            odds_dict=odds_dict,
+            spreads_dict=spreads_dict,
+            stats_df=stats_df,
+        )
+    except Exception as e:
+        print(f"Error: Failed to run daily model: {e}")
+        print("Exiting without predictions so the workflow can complete gracefully.")
+        return
+
 
     # Ensure output directory
     os.makedirs("results", exist_ok=True)
