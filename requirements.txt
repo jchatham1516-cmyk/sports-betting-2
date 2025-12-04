@@ -1,13 +1,5 @@
-pandas
-numpy
-requests
-nba_api
-jupyter
-nbconvert
 nba_api
 pandas
 numpy
-requests
-scikit-learn
-matplotlib
-plotly
+lxml
+html5lib
