@@ -9,7 +9,7 @@ Original file is located at
 
 from nba_api.stats.library.parameters import *
 
-endpoint_list = [
+endpoint_list  [
     "2AssistTracker",
     "AllPlayers",
     "AllStarBallotPredictor",
@@ -221,7 +221,7 @@ endpoint_list = [
     "WinProbabilityPBP",
 ]
 
-parameter_variations = {
+parameter_variations  {
     "GameEventID": {
         "default_py_value": "0",
         "parameter_value": "0",
@@ -958,14 +958,14 @@ parameter_variations = {
         "parameter_value": PlayTypeNullable.default,
         "parameter_error_value": 0,
     },
-    "PointDiff": {
-        "default_py_value": "PointDiff.default",
-        "parameter_value": PointDiff.default,
+    "PointDf": {
+        "default_py_value": "PointDf.default",
+        "parameter_value": PointDf.default,
         "parameter_error_value": 0,
     },
-    "PointDiffNullable": {
-        "default_py_value": "PointDiffNullable.default",
-        "parameter_value": PointDiffNullable.default,
+    "PointDfNullable": {
+        "default_py_value": "PointDfNullable.default",
+        "parameter_value": PointDfNullable.default,
         "parameter_error_value": 0,
     },
     "PORoundNullable": {
@@ -2155,7 +2155,7 @@ parameter_variations = {
     },
 }
 
-parameter_map = {
+parameter_map  {
     "ActiveFlag": {"nullable": {None: "ActiveFlagNullable"}, "non-nullable": {}},
     "AheadBehind": {
         "nullable": {
@@ -2229,8 +2229,8 @@ parameter_map = {
     "Division": {
         "nullable": {
             None: "DivisionSimpleNullable",
-            "((Atlantic)|(Central)|(Northwest)|(Pacific)|(Southeast)|(Southwest))?": "DivisionSimpleNullable",
-            "^((Atlantic)|(Central)|(Northwest)|(Pacific)|(Southeast)|(Southwest)|(East)|(West))?$": "DivisionNullable",
+            "((Atlantic)|(Central)|(Northwest)|(Pacic)|(Southeast)|(Southwest))?": "DivisionSimpleNullable",
+            "^((Atlantic)|(Central)|(Northwest)|(Pacic)|(Southeast)|(Southwest)|(East)|(West))?$": "DivisionNullable",
         },
         "non-nullable": {},
     },
@@ -2420,9 +2420,9 @@ parameter_map = {
         "nullable": {},
         "non-nullable": {"^(N)$": "PlusMinusNo", "^(Y)|(N)$": "PlusMinus"},
     },
-    "PointDiff": {
-        "nullable": {None: "PointDiffNullable"},
-        "non-nullable": {None: "PointDiff"},
+    "PointDf": {
+        "nullable": {None: "PointDfNullable"},
+        "non-nullable": {None: "PointDf"},
     },
     "Position": {
         "nullable": {
@@ -2619,7 +2619,7 @@ parameter_map = {
     },
     "VsDivision": {
         "nullable": {
-            "^((Atlantic)|(Central)|(Northwest)|(Pacific)|(Southeast)|(Southwest)|(East)|(West))?$": "VsDivisionNullable",
+            "^((Atlantic)|(Central)|(Northwest)|(Pacic)|(Southeast)|(Southwest)|(East)|(West))?$": "VsDivisionNullable",
             None: "VsDivisionNullable",
         },
         "non-nullable": {},
@@ -2877,41 +2877,41 @@ parameter_map = {
 
 def calc_stats(df):
     # Possessions estimate
-    df["poss_home"] = df["FGA_home"] + 0.44*df["FTA_home"] - df["OREB_home"] + df["TOV_home"]
-    df["poss_away"] = df["FGA_away"] + 0.44*df["FTA_away"] - df["OREB_away"] + df["TOV_away"]
+    df["poss_home"]  df["FGA_home"] + 0.44*df["FTA_home"] - df["OREB_home"] + df["TOV_home"]
+    df["poss_away"]  df["FGA_away"] + 0.44*df["FTA_away"] - df["OREB_away"] + df["TOV_away"]
 
     # Offensive & Defensive Rating
-    df["home_ORtg"] = (df["PTS_home"] / df["poss_home"]) * 100
-    df["away_ORtg"] = (df["PTS_away"] / df["poss_away"]) * 100
+    df["home_ORtg"]  (df["PTS_home"] / df["poss_home"]) * 100
+    df["away_ORtg"]  (df["PTS_away"] / df["poss_away"]) * 100
 
-    df["home_DRtg"] = (df["PTS_away"] / df["poss_home"]) * 100
-    df["away_DRtg"] = (df["PTS_home"] / df["poss_away"]) * 100
+    df["home_DRtg"]  (df["PTS_away"] / df["poss_home"]) * 100
+    df["away_DRtg"]  (df["PTS_home"] / df["poss_away"]) * 100
 
     # eFG%
-    df["home_eFG"] = (df["FGM_home"] + 0.5 * df["FG3M_home"]) / df["FGA_home"]
-    df["away_eFG"] = (df["FGM_away"] + 0.5 * df["FG3M_away"]) / df["FGA_away"]
+    df["home_eFG"]  (df["FGM_home"] + 0.5 * df["FG3M_home"]) / df["FGA_home"]
+    df["away_eFG"]  (df["FGM_away"] + 0.5 * df["FG3M_away"]) / df["FGA_away"]
 
     # TOV%
-    df["home_TOV"] = df["TOV_home"] / df["poss_home"]
-    df["away_TOV"] = df["TOV_away"] / df["poss_away"]
+    df["home_TOV"]  df["TOV_home"] / df["poss_home"]
+    df["away_TOV"]  df["TOV_away"] / df["poss_away"]
 
     # Assist Rate
-    df["home_AST"] = df["AST_home"] / df["FGM_home"]
-    df["away_AST"] = df["AST_away"] / df["FGM_away"]
+    df["home_AST"]  df["AST_home"] / df["FGM_home"]
+    df["away_AST"]  df["AST_away"] / df["FGM_away"]
 
     # Rebounding %
-    df["home_ORB"] = df["OREB_home"] / (df["OREB_home"] + df["DREB_away"])
-    df["away_ORB"] = df["OREB_away"] / (df["OREB_away"] + df["DREB_home"])
+    df["home_ORB"]  df["OREB_home"] / (df["OREB_home"] + df["DREB_away"])
+    df["away_ORB"]  df["OREB_away"] / (df["OREB_away"] + df["DREB_home"])
 
-    df["home_DRB"] = df["DREB_home"] / (df["DREB_home"] + df["OREB_away"])
-    df["away_DRB"] = df["DREB_away"] / (df["DREB_away"] + df["OREB_home"])
+    df["home_DRB"]  df["DREB_home"] / (df["DREB_home"] + df["OREB_away"])
+    df["away_DRB"]  df["DREB_away"] / (df["DREB_away"] + df["OREB_home"])
 
     # FT Attempt Rate
-    df["home_FTAr"] = df["FTA_home"] / df["FGA_home"]
-    df["away_FTAr"] = df["FTA_away"] / df["FGA_away"]
+    df["home_FTAr"]  df["FTA_home"] / df["FGA_home"]
+    df["away_FTAr"]  df["FTA_away"] / df["FGA_away"]
 
     # Home win label
-    df["home_win"] = (df["PTS_home"] > df["PTS_away"]).astype(int)
+    df["home_win"]  (df["PTS_home"] > df["PTS_away"]).astype(int)
 
     return df
 
@@ -2919,61 +2919,61 @@ df.columns
 
 def calc_stats(df):
     # --- Possessions estimate ---
-    df["poss_home"] = df["FGA_home"] + 0.44*df["FTA_home"] - df["OREB_home"] + df["TOV_home"]
-    df["poss_away"] = df["FGA_away"] + 0.44*df["FTA_away"] - df["OREB_away"] + df["TOV_away"]
+    df["poss_home"]  df["FGA_home"] + 0.44*df["FTA_home"] - df["OREB_home"] + df["TOV_home"]
+    df["poss_away"]  df["FGA_away"] + 0.44*df["FTA_away"] - df["OREB_away"] + df["TOV_away"]
 
     # --- Offensive & Defensive Rating (per 100 possessions) ---
-    df["home_ORtg"] = (df["PTS_home"] / df["poss_home"]) * 100
-    df["away_ORtg"] = (df["PTS_away"] / df["poss_away"]) * 100
+    df["home_ORtg"]  (df["PTS_home"] / df["poss_home"]) * 100
+    df["away_ORtg"]  (df["PTS_away"] / df["poss_away"]) * 100
 
-    df["home_DRtg"] = (df["PTS_away"] / df["poss_home"]) * 100
-    df["away_DRtg"] = (df["PTS_home"] / df["poss_away"]) * 100
+    df["home_DRtg"]  (df["PTS_away"] / df["poss_home"]) * 100
+    df["away_DRtg"]  (df["PTS_home"] / df["poss_away"]) * 100
 
     # --- eFG% ---
-    df["home_eFG"] = (df["FGM_home"] + 0.5 * df["FG3M_home"]) / df["FGA_home"]
-    df["away_eFG"] = (df["FGM_away"] + 0.5 * df["FG3M_away"]) / df["FGA_away"]
+    df["home_eFG"]  (df["FGM_home"] + 0.5 * df["FG3M_home"]) / df["FGA_home"]
+    df["away_eFG"]  (df["FGM_away"] + 0.5 * df["FG3M_away"]) / df["FGA_away"]
 
     # --- Turnover Rate (per possession) ---
-    df["home_TOV"] = df["TOV_home"] / df["poss_home"]
-    df["away_TOV"] = df["TOV_away"] / df["poss_away"]
+    df["home_TOV"]  df["TOV_home"] / df["poss_home"]
+    df["away_TOV"]  df["TOV_away"] / df["poss_away"]
 
     # --- Assist Rate (AST per made FG) ---
-    df["home_AST"] = df["AST_home"] / df["FGM_home"]
-    df["away_AST"] = df["AST_away"] / df["FGM_away"]
+    df["home_AST"]  df["AST_home"] / df["FGM_home"]
+    df["away_AST"]  df["AST_away"] / df["FGM_away"]
 
     # --- Rebounding % (share of available rebounds) ---
-    df["home_ORB"] = df["OREB_home"] / (df["OREB_home"] + df["DREB_away"])
-    df["away_ORB"] = df["OREB_away"] / (df["OREB_away"] + df["DREB_home"])
+    df["home_ORB"]  df["OREB_home"] / (df["OREB_home"] + df["DREB_away"])
+    df["away_ORB"]  df["OREB_away"] / (df["OREB_away"] + df["DREB_home"])
 
-    df["home_DRB"] = df["DREB_home"] / (df["DREB_home"] + df["OREB_away"])
-    df["away_DRB"] = df["DREB_away"] / (df["DREB_away"] + df["OREB_home"])
+    df["home_DRB"]  df["DREB_home"] / (df["DREB_home"] + df["OREB_away"])
+    df["away_DRB"]  df["DREB_away"] / (df["DREB_away"] + df["OREB_home"])
 
     # --- Free Throw Attempt Rate ---
-    df["home_FTAr"] = df["FTA_home"] / df["FGA_home"]
-    df["away_FTAr"] = df["FTA_away"] / df["FGA_away"]
+    df["home_FTAr"]  df["FTA_home"] / df["FGA_home"]
+    df["away_FTAr"]  df["FTA_away"] / df["FGA_away"]
 
     # --- Home win label (target for the model) ---
-    df["home_win"] = (df["PTS_home"] > df["PTS_away"]).astype(int)
+    df["home_win"]  (df["PTS_home"] > df["PTS_away"]).astype(int)
 
     return df
 
-df = calc_stats(df)
+df  calc_stats(df)
 df[["PTS_home", "PTS_away", "home_ORtg", "away_ORtg", "home_eFG", "home_win"]].head()
 
-df_features = df.copy()
+df_features  df.copy()
 
-df_features["Δ_ORtg"] = df_features["home_ORtg"] - df_features["away_ORtg"]
-df_features["Δ_DRtg"] = df_features["away_DRtg"] - df_features["home_DRtg"]
-df_features["Δ_eFG"]  = df_features["home_eFG"]  - df_features["away_eFG"]
-df_features["Δ_TOV"]  = df_features["away_TOV"]  - df_features["home_TOV"]
-df_features["Δ_AST"]  = df_features["home_AST"]  - df_features["away_AST"]
-df_features["Δ_ORB"]  = df_features["home_ORB"]  - df_features["away_ORB"]
-df_features["Δ_DRB"]  = df_features["home_DRB"]  - df_features["away_DRB"]
-df_features["Δ_FTAr"] = df_features["home_FTAr"] - df_features["away_FTAr"]
+df_features["Δ_ORtg"]  df_features["home_ORtg"] - df_features["away_ORtg"]
+df_features["Δ_DRtg"]  df_features["away_DRtg"] - df_features["home_DRtg"]
+df_features["Δ_eFG"]   df_features["home_eFG"]  - df_features["away_eFG"]
+df_features["Δ_TOV"]   df_features["away_TOV"]  - df_features["home_TOV"]
+df_features["Δ_AST"]   df_features["home_AST"]  - df_features["away_AST"]
+df_features["Δ_ORB"]   df_features["home_ORB"]  - df_features["away_ORB"]
+df_features["Δ_DRB"]   df_features["home_DRB"]  - df_features["away_DRB"]
+df_features["Δ_FTAr"]  df_features["home_FTAr"] - df_features["away_FTAr"]
 
-df_features["Home"] = 1
+df_features["Home"]  1
 
-feature_cols = [
+feature_cols  [
     "Home",
     "Δ_ORtg",
     "Δ_DRtg",
@@ -2985,30 +2985,30 @@ feature_cols = [
     "Δ_FTAr",
 ]
 
-target_col = "home_win"
+target_col  "home_win"
 
-X = df_features[feature_cols]
-y = df_features[target_col]
+X  df_features[feature_cols]
+y  df_features[target_col]
 
 X.head()
 
-# Build feature differences (Home – Away or Away – Home depending on direction)
-df_features = df.copy()
+# Build feature dferences (Home – Away or Away – Home depending on direction)
+df_features  df.copy()
 
-df_features["Δ_ORtg"] = df_features["home_ORtg"] - df_features["away_ORtg"]
-df_features["Δ_DRtg"] = df_features["away_DRtg"] - df_features["home_DRtg"]  # lower DRtg = better
-df_features["Δ_eFG"]  = df_features["home_eFG"]  - df_features["away_eFG"]
-df_features["Δ_TOV"]  = df_features["away_TOV"]  - df_features["home_TOV"]   # fewer TOV is better
-df_features["Δ_AST"]  = df_features["home_AST"]  - df_features["away_AST"]
-df_features["Δ_ORB"]  = df_features["home_ORB"]  - df_features["away_ORB"]
-df_features["Δ_DRB"]  = df_features["home_DRB"]  - df_features["away_DRB"]
-df_features["Δ_FTAr"] = df_features["home_FTAr"] - df_features["away_FTAr"]
+df_features["Δ_ORtg"]  df_features["home_ORtg"] - df_features["away_ORtg"]
+df_features["Δ_DRtg"]  df_features["away_DRtg"] - df_features["home_DRtg"]  # lower DRtg  better
+df_features["Δ_eFG"]   df_features["home_eFG"]  - df_features["away_eFG"]
+df_features["Δ_TOV"]   df_features["away_TOV"]  - df_features["home_TOV"]   # fewer TOV is better
+df_features["Δ_AST"]   df_features["home_AST"]  - df_features["away_AST"]
+df_features["Δ_ORB"]   df_features["home_ORB"]  - df_features["away_ORB"]
+df_features["Δ_DRB"]   df_features["home_DRB"]  - df_features["away_DRB"]
+df_features["Δ_FTAr"]  df_features["home_FTAr"] - df_features["away_FTAr"]
 
 # Home advantage flag
-df_features["Home"] = 1
+df_features["Home"]  1
 
 # Columns used to train the model
-feature_cols = [
+feature_cols  [
     "Home",
     "Δ_ORtg",
     "Δ_DRtg",
@@ -3020,11 +3020,11 @@ feature_cols = [
     "Δ_FTAr",
 ]
 
-target_col = "home_win"
+target_col  "home_win"
 
 # Split into X (features) and y (labels)
-X = df_features[feature_cols]
-y = df_features[target_col]
+X  df_features[feature_cols]
+y  df_features[target_col]
 
 X.head()
 
@@ -3035,35 +3035,35 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, roc_auc_score
 
 # X and y come from df_features earlier
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.25, random_state=42, stratify=y
+X_train, X_test, y_train, y_test  train_test_split(
+    X, y, test_size0.25, random_state42, stratyy
 )
 
 # 🔧 Pipeline: scale features then logistic regression
-model = make_pipeline(
+model  make_pipeline(
     StandardScaler(),
-    LogisticRegression(max_iter=1000)
+    LogisticRegression(max_iter1000)
 )
 
 model.fit(X_train, y_train)
 
-probs = model.predict_proba(X_test)[:, 1]
-preds = (probs >= 0.5).astype(int)
+probs  model.predict_proba(X_test)[:, 1]
+preds  (probs > 0.5).astype(int)
 
 print("Accuracy:", accuracy_score(y_test, preds))
 print("ROC AUC:", roc_auc_score(y_test, probs))
 
-coef_table = pd.DataFrame({
+coef_table  pd.DataFrame({
     'Feature': feature_cols,
     'Coefficient': model.coef_[0]
-}).sort_values("Coefficient", ascending=False)
+}).sort_values("Coefficient", ascendingFalse)
 
 coef_table
 
 import numpy as np
 
 def predict_game(model, home, away):
-    row = np.array([[
+    row  np.array([[
         1,
         home["ORtg"] - away["ORtg"],
         away["DRtg"] - home["DRtg"],
@@ -3082,19 +3082,19 @@ import numpy as np
 
 from nba_api.stats.endpoints import leaguedashteamstats
 
-def fetch_team_advanced_stats(season="2024-25"):
+def fetch_team_advanced_stats(season"2024-25"):
     """
     Fetch league-wide team advanced stats for a given season.
     Uses the columns actually returned by your LeagueDashTeamStats.
     """
-    stats = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        measure_type_detailed_defense="Advanced",
-        per_mode_detailed="PerGame"
+    stats  leaguedashteamstats.LeagueDashTeamStats(
+        seasonseason,
+        measure_type_detailed_defense"Advanced",
+        per_mode_detailed"PerGame"
     ).get_data_frames()[0]
 
     # Use only columns that exist in your output
-    cols = [
+    cols  [
         "TEAM_ID",
         "TEAM_NAME",
         "OFF_RATING",
@@ -3107,9 +3107,9 @@ def fetch_team_advanced_stats(season="2024-25"):
         # no FTA_RATE in your data
     ]
 
-    stats = stats[cols].copy()
+    stats  stats[cols].copy()
 
-    stats.rename(columns={
+    stats.rename(columns{
         "OFF_RATING": "ORtg",
         "DEF_RATING": "DRtg",
         "EFG_PCT": "eFG",
@@ -3117,11 +3117,11 @@ def fetch_team_advanced_stats(season="2024-25"):
         "AST_PCT": "AST",
         "OREB_PCT": "ORB",
         "DREB_PCT": "DRB",
-    }, inplace=True)
+    }, inplaceTrue)
 
     # We don't have FTAr (FTA_RATE) in this endpoint, so just set to 0 for now.
     # That means Δ_FTAr will be 0 in predictions and won't move the line.
-    stats["FTAr"] = 0.0
+    stats["FTAr"]  0.0
 
     return stats
 
@@ -3130,28 +3130,28 @@ from nba_api.stats.endpoints import leaguedashteamstats
 
 print(inspect.signature(leaguedashteamstats.LeagueDashTeamStats.__init__))
 
-test = leaguedashteamstats.LeagueDashTeamStats(
-    season="2024-25",
-    measure_type_detailed_defense="Advanced",
-    per_mode_detailed="PerGame"
+test  leaguedashteamstats.LeagueDashTeamStats(
+    season"2024-25",
+    measure_type_detailed_defense"Advanced",
+    per_mode_detailed"PerGame"
 ).get_data_frames()[0]
 
 print(test.columns)
 
 from nba_api.stats.endpoints import leaguedashteamstats
 
-def fetch_team_advanced_stats(season="2024-25"):
+def fetch_team_advanced_stats(season"2024-25"):
     """
     Fetch league-wide team advanced stats for a given season.
     Scales percentage stats to 0-1 range to match training data.
     """
-    stats = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        measure_type_detailed_defense="Advanced",
-        per_mode_detailed="PerGame"
+    stats  leaguedashteamstats.LeagueDashTeamStats(
+        seasonseason,
+        measure_type_detailed_defense"Advanced",
+        per_mode_detailed"PerGame"
     ).get_data_frames()[0]
 
-    cols = [
+    cols  [
         "TEAM_ID",
         "TEAM_NAME",
         "OFF_RATING",
@@ -3163,9 +3163,9 @@ def fetch_team_advanced_stats(season="2024-25"):
         "DREB_PCT",
     ]
 
-    stats = stats[cols].copy()
+    stats  stats[cols].copy()
 
-    stats.rename(columns={
+    stats.rename(columns{
         "OFF_RATING": "ORtg",
         "DEF_RATING": "DRtg",
         "EFG_PCT": "eFG",
@@ -3173,30 +3173,30 @@ def fetch_team_advanced_stats(season="2024-25"):
         "AST_PCT": "AST",
         "OREB_PCT": "ORB",
         "DREB_PCT": "DRB",
-    }, inplace=True)
+    }, inplaceTrue)
 
-    # 🔧 Scale percentage-like stats to 0–1 if they look like 0–100
+    # 🔧 Scale percentage-like stats to 0–1  they look like 0–100
     for col in ["eFG", "TOV", "AST", "ORB", "DRB"]:
-        if stats[col].max() > 2:   # if it's like 25, 60, etc.
-            stats[col] = stats[col] / 100.0
+         stats[col].max() > 2:   #  it's like 25, 60, etc.
+            stats[col]  stats[col] / 100.0
 
     # We don't have FTAr, so set to 0 for now
-    stats["FTAr"] = 0.0
+    stats["FTAr"]  0.0
 
     return stats
 
-team_stats_df = fetch_team_advanced_stats("2024-25")
+team_stats_df  fetch_team_advanced_stats("2024-25")
 team_stats_df.head()
 
-def find_team_row(team_name_input, stats_df=team_stats_df):
-    name = team_name_input.strip().lower()
+def find_team_row(team_name_input, stats_dfteam_stats_df):
+    name  team_name_input.strip().lower()
 
-    full_match = stats_df[stats_df["TEAM_NAME"].str.lower() == name]
-    if not full_match.empty:
+    full_match  stats_df[stats_df["TEAM_NAME"].str.lower()  name]
+     not full_match.empty:
         return full_match.iloc[0]
 
-    contains_match = stats_df[stats_df["TEAM_NAME"].str.lower().str.contains(name)]
-    if not contains_match.empty:
+    contains_match  stats_df[stats_df["TEAM_NAME"].str.lower().str.contains(name)]
+     not contains_match.empty:
         return contains_match.iloc[0]
 
     raise ValueError(f"Could not find a team matching: {team_name_input}")
@@ -3205,11 +3205,11 @@ find_team_row("Magic")
 
 import pandas as pd
 
-def build_feature_row_from_teams(home_team_name, away_team_name, stats_df=team_stats_df):
-    home = find_team_row(home_team_name, stats_df)
-    away = find_team_row(away_team_name, stats_df)
+def build_feature_row_from_teams(home_team_name, away_team_name, stats_dfteam_stats_df):
+    home  find_team_row(home_team_name, stats_df)
+    away  find_team_row(away_team_name, stats_df)
 
-    home_stats = {
+    home_stats  {
         "ORtg": home["ORtg"],
         "DRtg": home["DRtg"],
         "eFG": home["eFG"],
@@ -3220,7 +3220,7 @@ def build_feature_row_from_teams(home_team_name, away_team_name, stats_df=team_s
         "FTAr": home["FTAr"],
     }
 
-    away_stats = {
+    away_stats  {
         "ORtg": away["ORtg"],
         "DRtg": away["DRtg"],
         "eFG": away["eFG"],
@@ -3231,7 +3231,7 @@ def build_feature_row_from_teams(home_team_name, away_team_name, stats_df=team_s
         "FTAr": away["FTAr"],
     }
 
-    row = {
+    row  {
         "Home": 1,
         "Δ_ORtg": home_stats["ORtg"] - away_stats["ORtg"],
         "Δ_DRtg": away_stats["DRtg"] - home_stats["DRtg"],
@@ -3244,28 +3244,28 @@ def build_feature_row_from_teams(home_team_name, away_team_name, stats_df=team_s
     }
 
     # DataFrame with named columns for the pipeline
-    feature_df = pd.DataFrame([row], columns=feature_cols)
+    feature_df  pd.DataFrame([row], columnsfeature_cols)
     return feature_df, home["TEAM_NAME"], away["TEAM_NAME"]
 
-team_stats_df = fetch_team_advanced_stats("2024-25")
+team_stats_df  fetch_team_advanced_stats("2024-25")
 team_stats_df.head()
 
-def predict_matchup(home_team_name, away_team_name, model=model, stats_df=team_stats_df):
-    X_row, home_full, away_full = build_feature_row_from_teams(
+def predict_matchup(home_team_name, away_team_name, modelmodel, stats_dfteam_stats_df):
+    X_row, home_full, away_full  build_feature_row_from_teams(
         home_team_name, away_team_name, stats_df
     )
-    prob_home = model.predict_proba(X_row)[0, 1]
+    prob_home  model.predict_proba(X_row)[0, 1]
 
     print(f"Matchup: {home_full} (HOME) vs {away_full} (AWAY)")
     print(f"Model home win probability: {prob_home:.3f} ({prob_home*100:.1f}%)")
 
     return prob_home
 
-def predict_matchup(home_team_name, away_team_name, model=model, stats_df=team_stats_df):
-    X_row, home_full, away_full = build_feature_row_from_teams(
+def predict_matchup(home_team_name, away_team_name, modelmodel, stats_dfteam_stats_df):
+    X_row, home_full, away_full  build_feature_row_from_teams(
         home_team_name, away_team_name, stats_df
     )
-    prob_home = model.predict_proba(X_row)[0, 1]
+    prob_home  model.predict_proba(X_row)[0, 1]
 
     print(f"Matchup: {home_full} (HOME) vs {away_full} (AWAY)")
     print(f"Raw prob: {prob_home}")  # full precision
@@ -3277,14 +3277,14 @@ from nba_api.stats.endpoints import leaguedashteamstats
 import pandas as pd
 import numpy as np
 
-def fetch_team_advanced_stats(season="2024-25"):
-    stats = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        measure_type_detailed_defense="Advanced",
-        per_mode_detailed="PerGame"
+def fetch_team_advanced_stats(season"2024-25"):
+    stats  leaguedashteamstats.LeagueDashTeamStats(
+        seasonseason,
+        measure_type_detailed_defense"Advanced",
+        per_mode_detailed"PerGame"
     ).get_data_frames()[0]
 
-    cols = [
+    cols  [
         "TEAM_ID",
         "TEAM_NAME",
         "OFF_RATING",
@@ -3296,9 +3296,9 @@ def fetch_team_advanced_stats(season="2024-25"):
         "DREB_PCT",
     ]
 
-    stats = stats[cols].copy()
+    stats  stats[cols].copy()
 
-    stats.rename(columns={
+    stats.rename(columns{
         "OFF_RATING": "ORtg",
         "DEF_RATING": "DRtg",
         "EFG_PCT": "eFG",
@@ -3306,60 +3306,60 @@ def fetch_team_advanced_stats(season="2024-25"):
         "AST_PCT": "AST",
         "OREB_PCT": "ORB",
         "DREB_PCT": "DRB",
-    }, inplace=True)
+    }, inplaceTrue)
 
-    # Scale percentage-like stats to 0–1 if needed
+    # Scale percentage-like stats to 0–1  needed
     for col in ["eFG", "TOV", "ORB", "DRB"]:
-        if stats[col].max() > 2:
-            stats[col] = stats[col] / 100.0
+         stats[col].max() > 2:
+            stats[col]  stats[col] / 100.0
 
     # AST_PCT is already 0–100 or 0–1 depending on endpoint;
-    # check and scale if needed:
-    if stats["ORB"].max() <= 1.0 and stats["DRB"].max() <= 1.0 and stats["ORtg"].mean() > 50:
-        # heuristic: if ORB/DRB look like proper fractions and ORtg looks normal,
+    # check and scale  needed:
+     stats["ORB"].max() < 1.0 and stats["DRB"].max() < 1.0 and stats["ORtg"].mean() > 50:
+        # heuristic:  ORB/DRB look like proper fractions and ORtg looks normal,
         # then AST_PCT is probably 0–100:
-        if stats["ORB"].max() < 1.0 and stats["DRB"].max() < 1.0 and stats["ORtg"].mean() > 50:
-            if stats["AST"].max() > 2:
-                stats["AST"] = stats["AST"] / 100.0
+         stats["ORB"].max() < 1.0 and stats["DRB"].max() < 1.0 and stats["ORtg"].mean() > 50:
+             stats["AST"].max() > 2:
+                stats["AST"]  stats["AST"] / 100.0
 
     # We don't have FTAr, set to 0 for now
-    stats["FTAr"] = 0.0
+    stats["FTAr"]  0.0
 
     return stats
 
-team_stats_df = fetch_team_advanced_stats("2024-25")
+team_stats_df  fetch_team_advanced_stats("2024-25")
 team_stats_df.head()
 
-def find_team_row(team_name_input, stats_df=team_stats_df):
-    name = team_name_input.strip().lower()
+def find_team_row(team_name_input, stats_dfteam_stats_df):
+    name  team_name_input.strip().lower()
 
-    full_match = stats_df[stats_df["TEAM_NAME"].str.lower() == name]
-    if not full_match.empty:
+    full_match  stats_df[stats_df["TEAM_NAME"].str.lower()  name]
+     not full_match.empty:
         return full_match.iloc[0]
 
-    contains_match = stats_df[stats_df["TEAM_NAME"].str.lower().str.contains(name)]
-    if not contains_match.empty:
+    contains_match  stats_df[stats_df["TEAM_NAME"].str.lower().str.contains(name)]
+     not contains_match.empty:
         return contains_match.iloc[0]
 
     raise ValueError(f"Could not find a team matching: {team_name_input}")
 
 def season_matchup_score(home_row, away_row):
     # Extract stats using the columns we just defined/renamed
-    h = home_row
-    a = away_row
+    h  home_row
+    a  away_row
 
-    Δ_ORtg = h["ORtg"] - a["ORtg"]
-    Δ_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg better → flip
-    Δ_eFG  = h["eFG"]  - a["eFG"]
-    Δ_TOV  = a["TOV"]  - h["TOV"]   # fewer turnovers is better
-    Δ_AST  = h["AST"]  - a["AST"]
-    Δ_ORB  = h["ORB"]  - a["ORB"]
-    Δ_DRB  = h["DRB"]  - a["DRB"]
-    Δ_FTAr = h["FTAr"] - a["FTAr"]
+    Δ_ORtg  h["ORtg"] - a["ORtg"]
+    Δ_DRtg  a["DRtg"] - h["DRtg"]   # lower DRtg better → flip
+    Δ_eFG   h["eFG"]  - a["eFG"]
+    Δ_TOV   a["TOV"]  - h["TOV"]   # fewer turnovers is better
+    Δ_AST   h["AST"]  - a["AST"]
+    Δ_ORB   h["ORB"]  - a["ORB"]
+    Δ_DRB   h["DRB"]  - a["DRB"]
+    Δ_FTAr  h["FTAr"] - a["FTAr"]
 
-    home_edge = 2.0  # base home-court
+    home_edge  2.0  # base home-court
 
-    score = (
+    score  (
         home_edge
         + 0.08 * Δ_ORtg
         + 0.08 * Δ_DRtg
@@ -3373,16 +3373,16 @@ def season_matchup_score(home_row, away_row):
 
     return score
 
-def score_to_prob(score, lam=0.20):
+def score_to_prob(score, lam0.20):
     # lam controls steepness; 0.2 is a reasonable starting point
     return 1.0 / (1.0 + np.exp(-lam * score))
 
-def predict_season_matchup(home_team_name, away_team_name, stats_df=team_stats_df):
-    home_row = find_team_row(home_team_name, stats_df)
-    away_row = find_team_row(away_team_name, stats_df)
+def predict_season_matchup(home_team_name, away_team_name, stats_dfteam_stats_df):
+    home_row  find_team_row(home_team_name, stats_df)
+    away_row  find_team_row(away_team_name, stats_df)
 
-    score = season_matchup_score(home_row, away_row)
-    prob  = score_to_prob(score, lam=0.20)
+    score  season_matchup_score(home_row, away_row)
+    prob   score_to_prob(score, lam0.20)
 
     print(f"Matchup: {home_row['TEAM_NAME']} (HOME) vs {away_row['TEAM_NAME']} (AWAY)")
     print(f"Score (model units): {score:.3f}")
@@ -3394,14 +3394,14 @@ predict_season_matchup("Orlando Magic", "Boston Celtics")
 predict_season_matchup("Los Angeles Lakers", "Golden State Warriors")
 
 # How many "points" each type of missing player is worth
-INJURY_WEIGHTS = {
+INJURY_WEIGHTS  {
     "star": 3.0,      # main offensive/defensive engine
     "starter": 1.5,   # normal starter
     "rotation": 1.0,  # 6th–8th man
     "bench": 0.5,     # deep bench
 }
 
-def injury_adjustment(home_injuries=None, away_injuries=None):
+def injury_adjustment(home_injuriesNone, away_injuriesNone):
     """
     home_injuries / away_injuries:
       - list of tuples: [("Player Name", "role"), ...]
@@ -3411,52 +3411,52 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
     Missing players on the HOME team LOWER the score.
     Missing players on the AWAY team RAISE the score (helps home).
     """
-    home_injuries = home_injuries or []
-    away_injuries = away_injuries or []
+    home_injuries  home_injuries or []
+    away_injuries  away_injuries or []
 
     def parse_inj_list(lst, sign):
-        adj = 0.0
+        adj  0.0
         for item in lst:
-            if isinstance(item, dict):
-                role = item.get("role", "starter")
+             isinstance(item, dict):
+                role  item.get("role", "starter")
             else:
                 # assume tuple like ("Franz Wagner", "starter")
-                if len(item) >= 2:
-                    role = item[1]
+                 len(item) > 2:
+                    role  item[1]
                 else:
-                    role = "starter"
-            weight = INJURY_WEIGHTS.get(role, INJURY_WEIGHTS["starter"])
-            adj += sign * weight
+                    role  "starter"
+            weight  INJURY_WEIGHTS.get(role, INJURY_WEIGHTS["starter"])
+            adj + sign * weight
         return adj
 
     # Home injuries hurt the home team → negative sign
     # Away injuries hurt the away team → positive for home
-    total_adj = 0.0
-    total_adj += parse_inj_list(home_injuries, sign=-1.0)
-    total_adj += parse_inj_list(away_injuries, sign=+1.0)
+    total_adj  0.0
+    total_adj + parse_inj_list(home_injuries, sign-1.0)
+    total_adj + parse_inj_list(away_injuries, sign+1.0)
 
     return total_adj
 
 def predict_season_matchup_with_injuries(
     home_team_name,
     away_team_name,
-    home_injuries=None,
-    away_injuries=None,
-    stats_df=team_stats_df,
-    lam=0.20
+    home_injuriesNone,
+    away_injuriesNone,
+    stats_dfteam_stats_df,
+    lam0.20
 ):
     # get team rows
-    home_row = find_team_row(home_team_name, stats_df)
-    away_row = find_team_row(away_team_name, stats_df)
+    home_row  find_team_row(home_team_name, stats_df)
+    away_row  find_team_row(away_team_name, stats_df)
 
     # base score from stats
-    base_score = season_matchup_score(home_row, away_row)
-    base_prob  = score_to_prob(base_score, lam=lam)
+    base_score  season_matchup_score(home_row, away_row)
+    base_prob   score_to_prob(base_score, lamlam)
 
     # injury adjustment
-    inj_adj    = injury_adjustment(home_injuries, away_injuries)
-    adj_score  = base_score + inj_adj
-    adj_prob   = score_to_prob(adj_score, lam=lam)
+    inj_adj     injury_adjustment(home_injuries, away_injuries)
+    adj_score   base_score + inj_adj
+    adj_prob    score_to_prob(adj_score, lamlam)
 
     print(f"Matchup: {home_row['TEAM_NAME']} (HOME) vs {away_row['TEAM_NAME']} (AWAY)")
     print(f"Base score: {base_score:.3f}  → Base prob: {base_prob:.3f} ({base_prob*100:.1f}%)")
@@ -3465,10 +3465,10 @@ def predict_season_matchup_with_injuries(
 
     return adj_prob
 
-home_injuries = [
+home_injuries  [
     ("LeBron James", "star"),
 ]
-away_injuries = [
+away_injuries  [
     ("Stephen Curry", "star"),
     ("Draymond Green", "starter"),
 ]
@@ -3476,8 +3476,8 @@ away_injuries = [
 predict_season_matchup_with_injuries(
     "Los Angeles Lakers",
     "Golden State Warriors",
-    home_injuries=home_injuries,
-    away_injuries=away_injuries
+    home_injurieshome_injuries,
+    away_injuriesaway_injuries
 )
 
 def american_to_implied_prob(odds):
@@ -3487,8 +3487,8 @@ def american_to_implied_prob(odds):
       -200 -> 0.666...
       +150 -> 0.4
     """
-    odds = float(odds)
-    if odds < 0:
+    odds  float(odds)
+     odds < 0:
         return (-odds) / ((-odds) + 100.0)
     else:
         return 100.0 / (odds + 100.0)
@@ -3497,40 +3497,40 @@ def predict_with_injuries_and_odds(
     home_team_name,
     away_team_name,
     home_moneyline,
-    away_moneyline=None,
-    home_injuries=None,
-    away_injuries=None,
-    stats_df=team_stats_df,
-    lam=0.20,
-    edge_threshold=0.03  # 3 percentage points
+    away_moneylineNone,
+    home_injuriesNone,
+    away_injuriesNone,
+    stats_dfteam_stats_df,
+    lam0.20,
+    edge_threshold0.03  # 3 percentage points
 ):
     # 1) Get base score from stats
-    home_row = find_team_row(home_team_name, stats_df)
-    away_row = find_team_row(away_team_name, stats_df)
+    home_row  find_team_row(home_team_name, stats_df)
+    away_row  find_team_row(away_team_name, stats_df)
 
-    base_score = season_matchup_score(home_row, away_row)
-    base_prob  = score_to_prob(base_score, lam=lam)
+    base_score  season_matchup_score(home_row, away_row)
+    base_prob   score_to_prob(base_score, lamlam)
 
     # 2) Injury adjustment
-    inj_adj   = injury_adjustment(home_injuries, away_injuries)
-    adj_score = base_score + inj_adj
-    adj_prob  = score_to_prob(adj_score, lam=lam)
+    inj_adj    injury_adjustment(home_injuries, away_injuries)
+    adj_score  base_score + inj_adj
+    adj_prob   score_to_prob(adj_score, lamlam)
 
     # 3) Market implied probabilities from odds
-    home_imp_raw = american_to_implied_prob(home_moneyline)
+    home_imp_raw  american_to_implied_prob(home_moneyline)
 
-    if away_moneyline is not None:
-        away_imp_raw = american_to_implied_prob(away_moneyline)
-        total = home_imp_raw + away_imp_raw
+     away_moneyline is not None:
+        away_imp_raw  american_to_implied_prob(away_moneyline)
+        total  home_imp_raw + away_imp_raw
         # De-vig (normalize so they sum to 1)
-        home_imp = home_imp_raw / total
-        away_imp = away_imp_raw / total
+        home_imp  home_imp_raw / total
+        away_imp  away_imp_raw / total
     else:
-        home_imp = home_imp_raw
-        away_imp = 1.0 - home_imp  # rough approximation
+        home_imp  home_imp_raw
+        away_imp  1.0 - home_imp  # rough approximation
 
     # 4) Edge
-    edge_home = adj_prob - home_imp  # positive = model likes home side
+    edge_home  adj_prob - home_imp  # positive  model likes home side
 
     # 5) Print summary
     print(f"Matchup: {home_row['TEAM_NAME']} (HOME) vs {away_row['TEAM_NAME']} (AWAY)")
@@ -3539,7 +3539,7 @@ def predict_with_injuries_and_odds(
     print(f"Adjusted home win probability: {adj_prob:.3f} ({adj_prob*100:.1f}%)")
     print()
     print(f"Market home moneyline: {home_moneyline}")
-    if away_moneyline is not None:
+     away_moneyline is not None:
         print(f"Market away moneyline: {away_moneyline}")
         print(f"Raw implied probs (home, away): {home_imp_raw:.3f}, {away_imp_raw:.3f}")
         print(f"De-vigged implied probs (home, away): {home_imp:.3f}, {away_imp:.3f}")
@@ -3553,9 +3553,9 @@ def predict_with_injuries_and_odds(
     print(f"  Edge:        {edge_home:+.3f} ({edge_home*100:+.1f} percentage points)")
 
     # 6) Simple recommendation
-    if edge_home >= edge_threshold:
+     edge_home > edge_threshold:
         print(f"\n➡️  Model says: **VALUE ON HOME** (edge ≥ {edge_threshold:.3f})")
-    elif edge_home <= -edge_threshold:
+    el edge_home < -edge_threshold:
         print(f"\n➡️  Model says: **VALUE ON AWAY or fade home** (edge ≤ -{edge_threshold:.3f})")
     else:
         print(f"\n➡️  Model says: **NO CLEAR EDGE** (edge smaller than {edge_threshold:.3f})")
@@ -3569,25 +3569,25 @@ def predict_with_injuries_and_odds(
 predict_with_injuries_and_odds(
     "Orlando Magic",
     "Boston Celtics",
-    home_moneyline=+180,
-    away_moneyline=-220,
-    home_injuries=None,
-    away_injuries=None
+    home_moneyline+180,
+    away_moneyline-220,
+    home_injuriesNone,
+    away_injuriesNone
 )
 
-home_injuries = [("Paolo Banchero", "star")]
-away_injuries = []
+home_injuries  [("Paolo Banchero", "star")]
+away_injuries  []
 
 predict_with_injuries_and_odds(
     "Orlando Magic",
     "Boston Celtics",
-    home_moneyline=+220,
-    away_moneyline=-270,
-    home_injuries=home_injuries,
-    away_injuries=away_injuries
+    home_moneyline+220,
+    away_moneyline-270,
+    home_injurieshome_injuries,
+    away_injuriesaway_injuries
 )
 
-away_injuries = [
+away_injuries  [
     ("Matisse Thybulle", "rotation"),
     ("Scoot Henderson", "starter"),
     ("Jrue Holiday", "star"),
@@ -3595,21 +3595,21 @@ away_injuries = [
     ("Damian Lillard", "star"),
 ]
 
-home_injuries = [
+home_injuries  [
     ("Sam Merrill", "bench"),
     ("Max Strus", "starter"),
     ("Jarrett Allen", "star"),
     ("Larry Nance Jr.", "rotation"),
 ]
 
-pred_blazers_cavs = predict_with_injuries_and_odds(
-    home_team_name="Cleveland Cavaliers",
-    away_team_name="Portland Trail Blazers",
-    home_moneyline=-500,
-    away_moneyline=+350,
-    home_injuries=home_injuries,
-    away_injuries=away_injuries,
-    edge_threshold=0.03
+pred_blazers_cavs  predict_with_injuries_and_odds(
+    home_team_name"Cleveland Cavaliers",
+    away_team_name"Portland Trail Blazers",
+    home_moneyline-500,
+    away_moneyline+350,
+    home_injurieshome_injuries,
+    away_injuriesaway_injuries,
+    edge_threshold0.03
 )
 
 pred_blazers_cavs
@@ -3618,15 +3618,15 @@ from nba_api.stats.endpoints import leaguedashteamstats
 import pandas as pd
 import numpy as np
 
-def fetch_team_advanced_stats(season="2024-25"):
-    stats = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        measure_type_detailed_defense="Advanced",
-        per_mode_detailed="PerGame"
+def fetch_team_advanced_stats(season"2024-25"):
+    stats  leaguedashteamstats.LeagueDashTeamStats(
+        seasonseason,
+        measure_type_detailed_defense"Advanced",
+        per_mode_detailed"PerGame"
     ).get_data_frames()[0]
 
     # Only use the columns we care about
-    cols = [
+    cols  [
         "TEAM_ID",
         "TEAM_NAME",
         "OFF_RATING",
@@ -3637,10 +3637,10 @@ def fetch_team_advanced_stats(season="2024-25"):
         "OREB_PCT",
         "DREB_PCT",
     ]
-    stats = stats[cols].copy()
+    stats  stats[cols].copy()
 
     # Rename to the model's stat keys
-    stats.rename(columns={
+    stats.rename(columns{
         "OFF_RATING": "ORtg",
         "DEF_RATING": "DRtg",
         "EFG_PCT": "eFG",
@@ -3648,25 +3648,25 @@ def fetch_team_advanced_stats(season="2024-25"):
         "AST_PCT": "AST",
         "OREB_PCT": "ORB",
         "DREB_PCT": "DRB",
-    }, inplace=True)
+    }, inplaceTrue)
 
-    # Scale % stats to 0–1 if they arrive as 0–100
+    # Scale % stats to 0–1  they arrive as 0–100
     for col in ["eFG", "TOV", "AST", "ORB", "DRB"]:
-        if stats[col].max() > 2:
-            stats[col] = stats[col] / 100.0
+         stats[col].max() > 2:
+            stats[col]  stats[col] / 100.0
 
-    stats["FTAr"] = 0.0  # we don't have this from this endpoint
+    stats["FTAr"]  0.0  # we don't have this from this endpoint
 
     return stats
 
-team_stats_df = fetch_team_advanced_stats("2024-25")
+team_stats_df  fetch_team_advanced_stats("2024-25")
 print(team_stats_df.columns)
 team_stats_df.head()
 
-def score_to_spread(score, points_per_logit=1.3):
+def score_to_spread(score, points_per_logit1.3):
     """
     Convert model 'score' into predicted point spread.
-    Positive = home favorite.
+    Positive  home favorite.
 
     1.3 is a calibrated value so that:
     - Your score scale
@@ -3681,26 +3681,26 @@ def predict_spread(
     home_team_name,
     away_team_name,
     vegas_home_spread,
-    home_injuries=None,
-    away_injuries=None,
-    stats_df=team_stats_df,
-    points_per_logit=1.3
+    home_injuriesNone,
+    away_injuriesNone,
+    stats_dfteam_stats_df,
+    points_per_logit1.3
 ):
     """
     vegas_home_spread:
-      - Positive if home is favored (e.g., Cavs -9.5 => pass 9.5)
-      - Negative if home is an underdog (e.g., home +4.0 => pass -4.0)
+      - Positive  home is favored (e.g., Cavs -9.5 > pass 9.5)
+      - Negative  home is an underdog (e.g., home +4.0 > pass -4.0)
     """
-    home_row = find_team_row(home_team_name, stats_df)
-    away_row = find_team_row(away_team_name, stats_df)
+    home_row  find_team_row(home_team_name, stats_df)
+    away_row  find_team_row(away_team_name, stats_df)
 
-    base_score = season_matchup_score(home_row, away_row)
-    inj_adj    = injury_adjustment(home_injuries, away_injuries)
-    adj_score  = base_score + inj_adj
+    base_score  season_matchup_score(home_row, away_row)
+    inj_adj     injury_adjustment(home_injuries, away_injuries)
+    adj_score   base_score + inj_adj
 
-    pred_spread = score_to_spread(adj_score, points_per_logit)  # positive = home by X
+    pred_spread  score_to_spread(adj_score, points_per_logit)  # positive  home by X
 
-    edge = pred_spread - vegas_home_spread
+    edge  pred_spread - vegas_home_spread
 
     print(f"Matchup: {home_row['TEAM_NAME']} (HOME) vs {away_row['TEAM_NAME']} (AWAY)")
     print(f"Base score: {base_score:.3f}")
@@ -3710,9 +3710,9 @@ def predict_spread(
     print(f"Vegas spread (home): home by {vegas_home_spread:.1f} (home -{vegas_home_spread:.1f})")
     print(f"Edge vs spread:      {edge:+.2f} points (model - vegas)")
 
-    if edge > 1.0:
+     edge > 1.0:
         print("\n➡️  Model says: **Bet HOME spread**")
-    elif edge < -1.0:
+    el edge < -1.0:
         print("\n➡️  Model says: **Bet AWAY spread**")
     else:
         print("\n➡️  Model says: **No clear edge** (too close to call)")
@@ -3723,7 +3723,7 @@ def predict_spread(
     }
 
 # Use the same injury lists we set up earlier:
-away_injuries = [
+away_injuries  [
     ("Matisse Thybulle", "rotation"),
     ("Scoot Henderson", "starter"),
     ("Jrue Holiday", "star"),
@@ -3731,7 +3731,7 @@ away_injuries = [
     ("Damian Lillard", "star"),
 ]
 
-home_injuries = [
+home_injuries  [
     ("Sam Merrill", "bench"),
     ("Max Strus", "starter"),
     ("Jarrett Allen", "star"),
@@ -3739,43 +3739,43 @@ home_injuries = [
 ]
 
 # Example Vegas spread: Cavs -9.5 at home
-spread_result = predict_spread(
-    home_team_name="Cleveland Cavaliers",
-    away_team_name="Portland Trail Blazers",
-    vegas_home_spread=-9.5,
-    home_injuries=home_injuries,
-    away_injuries=away_injuries
+spread_result  predict_spread(
+    home_team_name"Cleveland Cavaliers",
+    away_team_name"Portland Trail Blazers",
+    vegas_home_spread-9.5,
+    home_injurieshome_injuries,
+    away_injuriesaway_injuries
 )
 
 spread_result
 
-spread_result = predict_spread(
-    home_team_name="Cleveland Cavaliers",
-    away_team_name="Portland Trail Blazers",
-    vegas_home_spread=-9.5,  # Cavs -9.5
-    home_injuries=home_injuries,
-    away_injuries=away_injuries
+spread_result  predict_spread(
+    home_team_name"Cleveland Cavaliers",
+    away_team_name"Portland Trail Blazers",
+    vegas_home_spread-9.5,  # Cavs -9.5
+    home_injurieshome_injuries,
+    away_injuriesaway_injuries
 )
 
 spread_result
 
-spread_result = predict_spread(
-    home_team_name="Cleveland Cavaliers",
-    away_team_name="Portland Trail Blazers",
-    vegas_home_spread=9.5,  # NOT -9.5
-    home_injuries=home_injuries,
-    away_injuries=away_injuries
+spread_result  predict_spread(
+    home_team_name"Cleveland Cavaliers",
+    away_team_name"Portland Trail Blazers",
+    vegas_home_spread9.5,  # NOT -9.5
+    home_injurieshome_injuries,
+    away_injuriesaway_injuries
 )
 
 spread_result
 
-away_injuries = [
+away_injuries  [
     ("Terance Mann", "rotation"),
     ("Haywood Highsmith", "rotation"),
     ("Cam Thomas", "starter"),
 ]
 
-home_injuries = [
+home_injuries  [
     ("Dalen Terry", "rotation", 0.5),
     ("Lachlan Olbrich", "bench", 0.2),
     ("Julian Phillips", "bench", 0.2),
@@ -3788,14 +3788,14 @@ home_injuries = [
     ("Coby White", "starter"),
 ]
 
-pred_nets_bulls = predict_with_injuries_and_odds(
-    home_team_name="Chicago Bulls",
-    away_team_name="Brooklyn Nets",
-    home_moneyline=-350,
-    away_moneyline=+255,
-    home_injuries=home_injuries,
-    away_injuries=away_injuries,
-    edge_threshold=0.03
+pred_nets_bulls  predict_with_injuries_and_odds(
+    home_team_name"Chicago Bulls",
+    away_team_name"Brooklyn Nets",
+    home_moneyline-350,
+    away_moneyline+255,
+    home_injurieshome_injuries,
+    away_injuriesaway_injuries,
+    edge_threshold0.03
 )
 
 pred_nets_bulls
@@ -3803,71 +3803,71 @@ pred_nets_bulls
 import pandas as pd
 
 def fetch_injury_report_espn():
-    url = "https://www.espn.com/nba/injuries"
+    url  "https://www.espn.com/nba/injuries"
 
     # Grab all tables on page
-    tables = pd.read_html(url)
-    if not tables:
+    tables  pd.read_html(url)
+     not tables:
         raise ValueError("read_html found no tables on the ESPN page.")
 
-    injury_tables = []
+    injury_tables  []
     for t in tables:
-        cols_norm = [str(c).strip().lower() for c in t.columns]
+        cols_norm  [str(c).strip().lower() for c in t.columns]
         # Look for something that looks like an injury table:
-        if any("player" in c or "name" in c for c in cols_norm):
+         any("player" in c or "name" in c for c in cols_norm):
             injury_tables.append(t)
 
-    # Fallback: if our filter didn't find anything, just use all tables
-    if not injury_tables:
-        injury_tables = tables
+    # Fallback:  our filter didn't find anything, just use all tables
+     not injury_tables:
+        injury_tables  tables
 
-    df = pd.concat(injury_tables, ignore_index=True)
+    df  pd.concat(injury_tables, ignore_indexTrue)
 
     # Normalize column names
-    df.columns = [str(c).strip().title() for c in df.columns]
+    df.columns  [str(c).strip().title() for c in df.columns]
 
     # Try to standardize to common names
-    rename_map = {}
+    rename_map  {}
     for c in df.columns:
-        lc = c.lower()
-        if "player" in lc or "name" in lc:
-            rename_map[c] = "Player"
-        elif "team" in lc:
-            rename_map[c] = "Team"
-        elif "pos" in lc or "position" in lc:
-            rename_map[c] = "Pos"
-        elif "status" in lc:
-            rename_map[c] = "Status"
-        elif "injury" in lc or "reason" in lc:
-            rename_map[c] = "Injury"
+        lc  c.lower()
+         "player" in lc or "name" in lc:
+            rename_map[c]  "Player"
+        el "team" in lc:
+            rename_map[c]  "Team"
+        el "pos" in lc or "position" in lc:
+            rename_map[c]  "Pos"
+        el "status" in lc:
+            rename_map[c]  "Status"
+        el "injury" in lc or "reason" in lc:
+            rename_map[c]  "Injury"
 
-    df = df.rename(columns=rename_map)
+    df  df.rename(columnsrename_map)
 
-    # Keep only what we care about if present
-    keep = [c for c in ["Player", "Team", "Pos", "Status", "Injury"] if c in df.columns]
-    df = df[keep].copy()
+    # Keep only what we care about  present
+    keep  [c for c in ["Player", "Team", "Pos", "Status", "Injury"]  c in df.columns]
+    df  df[keep].copy()
 
     return df
 
 # Try it
-injury_df = fetch_injury_report_espn()
+injury_df  fetch_injury_report_espn()
 injury_df.head()
 
-INJURY_ROLE_WEIGHTS = {
+INJURY_ROLE_WEIGHTS  {
     "star": 3.0,
     "starter": 1.5,
     "rotation": 1.0,
     "bench": 0.5,
 }
 
-INJURY_STATUS_MULTIPLIER = {
+INJURY_STATUS_MULTIPLIER  {
     "out": 1.0,
     "doubtful": 0.75,
     "questionable": 0.5,
     "probable": 0.25,
 }
 
-PLAYER_ROLES = {
+PLAYER_ROLES  {
     # Fill over time with your labels
     "Giannis Antetokounmpo": "star",
     "Damian Lillard": "star",
@@ -3878,77 +3878,77 @@ PLAYER_ROLES = {
 }
 
 def guess_role(player_name, pos):
-    if player_name in PLAYER_ROLES:
+     player_name in PLAYER_ROLES:
         return PLAYER_ROLES[player_name]
 
-    pos = (pos or "").upper()
-    if pos in ["PG", "SG", "SF", "PF", "G", "F"]:
+    pos  (pos or "").upper()
+     pos in ["PG", "SG", "SF", "PF", "G", "F"]:
         return "starter"
-    elif pos == "C":
+    el pos  "C":
         return "starter"
     else:
         return "rotation"
 
 def status_to_mult(status):
-    if not isinstance(status, str):
+     not isinstance(status, str):
         return 1.0
-    s = status.lower()
+    s  status.lower()
     for key, mult in INJURY_STATUS_MULTIPLIER.items():
-        if key in s:
+         key in s:
             return mult
     # default: treat as fully out
     return 1.0
 
 def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
     # ESPN usually uses full team names; we'll match loosely
-    team = team_name_or_abbrev.lower()
+    team  team_name_or_abbrev.lower()
 
-    # If there's a "Team" column, filter by contains
-    if "Team" in injury_df.columns:
-        mask = injury_df["Team"].astype(str).str.lower().str.contains(team)
-        df_team = injury_df[mask].copy()
+    #  there's a "Team" column, filter by contains
+     "Team" in injury_df.columns:
+        mask  injury_df["Team"].astype(str).str.lower().str.contains(team)
+        df_team  injury_df[mask].copy()
     else:
-        df_team = injury_df.iloc[0:0].copy()  # empty
+        df_team  injury_df.iloc[0:0].copy()  # empty
 
-    injuries = []
+    injuries  []
     for _, row in df_team.iterrows():
-        name = row.get("Player", "")
-        pos = row.get("Pos", "")
-        status = row.get("Status", "")
+        name  row.get("Player", "")
+        pos  row.get("Pos", "")
+        status  row.get("Status", "")
 
-        role = guess_role(name, pos)
-        mult = status_to_mult(status)
+        role  guess_role(name, pos)
+        mult  status_to_mult(status)
 
         injuries.append((name, role, mult))
 
     return injuries
 
-def injury_adjustment(home_injuries=None, away_injuries=None):
-    home_injuries = home_injuries or []
-    away_injuries = away_injuries or []
+def injury_adjustment(home_injuriesNone, away_injuriesNone):
+    home_injuries  home_injuries or []
+    away_injuries  away_injuries or []
 
     def total_weight(inj_list, sign):
-        total = 0.0
+        total  0.0
         for item in inj_list:
-            if len(item) == 3:
-                _, role, mult = item
-            elif len(item) == 2:
-                _, role = item
-                mult = 1.0
+             len(item)  3:
+                _, role, mult  item
+            el len(item)  2:
+                _, role  item
+                mult  1.0
             else:
                 continue
-            base = INJURY_ROLE_WEIGHTS.get(role, 1.0)
-            total += sign * base * mult
+            base  INJURY_ROLE_WEIGHTS.get(role, 1.0)
+            total + sign * base * mult
         return total
 
-    adj = 0.0
-    adj += total_weight(home_injuries, sign=-1.0)  # hurts home
-    adj += total_weight(away_injuries, sign=+1.0)  # hurts away (helps home)
+    adj  0.0
+    adj + total_weight(home_injuries, sign-1.0)  # hurts home
+    adj + total_weight(away_injuries, sign+1.0)  # hurts away (helps home)
     return adj
 
 def build_injuries_for_matchup_espn(home_team_name, away_team_name, injury_df):
-    home_inj = build_injury_list_for_team_espn(home_team_name, injury_df)
-    away_inj = build_injury_list_for_team_espn(away_team_name, injury_df)
+    home_inj  build_injury_list_for_team_espn(home_team_name, injury_df)
+    away_inj  build_injury_list_for_team_espn(away_team_name, injury_df)
 
     print(f"Home ({home_team_name}) injuries:")
     for inj in home_inj:
@@ -3960,32 +3960,32 @@ def build_injuries_for_matchup_espn(home_team_name, away_team_name, injury_df):
 
     return home_inj, away_inj
 
-injury_df = fetch_injury_report_espn()
+injury_df  fetch_injury_report_espn()
 
-home_injuries, away_injuries = build_injuries_for_matchup_espn(
+home_injuries, away_injuries  build_injuries_for_matchup_espn(
     "Chicago",    # or "Chicago Bulls"
     "Brooklyn",   # or "Brooklyn Nets"
     injury_df
 )
 
-pred_nets_bulls = predict_with_injuries_and_odds(
-    home_team_name="Chicago Bulls",
-    away_team_name="Brooklyn Nets",
-    home_moneyline=-350,
-    away_moneyline=+255,
-    home_injuries=home_injuries,
-    away_injuries=away_injuries,
-    edge_threshold=0.03
+pred_nets_bulls  predict_with_injuries_and_odds(
+    home_team_name"Chicago Bulls",
+    away_team_name"Brooklyn Nets",
+    home_moneyline-350,
+    away_moneyline+255,
+    home_injurieshome_injuries,
+    away_injuriesaway_injuries,
+    edge_threshold0.03
 )
 
 pred_nets_bulls
 
-spread_result = predict_spread(
-    home_team_name="Chicago Bulls",
-    away_team_name="Brooklyn Nets",
-    vegas_home_spread=8.5,   # change this to the real line
-    home_injuries=home_injuries,
-    away_injuries=away_injuries
+spread_result  predict_spread(
+    home_team_name"Chicago Bulls",
+    away_team_name"Brooklyn Nets",
+    vegas_home_spread8.5,   # change this to the real line
+    home_injurieshome_injuries,
+    away_injuriesaway_injuries
 )
 
 spread_result
@@ -3995,28 +3995,28 @@ spread_result
 from nba_api.stats.endpoints import leaguedashteamstats
 import pandas as pd
 
-def fetch_team_advanced_stats(season="2024-25"):
-    data = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        season_type_all_star="Regular Season",
-        per_mode_detailed="PerGame",
-        measure_type_detailed_defense="Advanced"   # <-- Correct Param for your NBA API Version
+def fetch_team_advanced_stats(season"2024-25"):
+    data  leaguedashteamstats.LeagueDashTeamStats(
+        seasonseason,
+        season_type_all_star"Regular Season",
+        per_mode_detailed"PerGame",
+        measure_type_detailed_defense"Advanced"   # <-- Correct Param for your NBA API Version
     )
 
-    df = data.get_data_frames()[0]
+    df  data.get_data_frames()[0]
     return df
 
-team_stats_df = fetch_team_advanced_stats("2024-25")
+team_stats_df  fetch_team_advanced_stats("2024-25")
 team_stats_df.head()
 
 import numpy as np
 
 # Use the raw df from nba_api
-raw_team_stats_df = team_stats_df.copy()
+raw_team_stats_df  team_stats_df.copy()
 
 def prepare_team_stats(df):
     # Keep only the columns we care about
-    cols = [
+    cols  [
         "TEAM_ID",
         "TEAM_NAME",
         "OFF_RATING",
@@ -4027,10 +4027,10 @@ def prepare_team_stats(df):
         "OREB_PCT",
         "DREB_PCT",
     ]
-    df = df[cols].copy()
+    df  df[cols].copy()
 
     # Rename to model-friendly names
-    df.rename(columns={
+    df.rename(columns{
         "OFF_RATING": "ORtg",
         "DEF_RATING": "DRtg",
         "EFG_PCT": "eFG",
@@ -4038,53 +4038,53 @@ def prepare_team_stats(df):
         "AST_PCT": "AST",
         "OREB_PCT": "ORB",
         "DREB_PCT": "DRB",
-    }, inplace=True)
+    }, inplaceTrue)
 
-    # Scale percentage-like stats to 0–1 if they are 0–100
+    # Scale percentage-like stats to 0–1  they are 0–100
     for col in ["eFG", "TOV", "AST", "ORB", "DRB"]:
-        if df[col].max() > 2:
-            df[col] = df[col] / 100.0
+         df[col].max() > 2:
+            df[col]  df[col] / 100.0
 
     # Fake FTAr for now
-    df["FTAr"] = 0.0
+    df["FTAr"]  0.0
 
     return df
 
-team_stats_df = prepare_team_stats(raw_team_stats_df)
+team_stats_df  prepare_team_stats(raw_team_stats_df)
 team_stats_df.head()
 
-def find_team_row(team_name_input, stats_df=team_stats_df):
-    name = team_name_input.strip().lower()
+def find_team_row(team_name_input, stats_dfteam_stats_df):
+    name  team_name_input.strip().lower()
 
     # exact match first
-    full_match = stats_df[stats_df["TEAM_NAME"].str.lower() == name]
-    if not full_match.empty:
+    full_match  stats_df[stats_df["TEAM_NAME"].str.lower()  name]
+     not full_match.empty:
         return full_match.iloc[0]
 
     # contains match (e.g. "Bulls", "Nets")
-    contains_match = stats_df[stats_df["TEAM_NAME"].str.lower().str.contains(name)]
-    if not contains_match.empty:
+    contains_match  stats_df[stats_df["TEAM_NAME"].str.lower().str.contains(name)]
+     not contains_match.empty:
         return contains_match.iloc[0]
 
     raise ValueError(f"Could not find a team matching: {team_name_input}")
 
 
 def season_matchup_score(home_row, away_row):
-    h = home_row
-    a = away_row
+    h  home_row
+    a  away_row
 
-    Δ_ORtg = h["ORtg"] - a["ORtg"]
-    Δ_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg is better
-    Δ_eFG  = h["eFG"]  - a["eFG"]
-    Δ_TOV  = a["TOV"]  - h["TOV"]   # fewer TOV is better
-    Δ_AST  = h["AST"]  - a["AST"]
-    Δ_ORB  = h["ORB"]  - a["ORB"]
-    Δ_DRB  = h["DRB"]  - a["DRB"]
-    Δ_FTAr = h["FTAr"] - a["FTAr"]
+    Δ_ORtg  h["ORtg"] - a["ORtg"]
+    Δ_DRtg  a["DRtg"] - h["DRtg"]   # lower DRtg is better
+    Δ_eFG   h["eFG"]  - a["eFG"]
+    Δ_TOV   a["TOV"]  - h["TOV"]   # fewer TOV is better
+    Δ_AST   h["AST"]  - a["AST"]
+    Δ_ORB   h["ORB"]  - a["ORB"]
+    Δ_DRB   h["DRB"]  - a["DRB"]
+    Δ_FTAr  h["FTAr"] - a["FTAr"]
 
-    home_edge = 2.0  # base home court
+    home_edge  2.0  # base home court
 
-    score = (
+    score  (
         home_edge
         + 0.08 * Δ_ORtg
         + 0.08 * Δ_DRtg
@@ -4099,50 +4099,50 @@ def season_matchup_score(home_row, away_row):
     return score
 
 
-def score_to_prob(score, lam=0.20):
+def score_to_prob(score, lam0.20):
     return 1.0 / (1.0 + np.exp(-lam * score))
 
-INJURY_ROLE_WEIGHTS = {
+INJURY_ROLE_WEIGHTS  {
     "star": 3.0,
     "starter": 1.5,
     "rotation": 1.0,
     "bench": 0.5,
 }
 
-def injury_adjustment(home_injuries=None, away_injuries=None):
+def injury_adjustment(home_injuriesNone, away_injuriesNone):
     """
     home_injuries / away_injuries are lists like:
       [("Player Name", "starter"), ("Another Guy", "star"), ...]
-    If you don't want to use injuries, just pass None or [].
+     you don't want to use injuries, just pass None or [].
     """
-    home_injuries = home_injuries or []
-    away_injuries = away_injuries or []
+    home_injuries  home_injuries or []
+    away_injuries  away_injuries or []
 
     def total_weight(inj_list, sign):
-        total = 0.0
+        total  0.0
         for item in inj_list:
-            if len(item) == 2:
-                _, role = item
-                mult = 1.0
-            elif len(item) == 3:
-                _, role, mult = item
+             len(item)  2:
+                _, role  item
+                mult  1.0
+            el len(item)  3:
+                _, role, mult  item
             else:
                 continue
-            base = INJURY_ROLE_WEIGHTS.get(role, 1.0)
-            total += sign * base * mult
+            base  INJURY_ROLE_WEIGHTS.get(role, 1.0)
+            total + sign * base * mult
         return total
 
-    adj = 0.0
+    adj  0.0
     # home injuries hurt home
-    adj += total_weight(home_injuries, sign=-1.0)
+    adj + total_weight(home_injuries, sign-1.0)
     # away injuries hurt away, help home
-    adj += total_weight(away_injuries, sign=+1.0)
+    adj + total_weight(away_injuries, sign+1.0)
 
     return adj
 
 def american_to_implied_prob(odds):
-    odds = float(odds)
-    if odds < 0:
+    odds  float(odds)
+     odds < 0:
         return (-odds) / ((-odds) + 100.0)
     else:
         return 100.0 / (odds + 100.0)
@@ -4150,26 +4150,26 @@ def american_to_implied_prob(odds):
 def model_game_prob(
     home_team_name,
     away_team_name,
-    home_injuries=None,
-    away_injuries=None,
-    stats_df=team_stats_df,
-    lam=0.20
+    home_injuriesNone,
+    away_injuriesNone,
+    stats_dfteam_stats_df,
+    lam0.20
 ):
-    home_row = find_team_row(home_team_name, stats_df)
-    away_row = find_team_row(away_team_name, stats_df)
+    home_row  find_team_row(home_team_name, stats_df)
+    away_row  find_team_row(away_team_name, stats_df)
 
-    base_score = season_matchup_score(home_row, away_row)
-    inj_adj    = injury_adjustment(home_injuries, away_injuries)
-    adj_score  = base_score + inj_adj
-    prob_home  = score_to_prob(adj_score, lam=lam)
+    base_score  season_matchup_score(home_row, away_row)
+    inj_adj     injury_adjustment(home_injuries, away_injuries)
+    adj_score   base_score + inj_adj
+    prob_home   score_to_prob(adj_score, lamlam)
 
     return prob_home, base_score, inj_adj, adj_score
 
 def run_daily_slate(
     games,
-    stats_df=team_stats_df,
-    edge_threshold=0.03,
-    lam=0.20
+    stats_dfteam_stats_df,
+    edge_threshold0.03,
+    lam0.20
 ):
     """
     games: list of dicts or tuples:
@@ -4177,46 +4177,46 @@ def run_daily_slate(
       tuple: ("Team A", "Team B", -150, 130)
     Injuries are optional — for now, we assume none.
     """
-    rows = []
+    rows  []
 
     for g in games:
-        if isinstance(g, dict):
-            home = g["home"]
-            away = g["away"]
-            home_ml = g["home_ml"]
-            away_ml = g["away_ml"]
-            home_injuries = g.get("home_injuries", None)
-            away_injuries = g.get("away_injuries", None)
+         isinstance(g, dict):
+            home  g["home"]
+            away  g["away"]
+            home_ml  g["home_ml"]
+            away_ml  g["away_ml"]
+            home_injuries  g.get("home_injuries", None)
+            away_injuries  g.get("away_injuries", None)
         else:
-            home, away, home_ml, away_ml = g
-            home_injuries, away_injuries = None, None
+            home, away, home_ml, away_ml  g
+            home_injuries, away_injuries  None, None
 
-        prob_home, base_score, inj_adj, adj_score = model_game_prob(
-            home_team_name=home,
-            away_team_name=away,
-            home_injuries=home_injuries,
-            away_injuries=away_injuries,
-            stats_df=stats_df,
-            lam=lam
+        prob_home, base_score, inj_adj, adj_score  model_game_prob(
+            home_team_namehome,
+            away_team_nameaway,
+            home_injurieshome_injuries,
+            away_injuriesaway_injuries,
+            stats_dfstats_df,
+            lamlam
         )
 
         # Market implied (de-vigged)
-        home_imp_raw = american_to_implied_prob(home_ml)
-        away_imp_raw = american_to_implied_prob(away_ml)
-        total = home_imp_raw + away_imp_raw
-        home_imp = home_imp_raw / total
-        away_imp = away_imp_raw / total
+        home_imp_raw  american_to_implied_prob(home_ml)
+        away_imp_raw  american_to_implied_prob(away_ml)
+        total  home_imp_raw + away_imp_raw
+        home_imp  home_imp_raw / total
+        away_imp  away_imp_raw / total
 
-        edge_home = prob_home - home_imp
-        edge_away = (1 - prob_home) - away_imp
+        edge_home  prob_home - home_imp
+        edge_away  (1 - prob_home) - away_imp
 
-        if edge_home >= edge_threshold and edge_home >= abs(edge_away):
-            rec = "Bet HOME ML"
-        elif edge_away >= edge_threshold and edge_away > abs(edge_home):
-            rec = "Bet AWAY ML"
+         edge_home > edge_threshold and edge_home > abs(edge_away):
+            rec  "Bet HOME ML"
+        el edge_away > edge_threshold and edge_away > abs(edge_home):
+            rec  "Bet AWAY ML"
             # for convenience
         else:
-            rec = "No clear ML edge"
+            rec  "No clear ML edge"
 
         rows.append({
             "home": home,
@@ -4233,12 +4233,12 @@ def run_daily_slate(
             "recommendation": rec,
         })
 
-    df = pd.DataFrame(rows)
-    df["abs_edge_home"] = df["edge_home"].abs()
-    df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
+    df  pd.DataFrame(rows)
+    df["abs_edge_home"]  df["edge_home"].abs()
+    df  df.sort_values("abs_edge_home", ascendingFalse).reset_index(dropTrue)
     return df
 
-games_today = [
+games_today  [
     {
         "home": "Chicago Bulls",
         "away": "Brooklyn Nets",
@@ -4260,12 +4260,12 @@ games_today = [
     # add more games here...
 ]
 
-slate_df = run_daily_slate(games_today)
+slate_df  run_daily_slate(games_today)
 slate_df
 
 
 
-games_today = [
+games_today  [
     {
         "home": "Chicago Bulls",
         "away": "Brooklyn Nets",
@@ -4296,48 +4296,48 @@ games_today = [
     "away_injuries": [("Victor Wembanyama", "star")],
 }
 
-slate_df = run_daily_slate(games_today)
+slate_df  run_daily_slate(games_today)
 slate_df
 
 from nba_api.stats.endpoints import ScoreboardV2
 
-def fetch_games_for_date(game_date="12/03/2025"):
+def fetch_games_for_date(game_date"12/03/2025"):
     """
     game_date format: 'MM/DD/YYYY'
     Returns a DataFrame with home/away team names for that date.
     """
-    sb = ScoreboardV2(
-        game_date=game_date,
-        league_id="00",
-        day_offset=0
+    sb  ScoreboardV2(
+        game_dategame_date,
+        league_id"00",
+        day_offset0
     )
 
-    games_df = sb.get_data_frames()[0]  # 'GameHeader'
+    games_df  sb.get_data_frames()[0]  # 'GameHeader'
     # It has HOME_TEAM_ID and VISITOR_TEAM_ID
 
     # Map TEAM_ID -> TEAM_NAME from your team_stats_df
-    id_to_name = dict(zip(team_stats_df["TEAM_ID"], team_stats_df["TEAM_NAME"]))
+    id_to_name  dict(zip(team_stats_df["TEAM_ID"], team_stats_df["TEAM_NAME"]))
 
-    games_df["HOME_TEAM_NAME"] = games_df["HOME_TEAM_ID"].map(id_to_name)
-    games_df["AWAY_TEAM_NAME"] = games_df["VISITOR_TEAM_ID"].map(id_to_name)
+    games_df["HOME_TEAM_NAME"]  games_df["HOME_TEAM_ID"].map(id_to_name)
+    games_df["AWAY_TEAM_NAME"]  games_df["VISITOR_TEAM_ID"].map(id_to_name)
 
     # Keep only needed columns
-    games_df = games_df[["GAME_ID", "HOME_TEAM_NAME", "AWAY_TEAM_NAME"]]
+    games_df  games_df[["GAME_ID", "HOME_TEAM_NAME", "AWAY_TEAM_NAME"]]
     return games_df
 
 # Example: today's games (adjust date as needed)
-games_today_df = fetch_games_for_date("12/03/2025")
+games_today_df  fetch_games_for_date("12/03/2025")
 games_today_df
 
 import pandas as pd
 
 def run_daily_probs_for_date(
-    game_date="12/03/2025",
-    odds_dict=None,          # {(home, away): {"home_ml":..., "away_ml":..., "home_spread":...}} or tuple
-    spreads_dict=None,       # OPTIONAL: {(home, away): home_spread}
-    stats_df=None,
-    edge_threshold=0.03,
-    lam=0.20,
+    game_date"12/03/2025",
+    odds_dictNone,          # {(home, away): {"home_ml":..., "away_ml":..., "home_spread":...}} or tuple
+    spreads_dictNone,       # OPTIONAL: {(home, away): home_spread}
+    stats_dfNone,
+    edge_threshold0.03,
+    lam0.20,
 ):
     """
     Run the full model for one NBA date.
@@ -4350,56 +4350,56 @@ def run_daily_probs_for_date(
     """
 
     # ✅ Lazy default: grab the global team_stats_df *at call time*, not def time
-    if stats_df is None:
+     stats_df is None:
         try:
-            stats_df = team_stats_df
+            stats_df  team_stats_df
         except NameError:
             raise RuntimeError(
                 "team_stats_df is not defined yet. "
                 "Run the cell that builds team_stats_df before calling run_daily_probs_for_date."
             )
 
-    games_df = fetch_games_for_date(game_date)
+    games_df  fetch_games_for_date(game_date)
 
-    rows = []
+    rows  []
 
     for _, row in games_df.iterrows():
-        home = row["HOME_TEAM_NAME"]
-        away = row["AWAY_TEAM_NAME"]
+        home  row["HOME_TEAM_NAME"]
+        away  row["AWAY_TEAM_NAME"]
 
         # ---------- Moneyline odds (optional) ----------
-        home_ml = None
-        away_ml = None
-        home_spread = None
+        home_ml  None
+        away_ml  None
+        home_spread  None
 
-        if odds_dict is not None and (home, away) in odds_dict:
-            val = odds_dict[(home, away)]
-            if isinstance(val, dict):
-                home_ml = val.get("home_ml", None)
-                away_ml = val.get("away_ml", None)
-                home_spread = val.get("home_spread", None)
+         odds_dict is not None and (home, away) in odds_dict:
+            val  odds_dict[(home, away)]
+             isinstance(val, dict):
+                home_ml  val.get("home_ml", None)
+                away_ml  val.get("away_ml", None)
+                home_spread  val.get("home_spread", None)
             else:
                 # assume (home_ml, away_ml) tuple
-                home_ml, away_ml = val
+                home_ml, away_ml  val
 
         # ---------- Spread dict override (optional) ----------
-        if spreads_dict is not None and (home, away) in spreads_dict:
-            home_spread = spreads_dict[(home, away)]
+         spreads_dict is not None and (home, away) in spreads_dict:
+            home_spread  spreads_dict[(home, away)]
 
         # ---------- Core model ----------
-        prob_home, base_score, inj_adj, adj_score = model_game_prob(
-            home_team_name=home,
-            away_team_name=away,
-            home_injuries=None,
-            away_injuries=None,
-            stats_df=stats_df,
-            lam=lam,
+        prob_home, base_score, inj_adj, adj_score  model_game_prob(
+            home_team_namehome,
+            away_team_nameaway,
+            home_injuriesNone,
+            away_injuriesNone,
+            stats_dfstats_df,
+            lamlam,
         )
 
         # Model spread (home favorite by X)
-        model_spread_home = score_to_spread(adj_score)
+        model_spread_home  score_to_spread(adj_score)
 
-        record = {
+        record  {
             "home": home,
             "away": away,
             "model_home_prob": prob_home,
@@ -4410,15 +4410,15 @@ def run_daily_probs_for_date(
         }
 
         # ---------- Moneyline edges ----------
-        if home_ml is not None and away_ml is not None:
-            home_imp_raw = american_to_implied_prob(home_ml)
-            away_imp_raw = american_to_implied_prob(away_ml)
-            total = home_imp_raw + away_imp_raw
-            home_imp = home_imp_raw / total
-            away_imp = away_imp_raw / total
+         home_ml is not None and away_ml is not None:
+            home_imp_raw  american_to_implied_prob(home_ml)
+            away_imp_raw  american_to_implied_prob(away_ml)
+            total  home_imp_raw + away_imp_raw
+            home_imp  home_imp_raw / total
+            away_imp  away_imp_raw / total
 
-            edge_home = prob_home - home_imp
-            edge_away = (1.0 - prob_home) - away_imp
+            edge_home  prob_home - home_imp
+            edge_away  (1.0 - prob_home) - away_imp
 
             record.update({
                 "home_ml": home_ml,
@@ -4429,8 +4429,8 @@ def run_daily_probs_for_date(
             })
 
         # ---------- Spread edge ----------
-        if home_spread is not None:
-            spread_edge = model_spread_home - home_spread
+         home_spread is not None:
+            spread_edge  model_spread_home - home_spread
             record.update({
                 "home_spread": home_spread,
                 "spread_edge_home": spread_edge,
@@ -4438,11 +4438,11 @@ def run_daily_probs_for_date(
 
         rows.append(record)
 
-    df = pd.DataFrame(rows)
+    df  pd.DataFrame(rows)
 
-    if "edge_home" in df.columns:
-        df["abs_edge_home"] = df["edge_home"].abs()
-        df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
+     "edge_home" in df.columns:
+        df["abs_edge_home"]  df["edge_home"].abs()
+        df  df.sort_values("abs_edge_home", ascendingFalse).reset_index(dropTrue)
 
     return df
 
@@ -4450,55 +4450,55 @@ def run_daily_probs_for_date(
 
 def run_x_days_stats(
     num_days,
-    start_date=None,      # "YYYY-MM-DD"
-    odds_by_date=None,    # {"YYYY-MM-DD": odds_dict}
-    spreads_by_date=None, # {"YYYY-MM-DD": spreads_dict}
-    edge_threshold=0.03,
-    lam=0.20,
-    stats_df=None,
-    injury_df=None,       # NEW
+    start_dateNone,      # "YYYY-MM-DD"
+    odds_by_dateNone,    # {"YYYY-MM-DD": odds_dict}
+    spreads_by_dateNone, # {"YYYY-MM-DD": spreads_dict}
+    edge_threshold0.03,
+    lam0.20,
+    stats_dfNone,
+    injury_dfNone,       # NEW
 ):
-    if stats_df is None:
-        stats_df = team_stats_df
+     stats_df is None:
+        stats_df  team_stats_df
 
-    # If no injury_df passed, grab once now
-    if injury_df is None:
+    #  no injury_df passed, grab once now
+     injury_df is None:
         try:
-            injury_df = fetch_injury_report_espn()
+            injury_df  fetch_injury_report_espn()
         except Exception as e:
             print(f"⚠️ Could not fetch ESPN injuries, running without injuries: {e}")
-            injury_df = None
+            injury_df  None
 
-    if start_date is None:
-        current_date = datetime.today().date()
+     start_date is None:
+        current_date  datetime.today().date()
     else:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        current_date  datetime.strptime(start_date, "%Y-%m-%d").date()
 
-    all_results = {}
+    all_results  {}
 
     for i in range(num_days):
-        day = current_date + timedelta(days=i)
-        date_iso = day.strftime("%Y-%m-%d")   # for dict keys
-        date_nba = day.strftime("%m/%d/%Y")   # for ScoreboardV2
+        day  current_date + timedelta(daysi)
+        date_iso  day.strftime("%Y-%m-%d")   # for dict keys
+        date_nba  day.strftime("%m/%d/%Y")   # for ScoreboardV2
 
-        print("\n==============================")
+        print("\n")
         print(f"Running stats for {date_iso}")
-        print("==============================")
+        print("")
 
-        odds_dict = odds_by_date.get(date_iso) if odds_by_date else None
-        spreads_dict = spreads_by_date.get(date_iso) if spreads_by_date else None
+        odds_dict  odds_by_date.get(date_iso)  odds_by_date else None
+        spreads_dict  spreads_by_date.get(date_iso)  spreads_by_date else None
 
         try:
-            df = run_daily_probs_for_date(
-                game_date=date_nba,
-                odds_dict=odds_dict,
-                spreads_dict=spreads_dict,
-                stats_df=stats_df,
-                edge_threshold=edge_threshold,
-                lam=lam,
-                injury_df=injury_df,   # <-- HERE
+            df  run_daily_probs_for_date(
+                game_datedate_nba,
+                odds_dictodds_dict,
+                spreads_dictspreads_dict,
+                stats_dfstats_df,
+                edge_thresholdedge_threshold,
+                lamlam,
+                injury_dfinjury_df,   # <-- HERE
             )
-            all_results[date_iso] = df
+            all_results[date_iso]  df
             display(df)
         except Exception as e:
             print(f"❌ Error running for {date_iso}: {e}")
@@ -4507,23 +4507,23 @@ def run_x_days_stats(
 
 """
 
-full_day_df = run_daily_probs_for_date("12/03/2025", odds_dict=None)
+full_day_df  run_daily_probs_for_date("12/03/2025", odds_dictNone)
 full_day_df
 
-odds_today = {
+odds_today  {
     ("Chicago Bulls", "Brooklyn Nets"): (-350, +255),
     ("Detroit Pistons", "Milwaukee Bucks"): (-206, +158),
     ("Cleveland Cavaliers", "Portland Trail Blazers"): (-500, +350),
-    # add the rest of today’s games here if you have odds
+    # add the rest of today’s games here  you have odds
 }
 
-full_day_with_edges = run_daily_probs_for_date(
+full_day_with_edges  run_daily_probs_for_date(
     "12/03/2025",
-    odds_dict=odds_today
+    odds_dictodds_today
 )
 full_day_with_edges
 
-odds_today = {
+odds_today  {
     ("Chicago Bulls", "Brooklyn Nets"): (-350, +255),
     ("Cleveland Cavaliers", "Portland Trail Blazers"): (-500, +350),
     ("Indiana Pacers", "Denver Nuggets"): (+120, -140),      # <-- fill real line
@@ -4535,30 +4535,30 @@ odds_today = {
     ("Dallas Mavericks", "Miami Heat"): (-115, -105),
 }
 
-full_day_with_edges = run_daily_probs_for_date(
+full_day_with_edges  run_daily_probs_for_date(
     "12/03/2025",
-    odds_dict=odds_today
+    odds_dictodds_today
 )
 
 full_day_with_edges
 
-def score_to_spread(score, points_per_logit=1.3):
+def score_to_spread(score, points_per_logit1.3):
     """
     Convert model 'score' into predicted point spread.
-    Positive = home favorite by that many points (home -spread).
-    Example: +5.5  => model thinks home should be -5.5
+    Positive  home favorite by that many points (home -spread).
+    Example: +5.5  > model thinks home should be -5.5
     """
     return score * points_per_logit
 
 import pandas as pd
 
 def run_daily_probs_for_date(
-    game_date="12/03/2025",
-    odds_dict=None,          # {(home, away): {"home_ml":..., "away_ml":..., "home_spread":...}} or tuple
-    spreads_dict=None,       # OPTIONAL: {(home, away): home_spread}
-    stats_df=None,
-    edge_threshold=0.03,
-    lam=0.20,
+    game_date"12/03/2025",
+    odds_dictNone,          # {(home, away): {"home_ml":..., "away_ml":..., "home_spread":...}} or tuple
+    spreads_dictNone,       # OPTIONAL: {(home, away): home_spread}
+    stats_dfNone,
+    edge_threshold0.03,
+    lam0.20,
 ):
     """
     Run the full model for one NBA date.
@@ -4571,56 +4571,56 @@ def run_daily_probs_for_date(
     """
 
     # ✅ Lazy default: grab the global team_stats_df *at call time*, not def time
-    if stats_df is None:
+     stats_df is None:
         try:
-            stats_df = team_stats_df
+            stats_df  team_stats_df
         except NameError:
             raise RuntimeError(
                 "team_stats_df is not defined yet. "
                 "Run the cell that builds team_stats_df before calling run_daily_probs_for_date."
             )
 
-    games_df = fetch_games_for_date(game_date)
+    games_df  fetch_games_for_date(game_date)
 
-    rows = []
+    rows  []
 
     for _, row in games_df.iterrows():
-        home = row["HOME_TEAM_NAME"]
-        away = row["AWAY_TEAM_NAME"]
+        home  row["HOME_TEAM_NAME"]
+        away  row["AWAY_TEAM_NAME"]
 
         # ---------- Moneyline odds (optional) ----------
-        home_ml = None
-        away_ml = None
-        home_spread = None
+        home_ml  None
+        away_ml  None
+        home_spread  None
 
-        if odds_dict is not None and (home, away) in odds_dict:
-            val = odds_dict[(home, away)]
-            if isinstance(val, dict):
-                home_ml = val.get("home_ml", None)
-                away_ml = val.get("away_ml", None)
-                home_spread = val.get("home_spread", None)
+         odds_dict is not None and (home, away) in odds_dict:
+            val  odds_dict[(home, away)]
+             isinstance(val, dict):
+                home_ml  val.get("home_ml", None)
+                away_ml  val.get("away_ml", None)
+                home_spread  val.get("home_spread", None)
             else:
                 # assume (home_ml, away_ml) tuple
-                home_ml, away_ml = val
+                home_ml, away_ml  val
 
         # ---------- Spread dict override (optional) ----------
-        if spreads_dict is not None and (home, away) in spreads_dict:
-            home_spread = spreads_dict[(home, away)]
+         spreads_dict is not None and (home, away) in spreads_dict:
+            home_spread  spreads_dict[(home, away)]
 
         # ---------- Core model ----------
-        prob_home, base_score, inj_adj, adj_score = model_game_prob(
-            home_team_name=home,
-            away_team_name=away,
-            home_injuries=None,
-            away_injuries=None,
-            stats_df=stats_df,
-            lam=lam,
+        prob_home, base_score, inj_adj, adj_score  model_game_prob(
+            home_team_namehome,
+            away_team_nameaway,
+            home_injuriesNone,
+            away_injuriesNone,
+            stats_dfstats_df,
+            lamlam,
         )
 
         # Model spread (home favorite by X)
-        model_spread_home = score_to_spread(adj_score)
+        model_spread_home  score_to_spread(adj_score)
 
-        record = {
+        record  {
             "home": home,
             "away": away,
             "model_home_prob": prob_home,
@@ -4631,15 +4631,15 @@ def run_daily_probs_for_date(
         }
 
         # ---------- Moneyline edges ----------
-        if home_ml is not None and away_ml is not None:
-            home_imp_raw = american_to_implied_prob(home_ml)
-            away_imp_raw = american_to_implied_prob(away_ml)
-            total = home_imp_raw + away_imp_raw
-            home_imp = home_imp_raw / total
-            away_imp = away_imp_raw / total
+         home_ml is not None and away_ml is not None:
+            home_imp_raw  american_to_implied_prob(home_ml)
+            away_imp_raw  american_to_implied_prob(away_ml)
+            total  home_imp_raw + away_imp_raw
+            home_imp  home_imp_raw / total
+            away_imp  away_imp_raw / total
 
-            edge_home = prob_home - home_imp
-            edge_away = (1.0 - prob_home) - away_imp
+            edge_home  prob_home - home_imp
+            edge_away  (1.0 - prob_home) - away_imp
 
             record.update({
                 "home_ml": home_ml,
@@ -4650,8 +4650,8 @@ def run_daily_probs_for_date(
             })
 
         # ---------- Spread edge ----------
-        if home_spread is not None:
-            spread_edge = model_spread_home - home_spread
+         home_spread is not None:
+            spread_edge  model_spread_home - home_spread
             record.update({
                 "home_spread": home_spread,
                 "spread_edge_home": spread_edge,
@@ -4659,29 +4659,29 @@ def run_daily_probs_for_date(
 
         rows.append(record)
 
-    df = pd.DataFrame(rows)
+    df  pd.DataFrame(rows)
 
-    if "edge_home" in df.columns:
-        df["abs_edge_home"] = df["edge_home"].abs()
-        df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
+     "edge_home" in df.columns:
+        df["abs_edge_home"]  df["edge_home"].abs()
+        df  df.sort_values("abs_edge_home", ascendingFalse).reset_index(dropTrue)
 
     return df
 
-spreads_today = {
+spreads_today  {
     ("Chicago Bulls", "Brooklyn Nets"): 8.5,   # Bulls -8.5
     ("Cleveland Cavaliers", "Portland Trail Blazers"): 9.5,  # Cavs -9.5
     # etc for other games...
 }
 
-full_day_with_spreads = run_daily_probs_for_date(
+full_day_with_spreads  run_daily_probs_for_date(
     "12/03/2025",
-    odds_dict=odds_today,        # your ML dict from before (optional)
-    spreads_dict=spreads_today   # new
+    odds_dictodds_today,        # your ML dict from before (optional)
+    spreads_dictspreads_today   # new
 )
 
 full_day_with_spreads
 
-odds_today = {
+odds_today  {
     ("Chicago Bulls", "Brooklyn Nets"): {
         "home_ml": -350,
         "away_ml": +255,
@@ -4695,14 +4695,14 @@ odds_today = {
     # etc for all games
 }
 
-def score_to_spread(score, points_per_logit=1.3):
+def score_to_spread(score, points_per_logit1.3):
     """
     Convert model 'score' into predicted point spread.
-    Positive = home favorite by that many points (home -spread).
+    Positive  home favorite by that many points (home -spread).
     """
     return score * points_per_logit
 
-odds_today = {
+odds_today  {
     ("Chicago Bulls", "Brooklyn Nets"): {
         "home_ml": -350,
         "away_ml": +255,
@@ -4716,43 +4716,43 @@ odds_today = {
     # add more...
 }
 
-full_day = run_daily_probs_for_date(
+full_day  run_daily_probs_for_date(
     "12/03/2025",
-    odds_dict=odds_today
+    odds_dictodds_today
 )
 
 full_day
 
-def spread_recommendation(row, spread_edge_threshold=1.5):
+def spread_recommendation(row, spread_edge_threshold1.5):
     """
-    spread_edge_home = model_spread_home - home_spread
+    spread_edge_home  model_spread_home - home_spread
     Positive  → model thinks home should be more favored → bet home spread
     Negative  → model thinks home should be less favored → bet away spread
     """
-    se = row.get("spread_edge_home", np.nan)
-    if pd.isna(se):
+    se  row.get("spread_edge_home", np.nan)
+     pd.isna(se):
         return "No spread line"
 
-    if se > spread_edge_threshold:
+     se > spread_edge_threshold:
         return "Bet HOME spread"
-    elif se < -spread_edge_threshold:
+    el se < -spread_edge_threshold:
         return "Bet AWAY spread"
     else:
         return "No clear spread edge"
 
-full_day["spread_recommendation"] = full_day.apply(spread_recommendation, axis=1)
+full_day["spread_recommendation"]  full_day.apply(spread_recommendation, axis1)
 full_day
 
 print("Games from NBA schedule:")
 for _, row in fetch_games_for_date("12/03/2025").iterrows():
-    key = (row["HOME_TEAM_NAME"], row["AWAY_TEAM_NAME"])
+    key  (row["HOME_TEAM_NAME"], row["AWAY_TEAM_NAME"])
     print(key)
 
 print("\nKeys you have in odds_today:")
 for key in odds_today.keys():
     print(key)
 
-odds_today = {
+odds_today  {
     ("Chicago Bulls", "Brooklyn Nets"): {
         "home_ml": -350,
         "away_ml": 255,
@@ -4766,7 +4766,7 @@ odds_today = {
     ("Indiana Pacers", "Denver Nuggets"): {
         "home_ml": 120,       # example numbers – replace with real lines
         "away_ml": -140,
-        "home_spread": 2.5,   # Pacers +2.5 → enter 2.5 if book says Nuggets -2.5
+        "home_spread": 2.5,   # Pacers +2.5 → enter 2.5  book says Nuggets -2.5
     },
     ("Orlando Magic", "San Antonio Spurs"): {
         "home_ml": -340,
@@ -4800,83 +4800,83 @@ odds_today = {
     },
 }
 
-full_day = run_daily_probs_for_date(
+full_day  run_daily_probs_for_date(
     "12/03/2025",
-    odds_dict=odds_today
+    odds_dictodds_today
 )
 
 full_day
 
 full_day[["home", "away", "home_spread", "model_spread_home", "spread_edge_home"]]
 
-def spread_recommendation(row, threshold=1.5):
-    se = row["spread_edge_home"]
-    if se > threshold:
+def spread_recommendation(row, threshold1.5):
+    se  row["spread_edge_home"]
+     se > threshold:
         return "Bet HOME spread"
-    elif se < -threshold:
+    el se < -threshold:
         return "Bet AWAY spread"
     else:
         return "No clear spread edge"
 
-full_day["spread_recommendation"] = full_day.apply(spread_recommendation, axis=1)
+full_day["spread_recommendation"]  full_day.apply(spread_recommendation, axis1)
 full_day[["home", "away", "home_spread", "model_spread_home", "spread_edge_home", "spread_recommendation"]]
 
 import numpy as np
 import pandas as pd
 
-def ml_recommendation(row, ml_edge_threshold=0.03):
+def ml_recommendation(row, ml_edge_threshold0.03):
     """
     Decide ML side for one game.
     Uses:
       edge_home (model - market for home)
       edge_away (model - market for away)
-    Threshold is in probability (0.03 = 3%).
+    Threshold is in probability (0.03  3%).
     """
-    if "edge_home" not in row or pd.isna(row["edge_home"]):
+     "edge_home" not in row or pd.isna(row["edge_home"]):
         return "No ML odds"
 
-    eh = row["edge_home"]
-    ea = row.get("edge_away", None)
+    eh  row["edge_home"]
+    ea  row.get("edge_away", None)
 
-    # default away edge from home edge if missing
-    if ea is None or pd.isna(ea):
-        if "market_home_prob" in row and not pd.isna(row["market_home_prob"]):
-            ea = (1 - row["model_home_prob"]) - (1 - row["market_home_prob"])
+    # default away edge from home edge  missing
+     ea is None or pd.isna(ea):
+         "market_home_prob" in row and not pd.isna(row["market_home_prob"]):
+            ea  (1 - row["model_home_prob"]) - (1 - row["market_home_prob"])
         else:
-            ea = -eh
+            ea  -eh
 
-    if eh >= ml_edge_threshold and eh >= abs(ea):
+     eh > ml_edge_threshold and eh > abs(ea):
         return f"Bet HOME ML ({row['home_ml']:+})"
-    elif ea >= ml_edge_threshold and ea > abs(eh):
+    el ea > ml_edge_threshold and ea > abs(eh):
         return f"Bet AWAY ML ({row['away_ml']:+})"
     else:
         return "No clear ML edge"
 
-full_day["ml_recommendation"] = full_day.apply(ml_recommendation, axis=1)
+full_day["ml_recommendation"]  full_day.apply(ml_recommendation, axis1)
 
-def spread_recommendation(row, spread_edge_threshold=1.5):
+def spread_recommendation(row, spread_edge_threshold1.5):
     """
-    spread_edge_home = model_spread_home - home_spread
+    spread_edge_home  model_spread_home - home_spread
     Positive  → model thinks home should be more favored → bet home spread
     Negative  → model thinks home should be less favored → bet away spread
-    Threshold in points (e.g. 1.5 = need 1.5 pts of edge).
+    Threshold in points (e.g. 1.5  need 1.5 pts of edge).
     """
-    se = row.get("spread_edge_home", np.nan)
-    hs = row.get("home_spread", np.nan)
+    se  row.get("spread_edge_home", np.nan)
+    hs  row.get("home_spread", np.nan)
 
-    if pd.isna(se) or pd.isna(hs):
+     pd.isna(se) or pd.isna(hs):
         return "No spread line"
 
-    if se > spread_edge_threshold:
+     se > spread_edge_threshold:
         return f"Bet HOME spread (home -{hs})"
-    elif se < -spread_edge_threshold:
+    el se < -spread_edge_threshold:
         return f"Bet AWAY spread (away +{hs})"
     else:
         return "No clear spread edge"
 
-full_day["spread_recommendation"] = full_day.apply(spread_recommendation, axis=1)
+full_day["spread_recommendation"]  full_day.apply(spread_recommendation, axis1)
 
-def best_bet_for_row(row, ml_edge_threshold=0.03, spread_edge_threshold=1.5):
+def best_bet_for_row(row, ml_edge_threshold0.03, spread_edge_threshold1.5):
     """
     Decide the single best bet for a game, choosing between:
       - ML (home or away)
@@ -4884,57 +4884,57 @@ def best_bet_for_row(row, ml_edge_threshold=0.03, spread_edge_threshold=1.5):
       - Or 'No clear edge'
     """
     # --- ML edges ---
-    ml_side = "none"
-    ml_edge_val = 0.0
+    ml_side  "none"
+    ml_edge_val  0.0
 
-    if "edge_home" in row and not pd.isna(row["edge_home"]):
-        eh = row["edge_home"]
-        ea = row.get("edge_away", None)
-        if ea is None or pd.isna(ea):
-            if "market_home_prob" in row and not pd.isna(row["market_home_prob"]):
-                ea = (1 - row["model_home_prob"]) - (1 - row["market_home_prob"])
+     "edge_home" in row and not pd.isna(row["edge_home"]):
+        eh  row["edge_home"]
+        ea  row.get("edge_away", None)
+         ea is None or pd.isna(ea):
+             "market_home_prob" in row and not pd.isna(row["market_home_prob"]):
+                ea  (1 - row["model_home_prob"]) - (1 - row["market_home_prob"])
             else:
-                ea = -eh
+                ea  -eh
 
-        if eh >= ml_edge_threshold and eh >= abs(ea):
-            ml_side = "HOME_ML"
-            ml_edge_val = eh
-        elif ea >= ml_edge_threshold and ea > abs(eh):
-            ml_side = "AWAY_ML"
-            ml_edge_val = ea
+         eh > ml_edge_threshold and eh > abs(ea):
+            ml_side  "HOME_ML"
+            ml_edge_val  eh
+        el ea > ml_edge_threshold and ea > abs(eh):
+            ml_side  "AWAY_ML"
+            ml_edge_val  ea
 
     # --- Spread edges ---
-    spread_side = "none"
-    spread_edge_val = 0.0
-    se = row.get("spread_edge_home", np.nan)
-    hs = row.get("home_spread", np.nan)
+    spread_side  "none"
+    spread_edge_val  0.0
+    se  row.get("spread_edge_home", np.nan)
+    hs  row.get("home_spread", np.nan)
 
-    if not pd.isna(se) and not pd.isna(hs):
-        if se > spread_edge_threshold:
-            spread_side = "HOME_SPREAD"
-            spread_edge_val = se
-        elif se < -spread_edge_threshold:
-            spread_side = "AWAY_SPREAD"
-            spread_edge_val = abs(se)  # use absolute edge for comparison
+     not pd.isna(se) and not pd.isna(hs):
+         se > spread_edge_threshold:
+            spread_side  "HOME_SPREAD"
+            spread_edge_val  se
+        el se < -spread_edge_threshold:
+            spread_side  "AWAY_SPREAD"
+            spread_edge_val  abs(se)  # use absolute edge for comparison
 
     # --- Compare edges ---
     # We compare absolute edges: bigger edge wins
-    if ml_side == "none" and spread_side == "none":
+     ml_side  "none" and spread_side  "none":
         return "No clear edge"
-    elif spread_side = "none" and spread_edge_val > abs(ml_edge_val):
+    el spread_side  "none" and spread_edge_val > abs(ml_edge_val)):
         # Take spread bet
-        if spread_side == "HOME_SPREAD":
+         spread_side  "HOME_SPREAD":
             return f"BEST: HOME spread (home -{hs})"
         else:
             return f"BEST: AWAY spread (away +{hs})"
     else:
         # Take ML bet
-        if ml_side == "HOME_ML":
+         ml_side  "HOME_ML":
             return f"BEST: HOME ML ({row['home_ml']:+})"
         else:
             return f"BEST: AWAY ML ({row['away_ml']:+})"
 
-def best_bet_for_row(row, ml_edge_threshold=0.03, spread_edge_threshold=1.5):
+def best_bet_for_row(row, ml_edge_threshold0.03, spread_edge_threshold1.5):
     """
     Decide the single best bet for a game, choosing between:
       - ML (home or away)
@@ -4942,54 +4942,54 @@ def best_bet_for_row(row, ml_edge_threshold=0.03, spread_edge_threshold=1.5):
       - Or 'No clear edge'
     """
     # --- ML edges ---
-    ml_side = "none"
-    ml_edge_val = 0.0
+    ml_side  "none"
+    ml_edge_val  0.0
 
-    if "edge_home" in row and not pd.isna(row["edge_home"]):
-        eh = row["edge_home"]
-        ea = row.get("edge_away", None)
-        if ea is None or pd.isna(ea):
-            if "market_home_prob" in row and not pd.isna(row["market_home_prob"]):
-                ea = (1 - row["model_home_prob"]) - (1 - row["market_home_prob"])
+     "edge_home" in row and not pd.isna(row["edge_home"]):
+        eh  row["edge_home"]
+        ea  row.get("edge_away", None)
+         ea is None or pd.isna(ea):
+             "market_home_prob" in row and not pd.isna(row["market_home_prob"]):
+                ea  (1 - row["model_home_prob"]) - (1 - row["market_home_prob"])
             else:
-                ea = -eh
+                ea  -eh
 
-        if eh >= ml_edge_threshold and eh >= abs(ea):
-            ml_side = "HOME_ML"
-            ml_edge_val = eh
-        elif ea >= ml_edge_threshold and ea > abs(eh):
-            ml_side = "AWAY_ML"
-            ml_edge_val = ea
+         eh > ml_edge_threshold and eh > abs(ea):
+            ml_side  "HOME_ML"
+            ml_edge_val  eh
+        el ea > ml_edge_threshold and ea > abs(eh):
+            ml_side  "AWAY_ML"
+            ml_edge_val  ea
 
     # --- Spread edges ---
-    spread_side = "none"
-    spread_edge_val = 0.0
-    se = row.get("spread_edge_home", np.nan)
-    hs = row.get("home_spread", np.nan)
+    spread_side  "none"
+    spread_edge_val  0.0
+    se  row.get("spread_edge_home", np.nan)
+    hs  row.get("home_spread", np.nan)
 
-    if not pd.isna(se) and not pd.isna(hs):
-        if se > spread_edge_threshold:
-            spread_side = "HOME_SPREAD"
-            spread_edge_val = se
-        elif se < -spread_edge_threshold:
-            spread_side = "AWAY_SPREAD"
-            spread_edge_val = abs(se)
+     not pd.isna(se) and not pd.isna(hs):
+         se > spread_edge_threshold:
+            spread_side  "HOME_SPREAD"
+            spread_edge_val  se
+        el se < -spread_edge_threshold:
+            spread_side  "AWAY_SPREAD"
+            spread_edge_val  abs(se)
 
     # --- Compare edges ---
-    if ml_side == "none" and spread_side == "none":
+     ml_side  "none" and spread_side  "none":
         return "No clear edge"
-    elif spread_side = "none" and spread_edge_val > abs(ml_edge_val):
-        if spread_side == "HOME_SPREAD":
+    el spread_side  "none" and spread_edge_val > abs(ml_edge_val):
+         spread_side  "HOME_SPREAD":
             return f"BEST: HOME spread (home -{hs})"
         else:
             return f"BEST: AWAY spread (away +{hs})"
     else:
-        if ml_side == "HOME_ML":
+         ml_side  "HOME_ML":
             return f"BEST: HOME ML ({row['home_ml']:+})"
         else:
             return f"BEST: AWAY ML ({row['away_ml']:+})"
 
-full_day["best_bet"] = full_day.apply(best_bet_for_row, axis=1)
+full_day["best_bet"]  full_day.apply(best_bet_for_row, axis1)
 
 full_day[[
     "home", "away",
@@ -5000,40 +5000,40 @@ full_day[[
 
 from datetime import datetime, timedelta
 
-def run_x_days_stats(num_days, start_date=None):
+def run_x_days_stats(num_days, start_dateNone):
     """
     Run your daily model for `num_days` days in a row.
 
     - num_days: int, how many days of stats to run
-    - start_date: "YYYY-MM-DD" (optional). If None, start from today.
+    - start_date: "YYYY-MM-DD" (optional).  None, start from today.
     """
-    if start_date is None:
-        current_date = datetime.today()
+     start_date is None:
+        current_date  datetime.today()
     else:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d")
+        current_date  datetime.strptime(start_date, "%Y-%m-%d")
 
-    all_results = {}
+    all_results  {}
 
     for i in range(num_days):
-        game_date = (current_date + timedelta(days=i)).strftime("%Y-%m-%d")
-        print(f"\n==============================")
+        game_date  (current_date + timedelta(daysi)).strftime("%Y-%m-%d")
+        print(f"\n")
         print(f"Running stats for {game_date}")
-        print(f"==============================")
+        print(f"")
 
         try:
             # 🔹 This assumes you already have a function like:
             #     run_daily_card(game_date_str)
             # that returns a DataFrame OR some result object.
-            daily_results = run_daily_card(game_date)
+            daily_results  run_daily_card(game_date)
 
             # Save results in a dict keyed by date
-            all_results[game_date] = daily_results
+            all_results[game_date]  daily_results
 
-            # If it's a DataFrame, this will show it nicely in Colab
+            #  it's a DataFrame, this will show it nicely in Colab
             try:
                 display(daily_results)
             except NameError:
-                # If display isn't imported yet, just print
+                #  display isn't imported yet, just print
                 print(daily_results)
 
         except Exception as e:
@@ -5052,20 +5052,20 @@ def run_daily_card(game_date_str):
     # 🔹 This assumes you already built a DataFrame of games called games_df
     # with at least these columns: "GAME_DATE", "HOME_TEAM", "AWAY_TEAM", "VEGAS_SPREAD"
     # Adjust the column names to match your actual data.
-    day_games = games_df[games_df["GAME_DATE"] == game_date_str]
+    day_games  games_df[games_df["GAME_DATE"]  game_date_str]
 
-    results = []
+    results  []
 
     for _, g in day_games.iterrows():
         # 🔹 Call your existing per-game function here.
         # Replace arguments to match your real predict_spread signature.
-        model_output = predict_spread(
-            home_team_name=g["HOME_TEAM"],
-            away_team_name=g["AWAY_TEAM"],
-            vegas_home_spread=g["VEGAS_SPREAD"],
-            # add injuries / stats here if your function needs them
-            # home_injuries=..., away_injuries=...,
-            # home_team_stats=..., away_team_stats=...,
+        model_output  predict_spread(
+            home_team_nameg["HOME_TEAM"],
+            away_team_nameg["AWAY_TEAM"],
+            vegas_home_spreadg["VEGAS_SPREAD"],
+            # add injuries / stats here  your function needs them
+            # home_injuries..., away_injuries...,
+            # home_team_stats..., away_team_stats...,
         )
 
         # 🔹 Build a row for the results table
@@ -5074,34 +5074,34 @@ def run_daily_card(game_date_str):
             "home_team": g["HOME_TEAM"],
             "away_team": g["AWAY_TEAM"],
             "vegas_spread": g["VEGAS_SPREAD"],
-            # If model_output is a dict, you can unpack it:
-            **(model_output if isinstance(model_output, dict) else {"model_output": model_output}),
+            #  model_output is a dict, you can unpack it:
+            **(model_output  isinstance(model_output, dict) else {"model_output": model_output}),
         })
 
-    results_df = pd.DataFrame(results)
+    results_df  pd.DataFrame(results)
     return results_df
 
 
-# ==== IMPORTS ====
+#  IMPORTS 
 import pandas as pd
 import numpy as np
 from nba_api.stats.endpoints import leaguedashteamstats
 
-# ==== TEAM STATS ====
+#  TEAM STATS 
 
-def fetch_team_advanced_stats(season="2024-25"):
-    data = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        season_type_all_star="Regular Season",
-        per_mode_detailed="PerGame",
-        measure_type_detailed_defense="Advanced"   # works in your nba_api
+def fetch_team_advanced_stats(season"2024-25"):
+    data  leaguedashteamstats.LeagueDashTeamStats(
+        seasonseason,
+        season_type_all_star"Regular Season",
+        per_mode_detailed"PerGame",
+        measure_type_detailed_defense"Advanced"   # works in your nba_api
     )
     return data.get_data_frames()[0]
 
-raw_team_stats_df = fetch_team_advanced_stats("2024-25")
+raw_team_stats_df  fetch_team_advanced_stats("2024-25")
 
 def prepare_team_stats(df):
-    cols = [
+    cols  [
         "TEAM_ID",
         "TEAM_NAME",
         "OFF_RATING",
@@ -5112,8 +5112,8 @@ def prepare_team_stats(df):
         "OREB_PCT",
         "DREB_PCT",
     ]
-    df = df[cols].copy()
-    df.rename(columns={
+    df  df[cols].copy()
+    df.rename(columns{
         "OFF_RATING": "ORtg",
         "DEF_RATING": "DRtg",
         "EFG_PCT": "eFG",
@@ -5121,43 +5121,43 @@ def prepare_team_stats(df):
         "AST_PCT": "AST",
         "OREB_PCT": "ORB",
         "DREB_PCT": "DRB",
-    }, inplace=True)
+    }, inplaceTrue)
     for col in ["eFG", "TOV", "AST", "ORB", "DRB"]:
-        if df[col].max() > 2:
-            df[col] = df[col] / 100.0
-    df["FTAr"] = 0.0
+         df[col].max() > 2:
+            df[col]  df[col] / 100.0
+    df["FTAr"]  0.0
     return df
 
-team_stats_df = prepare_team_stats(raw_team_stats_df)
+team_stats_df  prepare_team_stats(raw_team_stats_df)
 
-# ==== CORE MODEL HELPERS ====
+#  CORE MODEL HELPERS 
 
-def find_team_row(team_name_input, stats_df=team_stats_df):
-    name = team_name_input.strip().lower()
-    full_match = stats_df[stats_df["TEAM_NAME"].str.lower() == name]
-    if not full_match.empty:
+def find_team_row(team_name_input, stats_dfteam_stats_df):
+    name  team_name_input.strip().lower()
+    full_match  stats_df[stats_df["TEAM_NAME"].str.lower()  name]
+     not full_match.empty:
         return full_match.iloc[0]
-    contains_match = stats_df[stats_df["TEAM_NAME"].str.lower().str.contains(name)]
-    if not contains_match.empty:
+    contains_match  stats_df[stats_df["TEAM_NAME"].str.lower().str.contains(name)]
+     not contains_match.empty:
         return contains_match.iloc[0]
     raise ValueError(f"Could not find a team matching: {team_name_input}")
 
 def season_matchup_score(home_row, away_row):
-    h = home_row
-    a = away_row
+    h  home_row
+    a  away_row
 
-    Δ_ORtg = h["ORtg"] - a["ORtg"]
-    Δ_DRtg = a["DRtg"] - h["DRtg"]
-    Δ_eFG  = h["eFG"]  - a["eFG"]
-    Δ_TOV  = a["TOV"]  - h["TOV"]
-    Δ_AST  = h["AST"]  - a["AST"]
-    Δ_ORB  = h["ORB"]  - a["ORB"]
-    Δ_DRB  = h["DRB"]  - a["DRB"]
-    Δ_FTAr = h["FTAr"] - a["FTAr"]
+    Δ_ORtg  h["ORtg"] - a["ORtg"]
+    Δ_DRtg  a["DRtg"] - h["DRtg"]
+    Δ_eFG   h["eFG"]  - a["eFG"]
+    Δ_TOV   a["TOV"]  - h["TOV"]
+    Δ_AST   h["AST"]  - a["AST"]
+    Δ_ORB   h["ORB"]  - a["ORB"]
+    Δ_DRB   h["DRB"]  - a["DRB"]
+    Δ_FTAr  h["FTAr"] - a["FTAr"]
 
-    home_edge = 2.0
+    home_edge  2.0
 
-    score = (
+    score  (
         home_edge
         + 0.08 * Δ_ORtg
         + 0.08 * Δ_DRtg
@@ -5170,49 +5170,49 @@ def season_matchup_score(home_row, away_row):
     )
     return score
 
-def score_to_prob(score, lam=0.20):
+def score_to_prob(score, lam0.20):
     return 1.0 / (1.0 + np.exp(-lam * score))
 
-# ==== INJURIES (simple roles; injuries optional) ====
+#  INJURIES (simple roles; injuries optional) 
 
-INJURY_ROLE_WEIGHTS = {
+INJURY_ROLE_WEIGHTS  {
     "star": 3.0,
     "starter": 1.5,
     "rotation": 1.0,
     "bench": 0.5,
 }
 
-def injury_adjustment(home_injuries=None, away_injuries=None):
+def injury_adjustment(home_injuriesNone, away_injuriesNone):
     """
     home_injuries / away_injuries:
       list like [("Player Name", "starter"), ("Guy", "rotation"), ...]
-      or ("Player", "starter", 0.5) if you want partial weight.
+      or ("Player", "starter", 0.5)  you want partial weight.
     """
-    home_injuries = home_injuries or []
-    away_injuries = away_injuries or []
+    home_injuries  home_injuries or []
+    away_injuries  away_injuries or []
 
     def total_weight(inj_list, sign):
-        total = 0.0
+        total  0.0
         for item in inj_list:
-            if len(item) == 3:
-                _, role, mult = item
-            elif len(item) == 2:
-                _, role = item
-                mult = 1.0
+             len(item)  3:
+                _, role, mult  item
+            el len(item)  2:
+                _, role  item
+                mult  1.0
             else:
                 continue
-            base = INJURY_ROLE_WEIGHTS.get(role, 1.0)
-            total += sign * base * mult
+            base  INJURY_ROLE_WEIGHTS.get(role, 1.0)
+            total + sign * base * mult
         return total
 
-    adj = 0.0
-    adj += total_weight(home_injuries, sign=-1.0)  # hurts home
-    adj += total_weight(away_injuries, sign=+1.0)  # hurts away
+    adj  0.0
+    adj + total_weight(home_injuries, sign-1.0)  # hurts home
+    adj + total_weight(away_injuries, sign+1.0)  # hurts away
     return adj
 
 def american_to_implied_prob(odds):
-    odds = float(odds)
-    if odds < 0:
+    odds  float(odds)
+     odds < 0:
         return (-odds) / ((-odds) + 100.0)
     else:
         return 100.0 / (odds + 100.0)
@@ -5220,28 +5220,28 @@ def american_to_implied_prob(odds):
 def model_game_prob(
     home_team_name,
     away_team_name,
-    home_injuries=None,
-    away_injuries=None,
-    stats_df=team_stats_df,
-    lam=0.20
+    home_injuriesNone,
+    away_injuriesNone,
+    stats_dfteam_stats_df,
+    lam0.20
 ):
-    home_row = find_team_row(home_team_name, stats_df)
-    away_row = find_team_row(away_team_name, stats_df)
+    home_row  find_team_row(home_team_name, stats_df)
+    away_row  find_team_row(away_team_name, stats_df)
 
-    base_score = season_matchup_score(home_row, away_row)
-    inj_adj    = injury_adjustment(home_injuries, away_injuries)
-    adj_score  = base_score + inj_adj
-    prob_home  = score_to_prob(adj_score, lam=lam)
+    base_score  season_matchup_score(home_row, away_row)
+    inj_adj     injury_adjustment(home_injuries, away_injuries)
+    adj_score   base_score + inj_adj
+    prob_home   score_to_prob(adj_score, lamlam)
 
     return prob_home, base_score, inj_adj, adj_score
 
-# ==== DAILY SLATE RUNNER ====
+#  DAILY SLATE RUNNER 
 
 def run_daily_slate(
     games,
-    stats_df=team_stats_df,
-    edge_threshold=0.03,
-    lam=0.20
+    stats_dfteam_stats_df,
+    edge_threshold0.03,
+    lam0.20
 ):
     """
     games: list of dicts or tuples:
@@ -5249,44 +5249,44 @@ def run_daily_slate(
              "home_injuries": [...], "away_injuries": [...]}
       tuple: ("Team A", "Team B", -150, 130)
     """
-    rows = []
+    rows  []
 
     for g in games:
-        if isinstance(g, dict):
-            home = g["home"]
-            away = g["away"]
-            home_ml = g["home_ml"]
-            away_ml = g["away_ml"]
-            home_injuries = g.get("home_injuries", None)
-            away_injuries = g.get("away_injuries", None)
+         isinstance(g, dict):
+            home  g["home"]
+            away  g["away"]
+            home_ml  g["home_ml"]
+            away_ml  g["away_ml"]
+            home_injuries  g.get("home_injuries", None)
+            away_injuries  g.get("away_injuries", None)
         else:
-            home, away, home_ml, away_ml = g
-            home_injuries, away_injuries = None, None
+            home, away, home_ml, away_ml  g
+            home_injuries, away_injuries  None, None
 
-        prob_home, base_score, inj_adj, adj_score = model_game_prob(
-            home_team_name=home,
-            away_team_name=away,
-            home_injuries=home_injuries,
-            away_injuries=away_injuries,
-            stats_df=stats_df,
-            lam=lam
+        prob_home, base_score, inj_adj, adj_score  model_game_prob(
+            home_team_namehome,
+            away_team_nameaway,
+            home_injurieshome_injuries,
+            away_injuriesaway_injuries,
+            stats_dfstats_df,
+            lamlam
         )
 
-        home_imp_raw = american_to_implied_prob(home_ml)
-        away_imp_raw = american_to_implied_prob(away_ml)
-        total = home_imp_raw + away_imp_raw
-        home_imp = home_imp_raw / total
-        away_imp = away_imp_raw / total
+        home_imp_raw  american_to_implied_prob(home_ml)
+        away_imp_raw  american_to_implied_prob(away_ml)
+        total  home_imp_raw + away_imp_raw
+        home_imp  home_imp_raw / total
+        away_imp  away_imp_raw / total
 
-        edge_home = prob_home - home_imp
-        edge_away = (1 - prob_home) - away_imp
+        edge_home  prob_home - home_imp
+        edge_away  (1 - prob_home) - away_imp
 
-        if edge_home >= edge_threshold and edge_home >= abs(edge_away):
-            rec = "Bet HOME ML"
-        elif edge_away >= edge_threshold and edge_away > abs(edge_home):
-            rec = "Bet AWAY ML"
+         edge_home > edge_threshold and edge_home > abs(edge_away):
+            rec  "Bet HOME ML"
+        el edge_away > edge_threshold and edge_away > abs(edge_home):
+            rec  "Bet AWAY ML"
         else:
-            rec = "No clear ML edge"
+            rec  "No clear ML edge"
 
         rows.append({
             "home": home,
@@ -5303,26 +5303,26 @@ def run_daily_slate(
             "recommendation": rec,
         })
 
-    df = pd.DataFrame(rows)
-    df["abs_edge_home"] = df["edge_home"].abs()
-    df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
+    df  pd.DataFrame(rows)
+    df["abs_edge_home"]  df["edge_home"].abs()
+    df  df.sort_values("abs_edge_home", ascendingFalse).reset_index(dropTrue)
     return df
 
 from nba_api.stats.endpoints import leaguedashteamstats
 import pandas as pd
 import numpy as np
 
-def fetch_team_advanced_stats_raw(season="2024-25"):
+def fetch_team_advanced_stats_raw(season"2024-25"):
     """
     Get the raw advanced team stats from nba_api.
     """
-    data = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        season_type_all_star="Regular Season",
-        per_mode_detailed="PerGame",
-        measure_type_detailed_defense="Advanced",
+    data  leaguedashteamstats.LeagueDashTeamStats(
+        seasonseason,
+        season_type_all_star"Regular Season",
+        per_mode_detailed"PerGame",
+        measure_type_detailed_defense"Advanced",
     )
-    df = data.get_data_frames()[0]
+    df  data.get_data_frames()[0]
     return df
 
 def prepare_team_stats(df):
@@ -5330,7 +5330,7 @@ def prepare_team_stats(df):
     Keep only needed columns and rename them to the names your model expects:
       ORtg, DRtg, eFG, TOV, AST, ORB, DRB, FTAr
     """
-    cols = [
+    cols  [
         "TEAM_ID",
         "TEAM_NAME",
         "OFF_RATING",
@@ -5341,10 +5341,10 @@ def prepare_team_stats(df):
         "OREB_PCT",
         "DREB_PCT",
     ]
-    df = df[cols].copy()
+    df  df[cols].copy()
 
     df.rename(
-        columns={
+        columns{
             "OFF_RATING": "ORtg",
             "DEF_RATING": "DRtg",
             "EFG_PCT": "eFG",
@@ -5353,34 +5353,34 @@ def prepare_team_stats(df):
             "OREB_PCT": "ORB",
             "DREB_PCT": "DRB",
         },
-        inplace=True,
+        inplaceTrue,
     )
 
-    # Scale percentage-like stats from 0–100 to 0–1 if needed
+    # Scale percentage-like stats from 0–100 to 0–1  needed
     for col in ["eFG", "TOV", "AST", "ORB", "DRB"]:
-        if df[col].max() > 2:   # e.g. 53.2, 25.1, etc.
-            df[col] = df[col] / 100.0
+         df[col].max() > 2:   # e.g. 53.2, 25.1, etc.
+            df[col]  df[col] / 100.0
 
     # We don't get FTAr from this endpoint, so set to 0 for now
-    df["FTAr"] = 0.0
+    df["FTAr"]  0.0
 
     return df
 
 # 🔁 Build the final team_stats_df USED BY THE MODEL
-raw_team_stats_df = fetch_team_advanced_stats_raw("2024-25")
-team_stats_df = prepare_team_stats(raw_team_stats_df)
+raw_team_stats_df  fetch_team_advanced_stats_raw("2024-25")
+team_stats_df  prepare_team_stats(raw_team_stats_df)
 
 print("team_stats_df columns:")
 print(team_stats_df.columns)
 
 def run_daily_probs_for_date(
-    game_date="12/04/2025",
-    odds_dict=None,        # still optional (can be None)
-    spreads_dict=None,     # still optional
-    stats_df=None,
-    edge_threshold=0.03,
-    lam=0.20,
-    injury_df=None,        # NEW: you can pass a pre-fetched injury table
+    game_date"12/04/2025",
+    odds_dictNone,        # still optional (can be None)
+    spreads_dictNone,     # still optional
+    stats_dfNone,
+    edge_threshold0.03,
+    lam0.20,
+    injury_dfNone,        # NEW: you can pass a pre-fetched injury table
 ):
     """
     Run the model for all games on a given date, WITH automatic injury adjustment.
@@ -5388,63 +5388,63 @@ def run_daily_probs_for_date(
     game_date: 'MM/DD/YYYY' string for NBA API
     odds_dict: optional { (home, away): (home_ml, away_ml) } or dict with 'home_ml','away_ml','home_spread'
     spreads_dict: optional { (home, away): home_spread }
-    injury_df: optional ESPN injury DataFrame; if None, we fetch it.
+    injury_df: optional ESPN injury DataFrame;  None, we fetch it.
     """
-    if stats_df is None:
-        stats_df = team_stats_df
+     stats_df is None:
+        stats_df  team_stats_df
 
-    # 🔁 Fetch injuries once if not given
-    if injury_df is None:
+    # 🔁 Fetch injuries once  not given
+     injury_df is None:
         try:
-            injury_df = fetch_injury_report_espn()
+            injury_df  fetch_injury_report_espn()
         except Exception as e:
             print(f"⚠️ Could not fetch ESPN injuries, running without injuries: {e}")
-            injury_df = None
+            injury_df  None
 
-    games_df = fetch_games_for_date(game_date)
-    rows = []
+    games_df  fetch_games_for_date(game_date)
+    rows  []
 
     for _, row in games_df.iterrows():
-        home = row["HOME_TEAM_NAME"]
-        away = row["AWAY_TEAM_NAME"]
+        home  row["HOME_TEAM_NAME"]
+        away  row["AWAY_TEAM_NAME"]
 
         # ----- Injuries for this matchup -----
-        if injury_df is not None:
-            home_injuries = build_injury_list_for_team_espn(home, injury_df)
-            away_injuries = build_injury_list_for_team_espn(away, injury_df)
+         injury_df is not None:
+            home_injuries  build_injury_list_for_team_espn(home, injury_df)
+            away_injuries  build_injury_list_for_team_espn(away, injury_df)
         else:
-            home_injuries = []
-            away_injuries = []
+            home_injuries  []
+            away_injuries  []
 
         # ----- Odds & spreads (optional) -----
-        home_ml = away_ml = None
-        home_spread = None
+        home_ml  away_ml  None
+        home_spread  None
 
-        if odds_dict is not None and (home, away) in odds_dict:
-            val = odds_dict[(home, away)]
-            if isinstance(val, dict):
-                home_ml = val.get("home_ml", None)
-                away_ml = val.get("away_ml", None)
-                home_spread = val.get("home_spread", None)
+         odds_dict is not None and (home, away) in odds_dict:
+            val  odds_dict[(home, away)]
+             isinstance(val, dict):
+                home_ml  val.get("home_ml", None)
+                away_ml  val.get("away_ml", None)
+                home_spread  val.get("home_spread", None)
             else:
-                home_ml, away_ml = val
+                home_ml, away_ml  val
 
-        if spreads_dict is not None and (home, away) in spreads_dict:
-            home_spread = spreads_dict[(home, away)]
+         spreads_dict is not None and (home, away) in spreads_dict:
+            home_spread  spreads_dict[(home, away)]
 
         # ----- Core model with injuries -----
-        prob_home, base_score, inj_adj, adj_score = model_game_prob(
-            home_team_name=home,
-            away_team_name=away,
-            home_injuries=home_injuries,
-            away_injuries=away_injuries,
-            stats_df=stats_df,
-            lam=lam,
+        prob_home, base_score, inj_adj, adj_score  model_game_prob(
+            home_team_namehome,
+            away_team_nameaway,
+            home_injurieshome_injuries,
+            away_injuriesaway_injuries,
+            stats_dfstats_df,
+            lamlam,
         )
 
-        model_spread_home = score_to_spread(adj_score)
+        model_spread_home  score_to_spread(adj_score)
 
-        record = {
+        record  {
             "home": home,
             "away": away,
             "model_home_prob": prob_home,
@@ -5455,15 +5455,15 @@ def run_daily_probs_for_date(
         }
 
         # ----- Moneyline edges -----
-        if home_ml is not None and away_ml is not None:
-            home_imp_raw = american_to_implied_prob(home_ml)
-            away_imp_raw = american_to_implied_prob(away_ml)
-            total = home_imp_raw + away_imp_raw
-            home_imp = home_imp_raw / total
-            away_imp = away_imp_raw / total
+         home_ml is not None and away_ml is not None:
+            home_imp_raw  american_to_implied_prob(home_ml)
+            away_imp_raw  american_to_implied_prob(away_ml)
+            total  home_imp_raw + away_imp_raw
+            home_imp  home_imp_raw / total
+            away_imp  away_imp_raw / total
 
-            edge_home = prob_home - home_imp
-            edge_away = (1 - prob_home) - away_imp
+            edge_home  prob_home - home_imp
+            edge_away  (1 - prob_home) - away_imp
 
             record.update({
                 "home_ml": home_ml,
@@ -5474,8 +5474,8 @@ def run_daily_probs_for_date(
             })
 
         # ----- Spread edge -----
-        if home_spread is not None:
-            spread_edge = model_spread_home - home_spread
+         home_spread is not None:
+            spread_edge  model_spread_home - home_spread
             record.update({
                 "home_spread": home_spread,
                 "spread_edge_home": spread_edge,
@@ -5483,55 +5483,55 @@ def run_daily_probs_for_date(
 
         rows.append(record)
 
-    df = pd.DataFrame(rows)
-    if "edge_home" in df.columns:
-        df["abs_edge_home"] = df["edge_home"].abs()
-        df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
+    df  pd.DataFrame(rows)
+     "edge_home" in df.columns:
+        df["abs_edge_home"]  df["edge_home"].abs()
+        df  df.sort_values("abs_edge_home", ascendingFalse).reset_index(dropTrue)
 
     return df
 
-def fetch_team_advanced_stats(season="2024-25"):
-    data = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        season_type_all_star="Regular Season",
-        per_mode_detailed="PerGame",
-        measure_type_detailed_defense="Advanced"
+def fetch_team_advanced_stats(season"2024-25"):
+    data  leaguedashteamstats.LeagueDashTeamStats(
+        seasonseason,
+        season_type_all_star"Regular Season",
+        per_mode_detailed"PerGame",
+        measure_type_detailed_defense"Advanced"
     )
     return data.get_data_frames()[0]
 
-team_stats_df = fetch_team_advanced_stats("2024-25")
+team_stats_df  fetch_team_advanced_stats("2024-25")
 
 team_stats_df.head()
 
 from nba_api.stats.endpoints import ScoreboardV2
 
-def fetch_games_for_date(game_date="12/03/2025"):
+def fetch_games_for_date(game_date"12/03/2025"):
     """
     game_date format: 'MM/DD/YYYY'
     Returns a DataFrame with home/away team names for that date.
     """
-    sb = ScoreboardV2(
-        game_date=game_date,
-        league_id="00",
-        day_offset=0
+    sb  ScoreboardV2(
+        game_dategame_date,
+        league_id"00",
+        day_offset0
     )
 
-    games_df = sb.get_data_frames()[0]  # 'GameHeader'
+    games_df  sb.get_data_frames()[0]  # 'GameHeader'
 
     # Map TEAM_ID -> TEAM_NAME from your existing team_stats_df
-    id_to_name = dict(zip(team_stats_df["TEAM_ID"], team_stats_df["TEAM_NAME"]))
+    id_to_name  dict(zip(team_stats_df["TEAM_ID"], team_stats_df["TEAM_NAME"]))
 
-    games_df["HOME_TEAM_NAME"] = games_df["HOME_TEAM_ID"].map(id_to_name)
-    games_df["AWAY_TEAM_NAME"] = games_df["VISITOR_TEAM_ID"].map(id_to_name)
+    games_df["HOME_TEAM_NAME"]  games_df["HOME_TEAM_ID"].map(id_to_name)
+    games_df["AWAY_TEAM_NAME"]  games_df["VISITOR_TEAM_ID"].map(id_to_name)
 
     # Keep only needed columns
-    games_df = games_df[["GAME_ID", "HOME_TEAM_NAME", "AWAY_TEAM_NAME"]]
+    games_df  games_df[["GAME_ID", "HOME_TEAM_NAME", "AWAY_TEAM_NAME"]]
     return games_df
 
-def score_to_spread(score, points_per_logit=1.3):
+def score_to_spread(score, points_per_logit1.3):
     """
     Convert model 'score' into a predicted point spread.
-    Positive = home favorite by that many points (home -spread).
+    Positive  home favorite by that many points (home -spread).
 
     points_per_logit controls how "strong" scores translate into spread.
     You were using ~1.3 before, so we keep that.
@@ -5539,18 +5539,18 @@ def score_to_spread(score, points_per_logit=1.3):
     return score * points_per_logit
 
 import numpy as np
-import pandas as pd  # if not already imported
+import pandas as pd  #  not already imported
 
 # Example: fill these with the TRUE lines from your book
-spreads_today = {
+spreads_today  {
     ("Philadelphia 76ers", "Golden State Warriors"): -3.5,  # Sixers -3.5
-    ("Washington Wizards", "Boston Celtics"): +9.5,         # Wizards +9.5 (so home_spread = +9.5)
+    ("Washington Wizards", "Boston Celtics"): +9.5,         # Wizards +9.5 (so home_spread  +9.5)
     ("Brooklyn Nets", "Utah Jazz"): -2.0,                   # Nets -2
     ("Toronto Raptors", "Los Angeles Lakers"): +1.5,        # Raptors +1.5
     ("New Orleans Pelicans", "Minnesota Timberwolves"): +3.0,
 }
 
-odds_today = {
+odds_today  {
     ("Philadelphia 76ers", "Golden State Warriors"): {
         "home_ml": -177,
         "away_ml": +132,
@@ -5582,8 +5582,8 @@ import numpy as np
 import pandas as pd
 
 def american_to_implied_prob(odds):
-    odds = float(odds)
-    if odds < 0:
+    odds  float(odds)
+     odds < 0:
         return (-odds) / ((-odds) + 100.0)
     else:
         return 100.0 / (odds + 100.0)
@@ -5592,123 +5592,123 @@ def american_to_implied_prob(odds):
 def attach_odds_and_best_bets(
     df,
     odds_dict,
-    ml_edge_threshold=0.03,      # 3 percentage points
-    spread_edge_threshold=1.5    # 1.5 points of spread edge
+    ml_edge_threshold0.03,      # 3 percentage points
+    spread_edge_threshold1.5    # 1.5 points of spread edge
 ):
     """
     df: your full_day_df (must have home, away, model_home_prob, model_spread_home)
     odds_dict: { (home, away): {"home_ml":..., "away_ml":..., "home_spread":...}, ... }
     """
 
-    df = df.copy()
+    df  df.copy()
 
     # --- 1) Attach odds/spreads to each row ---
     def get_odds(row):
-        key = (row["home"], row["away"])
-        rec = odds_dict.get(key)
-        if rec is None:
+        key  (row["home"], row["away"])
+        rec  odds_dict.get(key)
+         rec is None:
             return pd.Series([np.nan, np.nan, np.nan],
-                             index=["home_ml", "away_ml", "home_spread"])
+                             index["home_ml", "away_ml", "home_spread"])
         return pd.Series(
             [rec.get("home_ml"), rec.get("away_ml"), rec.get("home_spread")],
-            index=["home_ml", "away_ml", "home_spread"],
+            index["home_ml", "away_ml", "home_spread"],
         )
 
-    odds_cols = df.apply(get_odds, axis=1)
-    df = pd.concat([df, odds_cols], axis=1)
+    odds_cols  df.apply(get_odds, axis1)
+    df  pd.concat([df, odds_cols], axis1)
 
     # --- 2) Moneyline edges ---
-    mask_ml = df["home_ml"].notna() & df["away_ml"].notna()
+    mask_ml  df["home_ml"].notna() & df["away_ml"].notna()
 
-    df.loc[mask_ml, "home_imp_raw"] = df.loc[mask_ml, "home_ml"].astype(float).map(
+    df.loc[mask_ml, "home_imp_raw"]  df.loc[mask_ml, "home_ml"].astype(float).map(
         american_to_implied_prob
     )
-    df.loc[mask_ml, "away_imp_raw"] = df.loc[mask_ml, "away_ml"].astype(float).map(
+    df.loc[mask_ml, "away_imp_raw"]  df.loc[mask_ml, "away_ml"].astype(float).map(
         american_to_implied_prob
     )
 
-    df.loc[mask_ml, "total_imp"] = (
+    df.loc[mask_ml, "total_imp"]  (
         df.loc[mask_ml, "home_imp_raw"] + df.loc[mask_ml, "away_imp_raw"]
     )
 
-    df.loc[mask_ml, "market_home_prob"] = (
+    df.loc[mask_ml, "market_home_prob"]  (
         df.loc[mask_ml, "home_imp_raw"] / df.loc[mask_ml, "total_imp"]
     )
-    df.loc[mask_ml, "market_away_prob"] = (
+    df.loc[mask_ml, "market_away_prob"]  (
         df.loc[mask_ml, "away_imp_raw"] / df.loc[mask_ml, "total_imp"]
     )
 
-    df["edge_home"] = df["model_home_prob"] - df["market_home_prob"]
-    df["edge_away"] = (1 - df["model_home_prob"]) - df["market_away_prob"]
+    df["edge_home"]  df["model_home_prob"] - df["market_home_prob"]
+    df["edge_away"]  (1 - df["model_home_prob"]) - df["market_away_prob"]
 
     # --- 3) Spread edge ---
-    df["spread_edge_home"] = df["model_spread_home"] - df["home_spread"]
+    df["spread_edge_home"]  df["model_spread_home"] - df["home_spread"]
 
     # --- 4) Pick BEST: ML vs spread ---
     def choose_best(row):
-        # ===== Moneyline side =====
-        ml_side = "none"
-        ml_edge_val = 0.0
+        #  Moneyline side 
+        ml_side  "none"
+        ml_edge_val  0.0
 
-        if pd.notna(row.get("edge_home")):
-            eh = row["edge_home"]
-            ea = row.get("edge_away", -eh)
+         pd.notna(row.get("edge_home")):
+            eh  row["edge_home"]
+            ea  row.get("edge_away", -eh)
 
-            if eh >= ml_edge_threshold and eh >= abs(ea):
-                ml_side = "HOME_ML"
-                ml_edge_val = eh
-            elif ea >= ml_edge_threshold and ea > abs(eh):
-                ml_side = "AWAY_ML"
-                ml_edge_val = ea
+             eh > ml_edge_threshold and eh > abs(ea):
+                ml_side  "HOME_ML"
+                ml_edge_val  eh
+            el ea > ml_edge_threshold and ea > abs(eh):
+                ml_side  "AWAY_ML"
+                ml_edge_val  ea
 
-        # ===== Spread side =====
-        spread_side = "none"
-        spread_edge_val = 0.0
-        se = row.get("spread_edge_home")
-        hs = row.get("home_spread")
+        #  Spread side 
+        spread_side  "none"
+        spread_edge_val  0.0
+        se  row.get("spread_edge_home")
+        hs  row.get("home_spread")
 
-        if pd.notna(se) and pd.notna(hs):
-            if se > spread_edge_threshold:
-                spread_side = "HOME_SPREAD"
-                spread_edge_val = se
-            elif se < -spread_edge_threshold:
-                spread_side = "AWAY_SPREAD"
-                spread_edge_val = abs(se)
+         pd.notna(se) and pd.notna(hs):
+             se > spread_edge_threshold:
+                spread_side  "HOME_SPREAD"
+                spread_edge_val  se
+            el se < -spread_edge_threshold:
+                spread_side  "AWAY_SPREAD"
+                spread_edge_val  abs(se)
 
-        # ===== Decide between ML vs SPREAD =====
-        if ml_side == "none" and spread_side == "none":
+        #  Decide between ML vs SPREAD 
+         ml_side  "none" and spread_side  "none":
             return "No clear edge"
 
-        # If spread has bigger absolute edge than ML, choose spread
-        if spread_side = "none" and spread_edge_val > abs(ml_edge_val):
-            if spread_side == "HOME_SPREAD":
+        #  spread has bigger absolute edge than ML, choose spread
+         spread_side  "none" and spread_edge_val > abs(ml_edge_val):
+             spread_side  "HOME_SPREAD":
                 # format home line
-                if hs < 0:
-                    line_str = f"home {hs:+}"       # e.g. -3.5
-                elif hs > 0:
-                    line_str = f"home +{hs:.1f}"
+                 hs < 0:
+                    line_str  f"home {hs:+}"       # e.g. -3.5
+                el hs > 0:
+                    line_str  f"home +{hs:.1f}"
                 else:
-                    line_str = "home pk"
+                    line_str  "home pk"
                 return f"BEST: HOME spread ({line_str})"
             else:
-                away_handicap = -hs
-                if away_handicap < 0:
-                    line_str = f"away {away_handicap:+}"
-                elif away_handicap > 0:
-                    line_str = f"away +{away_handicap:.1f}"
+                away_handicap  -hs
+                 away_handicap < 0:
+                    line_str  f"away {away_handicap:+}"
+                el away_handicap > 0:
+                    line_str  f"away +{away_handicap:.1f}"
                 else:
-                    line_str = "away pk"
+                    line_str  "away pk"
                 return f"BEST: AWAY spread ({line_str})"
 
-        # Otherwise, go with ML if it’s strong enough
-        if ml_side == "HOME_ML":
+        # Otherwise, go with ML  it’s strong enough
+         ml_side  "HOME_ML":
             return f"BEST: HOME ML ({row['home_ml']:+})"
-        elif ml_side == "AWAY_ML":
+        el ml_side  "AWAY_ML":
             return f"BEST: AWAY ML ({row['away_ml']:+})"
         else:
             return "No clear edge"
 
-    df["best_bet"] = df.apply(choose_best, axis=1)
+    df["best_bet"]  df.apply(choose_best, axis1)
 
     return df
 
@@ -5716,7 +5716,7 @@ import pandas as pd
 from nba_api.stats.static import teams as nba_teams
 
 # Map full team name -> NBA abbreviation (PHI, BOS, etc.)
-NBA_TEAM_MAP = {
+NBA_TEAM_MAP  {
     t["full_name"]: t["abbreviation"]
     for t in nba_teams.get_teams()
 }
@@ -5726,57 +5726,57 @@ def fetch_injury_report_espn():
     Scrape ESPN NBA injuries page into a clean DataFrame:
     columns: Player, Team, Pos, Status, Injury
     """
-    url = "https://www.espn.com/nba/injuries"
-    tables = pd.read_html(url)
+    url  "https://www.espn.com/nba/injuries"
+    tables  pd.read_html(url)
 
-    if not tables:
+     not tables:
         raise RuntimeError("Could not find any tables on ESPN injuries page")
 
     # Keep tables that look like injury tables
-    injury_tables = []
+    injury_tables  []
     for t in tables:
-        cols_norm = [str(c).strip().lower() for c in t.columns]
-        if any("player" in c or "name" in c for c in cols_norm):
+        cols_norm  [str(c).strip().lower() for c in t.columns]
+         any("player" in c or "name" in c for c in cols_norm):
             injury_tables.append(t)
 
-    if not injury_tables:
+     not injury_tables:
         # fallback: use everything
-        injury_tables = tables
+        injury_tables  tables
 
-    df = pd.concat(injury_tables, ignore_index=True)
+    df  pd.concat(injury_tables, ignore_indexTrue)
 
     # Normalize column names
-    df.columns = [str(c).strip().title() for c in df.columns]
+    df.columns  [str(c).strip().title() for c in df.columns]
 
-    rename_map = {}
+    rename_map  {}
     for c in df.columns:
-        lc = c.lower()
-        if "player" in lc or "name" in lc:
-            rename_map[c] = "Player"
-        elif "team" in lc:
-            rename_map[c] = "Team"
-        elif "pos" in lc or "position" in lc:
-            rename_map[c] = "Pos"
-        elif "status" in lc:
-            rename_map[c] = "Status"
-        elif "injury" in lc or "reason" in lc:
-            rename_map[c] = "Injury"
+        lc  c.lower()
+         "player" in lc or "name" in lc:
+            rename_map[c]  "Player"
+        el "team" in lc:
+            rename_map[c]  "Team"
+        el "pos" in lc or "position" in lc:
+            rename_map[c]  "Pos"
+        el "status" in lc:
+            rename_map[c]  "Status"
+        el "injury" in lc or "reason" in lc:
+            rename_map[c]  "Injury"
 
-    df = df.rename(columns=rename_map)
+    df  df.rename(columnsrename_map)
 
-    keep = [c for c in ["Player", "Team", "Pos", "Status", "Injury"] if c in df.columns]
-    df = df[keep].copy()
+    keep  [c for c in ["Player", "Team", "Pos", "Status", "Injury"]  c in df.columns]
+    df  df[keep].copy()
 
     return df
 
-INJURY_ROLE_WEIGHTS = {
+INJURY_ROLE_WEIGHTS  {
     "star": 3.0,
     "starter": 1.5,
     "rotation": 1.0,
     "bench": 0.5,
 }
 
-INJURY_STATUS_MULTIPLIER = {
+INJURY_STATUS_MULTIPLIER  {
     "out": 1.0,
     "doubtful": 0.75,
     "questionable": 0.5,
@@ -5784,31 +5784,31 @@ INJURY_STATUS_MULTIPLIER = {
 }
 
 # optional: your manual overrides for star/starter etc.
-PLAYER_ROLES = {
+PLAYER_ROLES  {
     # "Giannis Antetokounmpo": "star",
     # "Joel Embiid": "star",
     # "Steph Curry": "star",
-    # fill in over time if you want better accuracy
+    # fill in over time  you want better accuracy
 }
 
 def guess_role(player_name, pos):
     """
     Use your manual PLAYER_ROLES first; fall back on position.
     """
-    if player_name in PLAYER_ROLES:
+     player_name in PLAYER_ROLES:
         return PLAYER_ROLES[player_name]
 
-    pos = (pos or "").upper()
-    if pos in ["PG", "SG", "SF", "PF", "G", "F", "C"]:
+    pos  (pos or "").upper()
+     pos in ["PG", "SG", "SF", "PF", "G", "F", "C"]:
         return "starter"
     return "rotation"
 
 def status_to_mult(status):
-    if not isinstance(status, str):
+     not isinstance(status, str):
         return 1.0
-    s = status.lower()
+    s  status.lower()
     for key, mult in INJURY_STATUS_MULTIPLIER.items():
-        if key in s:
+         key in s:
             return mult
     # default: treat as fully out
     return 1.0
@@ -5817,118 +5817,118 @@ from datetime import datetime, timedelta
 
 def run_x_days_stats(
     num_days,
-    start_date=None,      # "YYYY-MM-DD"
-    odds_by_date=None,    # {"YYYY-MM-DD": odds_dict}
-    spreads_by_date=None, # {"YYYY-MM-DD": spreads_dict}
-    edge_threshold=0.03,
-    lam=0.20,
-    stats_df=None,
-    injury_df=None,       # NEW
+    start_dateNone,      # "YYYY-MM-DD"
+    odds_by_dateNone,    # {"YYYY-MM-DD": odds_dict}
+    spreads_by_dateNone, # {"YYYY-MM-DD": spreads_dict}
+    edge_threshold0.03,
+    lam0.20,
+    stats_dfNone,
+    injury_dfNone,       # NEW
 ):
-    if stats_df is None:
-        stats_df = team_stats_df
+     stats_df is None:
+        stats_df  team_stats_df
 
-    # If no injury_df passed, grab once now
-    if injury_df is None:
+    #  no injury_df passed, grab once now
+     injury_df is None:
         try:
-            injury_df = fetch_injury_report_espn()
+            injury_df  fetch_injury_report_espn()
         except Exception as e:
             print(f"⚠️ Could not fetch ESPN injuries, running without injuries: {e}")
-            injury_df = None
+            injury_df  None
 
-    if start_date is None:
-        current_date = datetime.today().date()
+     start_date is None:
+        current_date  datetime.today().date()
     else:
-        current_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        current_date  datetime.strptime(start_date, "%Y-%m-%d").date()
 
-    all_results = {}
+    all_results  {}
 
     for i in range(num_days):
-        day = current_date + timedelta(days=i)
-        date_iso = day.strftime("Y-m-d")   # for dict keys
-        date_nba = day.strftime("m/d/Y")   # for ScoreboardV2
+        day  current_date + timedelta(daysi)
+        date_iso  day.strftime("Y-m-d")   # for dict keys
+        date_nba  day.strftime("m/d/Y")   # for ScoreboardV2
 
-        print("\n==============================")
+        print("\n")
         print(f"Running stats for {date_iso}")
-        print("==============================")
+        print("")
 
-        odds_dict = odds_by_date.get(date_iso) if odds_by_date else None
-        spreads_dict = spreads_by_date.get(date_iso) if spreads_by_date else None
+        odds_dict  odds_by_date.get(date_iso)  odds_by_date else None
+        spreads_dict  spreads_by_date.get(date_iso)  spreads_by_date else None
 
         try:
-            df = run_daily_probs_for_date(
-                game_date=date_nba,
-                odds_dict=odds_dict,
-                spreads_dict=spreads_dict,
-                stats_df=stats_df,
-                edge_threshold=edge_threshold,
-                lam=lam,
-                injury_df=injury_df,   # <-- HERE
+            df  run_daily_probs_for_date(
+                game_datedate_nba,
+                odds_dictodds_dict,
+                spreads_dictspreads_dict,
+                stats_dfstats_df,
+                edge_thresholdedge_threshold,
+                lamlam,
+                injury_dfinjury_df,   # <-- HERE
             )
-            all_results[date_iso] = df
+            all_results[date_iso]  df
             display(df)
         except Exception as e:
             print(f"❌ Error running for {date_iso}: {e}")
 
     return all_results
 
-def add_spread_recommendations(df, spreads_dict, threshold=1.5):
+def add_spread_recommendations(df, spreads_dict, threshold1.5):
     """
     df: your full_day_df with model_spread_home column.
     spreads_dict: {(home, away): home_spread}
     threshold: how many points of edge before we bet (e.g. 1.5).
     """
-    df = df.copy()
+    df  df.copy()
 
     # Attach the Vegas spread for each game
-    df["home_spread"] = df.apply(
+    df["home_spread"]  df.apply(
         lambda r: spreads_dict.get((r["home"], r["away"]), np.nan),
-        axis=1
+        axis1
     )
 
     # Model edge vs book line
-    df["spread_edge_home"] = df["model_spread_home"] - df["home_spread"]
+    df["spread_edge_home"]  df["model_spread_home"] - df["home_spread"]
 
     def pick_recommendation(row):
-        hs = row["home_spread"]
-        se = row["spread_edge_home"]
+        hs  row["home_spread"]
+        se  row["spread_edge_home"]
 
-        if pd.isna(hs) or pd.isna(se):
+         pd.isna(hs) or pd.isna(se):
             return "No spread line"
 
         # Model thinks home should be more favored than book → bet home
-        if se > threshold:
+         se > threshold:
             # Format line nicely: home -X or +X
-            if hs < 0:
-                line_str = f"home {hs:+}"   # e.g. -3.5
+             hs < 0:
+                line_str  f"home {hs:+}"   # e.g. -3.5
             else:
-                line_str = f"home +{hs:.1f}" if hs > 0 else "home pk"
+                line_str  f"home +{hs:.1f}"  hs > 0 else "home pk"
             return f"Bet HOME spread ({line_str})"
 
         # Model thinks home should be less favored → bet away
-        elif se < -threshold:
+        el se < -threshold:
             # For away, opposite sign of home_spread
-            away_handicap = -hs
-            if away_handicap < 0:
-                line_str = f"away {away_handicap:+}"
+            away_handicap  -hs
+             away_handicap < 0:
+                line_str  f"away {away_handicap:+}"
             else:
-                line_str = f"away +{away_handicap:.1f}" if away_handicap > 0 else "away pk"
+                line_str  f"away +{away_handicap:.1f}"  away_handicap > 0 else "away pk"
             return f"Bet AWAY spread ({line_str})"
 
         else:
             return "No clear spread edge"
 
-    df["spread_recommendation"] = df.apply(pick_recommendation, axis=1)
+    df["spread_recommendation"]  df.apply(pick_recommendation, axis1)
 
     return df
 
 # 👉 Apply it to today’s results
-full_day_with_spreads = add_spread_recommendations(full_day_df, spreads_today, threshold=1.5)
+full_day_with_spreads  add_spread_recommendations(full_day_df, spreads_today, threshold1.5)
 full_day_with_spreads
 
-full_day_df = run_daily_probs_for_date("12/04/2025")
+full_day_df  run_daily_probs_for_date("12/04/2025")
 
-odds_today = {
+odds_today  {
     ("Philadelphia 76ers", "Golden State Warriors"): {
         "home_ml": -120,
         "away_ml": +100,
@@ -5960,8 +5960,8 @@ import numpy as np
 import pandas as pd
 
 def american_to_implied_prob(odds):
-    odds = float(odds)
-    if odds < 0:
+    odds  float(odds)
+     odds < 0:
         return (-odds) / ((-odds) + 100.0)
     else:
         return 100.0 / (odds + 100.0)
@@ -5970,8 +5970,8 @@ def american_to_implied_prob(odds):
 def attach_odds_and_best_bets(
     df,
     odds_dict,
-    ml_edge_threshold=0.03,     # 3% edge needed on ML
-    spread_edge_threshold=1.5   # 1.5 pts edge needed on spread
+    ml_edge_threshold0.03,     # 3% edge needed on ML
+    spread_edge_threshold1.5   # 1.5 pts edge needed on spread
 ):
     """
     df: your full_day_df with columns:
@@ -5986,133 +5986,133 @@ def attach_odds_and_best_bets(
     }
     """
 
-    df = df.copy()
+    df  df.copy()
 
     # --- 1) Attach odds/spreads to each game ---
     def get_odds(row):
-        key = (row["home"], row["away"])
-        rec = odds_dict.get(key)
-        if rec is None:
+        key  (row["home"], row["away"])
+        rec  odds_dict.get(key)
+         rec is None:
             return pd.Series([np.nan, np.nan, np.nan],
-                             index=["home_ml", "away_ml", "home_spread"])
+                             index["home_ml", "away_ml", "home_spread"])
         return pd.Series(
             [rec.get("home_ml"), rec.get("away_ml"), rec.get("home_spread")],
-            index=["home_ml", "away_ml", "home_spread"],
+            index["home_ml", "away_ml", "home_spread"],
         )
 
-    odds_cols = df.apply(get_odds, axis=1)
-    df = pd.concat([df, odds_cols], axis=1)
+    odds_cols  df.apply(get_odds, axis1)
+    df  pd.concat([df, odds_cols], axis1)
 
     # --- 2) Moneyline edges (model vs market) ---
-    mask_ml = df["home_ml"].notna() & df["away_ml"].notna()
+    mask_ml  df["home_ml"].notna() & df["away_ml"].notna()
 
-    df.loc[mask_ml, "home_imp_raw"] = df.loc[mask_ml, "home_ml"].astype(float).map(
+    df.loc[mask_ml, "home_imp_raw"]  df.loc[mask_ml, "home_ml"].astype(float).map(
         american_to_implied_prob
     )
-    df.loc[mask_ml, "away_imp_raw"] = df.loc[mask_ml, "away_ml"].astype(float).map(
+    df.loc[mask_ml, "away_imp_raw"]  df.loc[mask_ml, "away_ml"].astype(float).map(
         american_to_implied_prob
     )
 
-    df.loc[mask_ml, "total_imp"] = (
+    df.loc[mask_ml, "total_imp"]  (
         df.loc[mask_ml, "home_imp_raw"] + df.loc[mask_ml, "away_imp_raw"]
     )
 
-    df.loc[mask_ml, "market_home_prob"] = (
+    df.loc[mask_ml, "market_home_prob"]  (
         df.loc[mask_ml, "home_imp_raw"] / df.loc[mask_ml, "total_imp"]
     )
-    df.loc[mask_ml, "market_away_prob"] = (
+    df.loc[mask_ml, "market_away_prob"]  (
         df.loc[mask_ml, "away_imp_raw"] / df.loc[mask_ml, "total_imp"]
     )
 
-    df["edge_home"] = df["model_home_prob"] - df["market_home_prob"]
-    df["edge_away"] = (1 - df["model_home_prob"]) - df["market_away_prob"]
+    df["edge_home"]  df["model_home_prob"] - df["market_home_prob"]
+    df["edge_away"]  (1 - df["model_home_prob"]) - df["market_away_prob"]
 
     # --- 3) Spread edge (model vs line) ---
-    df["spread_edge_home"] = df["model_spread_home"] - df["home_spread"]
+    df["spread_edge_home"]  df["model_spread_home"] - df["home_spread"]
 
     # --- 4) Decide best bet (ML vs spread) ---
     def choose_best(row):
-        # ===== Moneyline side =====
-        ml_side = "none"
-        ml_edge_val = 0.0
+        #  Moneyline side 
+        ml_side  "none"
+        ml_edge_val  0.0
 
-        eh = row.get("edge_home")
-        ea = row.get("edge_away")
+        eh  row.get("edge_home")
+        ea  row.get("edge_away")
 
-        if pd.notna(eh) and pd.notna(ea):
-            if eh >= ml_edge_threshold and eh >= abs(ea):
-                ml_side = "HOME_ML"
-                ml_edge_val = eh
-            elif ea >= ml_edge_threshold and ea > abs(eh):
-                ml_side = "AWAY_ML"
-                ml_edge_val = ea
+         pd.notna(eh) and pd.notna(ea):
+             eh > ml_edge_threshold and eh > abs(ea):
+                ml_side  "HOME_ML"
+                ml_edge_val  eh
+            el ea > ml_edge_threshold and ea > abs(eh):
+                ml_side  "AWAY_ML"
+                ml_edge_val  ea
 
-        # ===== Spread side =====
-        spread_side = "none"
-        spread_edge_val = 0.0
-        se = row.get("spread_edge_home")
-        hs = row.get("home_spread")
+        #  Spread side 
+        spread_side  "none"
+        spread_edge_val  0.0
+        se  row.get("spread_edge_home")
+        hs  row.get("home_spread")
 
-        if pd.notna(se) and pd.notna(hs):
-            if se > spread_edge_threshold:
-                spread_side = "HOME_SPREAD"
-                spread_edge_val = se
-            elif se < -spread_edge_threshold:
-                spread_side = "AWAY_SPREAD"
-                spread_edge_val = abs(se)  # use absolute for comparison
+         pd.notna(se) and pd.notna(hs):
+             se > spread_edge_threshold:
+                spread_side  "HOME_SPREAD"
+                spread_edge_val  se
+            el se < -spread_edge_threshold:
+                spread_side  "AWAY_SPREAD"
+                spread_edge_val  abs(se)  # use absolute for comparison
 
-        # ===== Decide between ML vs SPREAD =====
-        if ml_side == "none" and spread_side == "none":
+        #  Decide between ML vs SPREAD 
+         ml_side  "none" and spread_side  "none":
             return "No clear edge"
 
-        # If spread has bigger edge than ML, choose spread
-        if spread_side = "none" and spread_edge_val > abs(ml_edge_val):
-            if spread_side == "HOME_SPREAD":
+        #  spread has bigger edge than ML, choose spread
+         spread_side  "none" and spread_edge_val > abs(ml_edge_val):
+             spread_side  "HOME_SPREAD":
                 # pretty-print home line
-                if hs < 0:
-                    line_str = f"home {hs:+}"     # e.g. -3.5
-                elif hs > 0:
-                    line_str = f"home +{hs:.1f}"  # e.g. +3.0
+                 hs < 0:
+                    line_str  f"home {hs:+}"     # e.g. -3.5
+                el hs > 0:
+                    line_str  f"home +{hs:.1f}"  # e.g. +3.0
                 else:
-                    line_str = "home pk"
+                    line_str  "home pk"
                 return f"BEST: HOME spread ({line_str})"
             else:
                 # away spread is the opposite of home_spread
-                away_handicap = -hs
-                if away_handicap < 0:
-                    line_str = f"away {away_handicap:+}"
-                elif away_handicap > 0:
-                    line_str = f"away +{away_handicap:.1f}"
+                away_handicap  -hs
+                 away_handicap < 0:
+                    line_str  f"away {away_handicap:+}"
+                el away_handicap > 0:
+                    line_str  f"away +{away_handicap:.1f}"
                 else:
-                    line_str = "away pk"
+                    line_str  "away pk"
                 return f"BEST: AWAY spread ({line_str})"
 
         # Otherwise go with ML
-        if ml_side == "HOME_ML":
+         ml_side  "HOME_ML":
             return f"BEST: HOME ML ({row['home_ml']:+})"
-        elif ml_side == "AWAY_ML":
+        el ml_side  "AWAY_ML":
             return f"BEST: AWAY ML ({row['away_ml']:+})"
         else:
             return "No clear edge"
 
-    df["best_bet"] = df.apply(choose_best, axis=1)
+    df["best_bet"]  df.apply(choose_best, axis1)
 
     return df
 
-injury_df = fetch_injury_report_espn()
+injury_df  fetch_injury_report_espn()
 
-results = run_x_days_stats(
+results  run_x_days_stats(
     3,
-    start_date="2025-12-04",
-    odds_by_date=None,
-    spreads_by_date=None,
-    injury_df=injury_df,
+    start_date"2025-12-04",
+    odds_by_dateNone,
+    spreads_by_dateNone,
+    injury_dfinjury_df,
 )
 
-full_day_df = run_daily_probs_for_date("12/04/2025")
+full_day_df  run_daily_probs_for_date("12/04/2025")
 full_day_df
 
-full_day_with_bets = attach_odds_and_best_bets(full_day_df, odds_today)
+full_day_with_bets  attach_odds_and_best_bets(full_day_df, odds_today)
 full_day_with_bets[[
     "home", "away",
     "home_ml", "away_ml", "home_spread",
@@ -6121,7 +6121,7 @@ full_day_with_bets[[
     "best_bet"
 ]]
 
-full_day_with_bets = attach_odds_and_best_bets(full_day_df, odds_today)
+full_day_with_bets  attach_odds_and_best_bets(full_day_df, odds_today)
 
 full_day_with_bets[[
     "home", "away",
@@ -6130,11 +6130,11 @@ full_day_with_bets[[
     "edge_home", "edge_away", "spread_edge_home",
     "best_bet"
     def main():
-    # if your code is currently top-level (not inside a function),
+    #  your code is currently top-level (not inside a function),
     # you can move it into here over time.
-    # For now, if everything is already at top-level, you can skip this.
+    # For now,  everything is already at top-level, you can skip this.
     pass
 
-if __name__ == "__main__":
+ __name__  "__main__":
     main()
 ]]
