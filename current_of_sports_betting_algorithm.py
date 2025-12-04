@@ -3990,7 +3990,7 @@ spread_result = predict_spread(
 
 spread_result
 
-!pip install nba_api
+pip install nba_api
 
 from nba_api.stats.endpoints import leaguedashteamstats
 import pandas as pd
@@ -4263,7 +4263,7 @@ games_today = [
 slate_df = run_daily_slate(games_today)
 slate_df
 
-!pip install nba_api
+pip install nba_api
 
 games_today = [
     {
@@ -4921,7 +4921,7 @@ def best_bet_for_row(row, ml_edge_threshold=0.03, spread_edge_threshold=1.5):
     # We compare absolute edges: bigger edge wins
     if ml_side == "none" and spread_side == "none":
         return "No clear edge"
-    elif spread_side != "none" and spread_edge_val > abs(ml_edge_val):
+    elif spread_side = "none" and spread_edge_val > abs(ml_edge_val):
         # Take spread bet
         if spread_side == "HOME_SPREAD":
             return f"BEST: HOME spread (home -{hs})"
@@ -4978,7 +4978,7 @@ def best_bet_for_row(row, ml_edge_threshold=0.03, spread_edge_threshold=1.5):
     # --- Compare edges ---
     if ml_side == "none" and spread_side == "none":
         return "No clear edge"
-    elif spread_side != "none" and spread_edge_val > abs(ml_edge_val):
+    elif spread_side = "none" and spread_edge_val > abs(ml_edge_val):
         if spread_side == "HOME_SPREAD":
             return f"BEST: HOME spread (home -{hs})"
         else:
@@ -5081,7 +5081,7 @@ def run_daily_card(game_date_str):
     results_df = pd.DataFrame(results)
     return results_df
 
-!pip install nba_api
+pip install nba_api
 
 # ==== IMPORTS ====
 import pandas as pd
@@ -5681,7 +5681,7 @@ def attach_odds_and_best_bets(
             return "No clear edge"
 
         # If spread has bigger absolute edge than ML, choose spread
-        if spread_side != "none" and spread_edge_val > abs(ml_edge_val):
+        if spread_side = "none" and spread_edge_val > abs(ml_edge_val):
             if spread_side == "HOME_SPREAD":
                 # format home line
                 if hs < 0:
@@ -6067,7 +6067,7 @@ def attach_odds_and_best_bets(
             return "No clear edge"
 
         # If spread has bigger edge than ML, choose spread
-        if spread_side != "none" and spread_edge_val > abs(ml_edge_val):
+        if spread_side = "none" and spread_edge_val > abs(ml_edge_val):
             if spread_side == "HOME_SPREAD":
                 # pretty-print home line
                 if hs < 0:
