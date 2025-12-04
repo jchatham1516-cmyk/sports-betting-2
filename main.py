@@ -16,22 +16,18 @@ def main(argv=None):
 
     print(f"Running model for {game_date}...")
 
-    bdl_api_key = get_bdl_api_key()
+       bdl_api_key = get_bdl_api_key()
 
-    # 1) Fetch odds from API-Sports
+    # 1) Fetch odds from Sportsbook API2 via RapidAPI (DEBUG stub)
     try:
-        odds_dict = fetch_odds_for_date_apisports(
+        odds_dict = fetch_odds_for_date_sportsbook(
             game_date_str=game_date,
-            api_key=get_apisports_api_key(),
+            api_key=get_sportsbook_api_key(),
         )
-        spreads_dict = {
-            k: v["home_spread"]
-            for k, v in odds_dict.items()
-            if v.get("home_spread") is not None
-        }
-        print(f"Fetched odds for {len(odds_dict)} games from API-Sports.")
+        spreads_dict = {}
+        print(f"Fetched odds (stub) from Sportsbook API2. entries={len(odds_dict)}")
     except Exception as e:
-        print(f"Warning: failed to fetch odds from API-Sports: {e}")
+        print(f"Warning: failed to fetch odds from Sportsbook API2: {e}")
         odds_dict = {}
         spreads_dict = {}
         print("Proceeding with market_home_prob = 0.5 defaults.")
