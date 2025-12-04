@@ -1,5 +1,5 @@
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie + API-Sports odds).")
+    parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
     parser.add_argument(
         "--date",
         type=str,
@@ -16,11 +16,9 @@ def main(argv=None):
 
     print(f"Running model for {game_date}...")
 
-       bdl_api_key = get_bdl_api_key()
-
     bdl_api_key = get_bdl_api_key()
 
-    # 1) Load odds from local CSV (manual input)
+    # 1) Load odds from local CSV (manual odds)
     try:
         odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date)
         print(f"Loaded odds for {len(odds_dict)} games from CSV.")
