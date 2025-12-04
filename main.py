@@ -1,5 +1,5 @@
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie + Odds API).")
+    parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
     parser.add_argument(
         "--date",
         type=str,
@@ -8,7 +8,6 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    # Determine game date
     if args.date is None:
         today = datetime.utcnow().date()
         game_date = today.strftime("%m/%d/%Y")
@@ -17,11 +16,9 @@ def main(argv=None):
 
     print(f"Running model for {game_date}...")
 
-    # API keys
     bdl_api_key = get_bdl_api_key()
 
-    # 1) Fetch odds from The Odds API
-     # 1) Fetch odds from The Odds API
+    # Fetch odds from The Odds API
     try:
         odds_dict = fetch_odds_for_date(
             game_date_str=game_date,
@@ -40,11 +37,13 @@ def main(argv=None):
         odds_dict = {}
         spreads_dict = {}
         print("Proceeding with market_home_prob = 0.5 defaults.")
-    # 2) Build team ratings from BallDontLie up to this date
+
+    # Determine season year for BallDontLie based on the game date
     game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
     season_year = season_start_year_for_date(game_date_obj)
     end_date_iso = game_date_obj.strftime("%Y-%m-%d")
 
+    # Fetch team ratings from BallDontLie
     try:
         stats_df = fetch_team_ratings_bdl(
             season_year=season_year,
@@ -56,7 +55,7 @@ def main(argv=None):
         print("Exiting without predictions so the workflow can complete gracefully.")
         return
 
-    # 3) Run daily model
+    # Run daily model; also fail gracefully if something blows up
     try:
         results_df = run_daily_probs_for_date(
             game_date=game_date,
@@ -70,12 +69,12 @@ def main(argv=None):
         print("Exiting without predictions so the workflow can complete gracefully.")
         return
 
-    # 4) Save CSV for GitHub Actions artifact
+    # Ensure output directory
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{game_date.replace('/', '-')}.csv"
     results_df.to_csv(out_name, index=False)
 
-    # Pretty print
+    # Pretty print to console
     with pd.option_context("display.max_columns", None):
         print(results_df)
 
