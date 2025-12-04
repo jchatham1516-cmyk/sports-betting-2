@@ -1,4 +1,4 @@
-
+pip install balldontlie==0.1.0
 """
 Clean daily NBA betting model script.
 
