@@ -582,7 +582,6 @@ def run_daily_probs_for_date(
 # -----------------------------
 # CLI / entrypoint
 # -----------------------------
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run daily NBA betting model.")
     parser.add_argument(
@@ -612,8 +611,9 @@ def main(argv=None):
     odds_dict = {}
     spreads_dict = {}
 
-           season = current_season_str()
+    season = current_season_str()
 
+    # Fetch team stats with retry; fail gracefully if NBA API is down
     try:
         stats_df = fetch_team_advanced_stats(season=season)
     except Exception as e:
@@ -621,6 +621,7 @@ def main(argv=None):
         print("Exiting without predictions so the workflow can complete gracefully.")
         return
 
+    # Run daily model; also fail gracefully if something blows up
     try:
         results_df = run_daily_probs_for_date(
             game_date=game_date,
@@ -633,7 +634,6 @@ def main(argv=None):
         print("Exiting without predictions so the workflow can complete gracefully.")
         return
 
-
     # Ensure output directory
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{game_date.replace('/', '-')}.csv"
@@ -644,7 +644,6 @@ def main(argv=None):
         print(results_df)
 
     print(f"\nSaved predictions to {out_name}")
-
 
 if __name__ == "__main__":
     main()
