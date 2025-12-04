@@ -73,103 +73,44 @@ def get_apisports_api_key():
     return api_key
 
 
-def fetch_odds_for_date_apisports(game_date_str, league_id=12, season="2024-2025", api_key=None):
+def fetch_odds_for_date_sportsbook(game_date_str, api_key=None):
     """
-    Fetch NBA moneyline + spread odds using API-Sports Basketball API.
+    DEBUG stub: call Sportsbook API2 and print what we get.
 
-    league_id=12 is typically NBA. season string depends on how your API-Sports
-    account is set up (e.g. '2024-2025'). Adjust if needed.
+    Once we see the shape of the data in the logs, we can map it into
+    (home, away) -> {home_ml, away_ml, home_spread}.
     """
     if api_key is None:
-        api_key = get_apisports_api_key()
+        api_key = get_sportsbook_api_key()
 
-    # Convert MM/DD/YYYY -> YYYY-MM-DD
-    dt = datetime.strptime(game_date_str, "%m/%d/%Y").strftime("%Y-%m-%d")
+    # TODO: replace this with your actual competition key for NBA from the docs.
+    COMPETITION_KEY = "PUT_YOUR_NBA_COMPETITION_KEY_HERE"
 
-    url = f"{APISPORTS_BASE_URL}/odds"
-    params = {
-        "league": league_id,
-        "season": season,
-        "date": dt,
-    }
-    headers = {
-        "x-apisports-key": api_key,
-    }
+    data = sportsbook_get(
+        f"/v0/competitions/{COMPETITION_KEY}/events",
+        params={},  # we’ll filter by date locally using startTime
+        api_key=api_key,
+    )
 
-    resp = requests.get(url, params=params, headers=headers, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    print("[SportsbookAPI] Raw events type:", type(data))
+    # In some examples this is a list, not a dict:
+    # https://sportsbook-api2.p.rapidapi.com/v0/competitions/Q63E-wddv-ddp4/events  → returns [...]
+    # So we handle both
+    if isinstance(data, dict) and "events" in data:
+        events = data.get("events", [])
+    else:
+        events = data
 
-    odds_dict = {}
+    print(f"[SportsbookAPI] Got {len(events)} events total")
 
-    # The exact JSON structure may vary; this is a template that we can adjust
-    # once we see the real payload in the logs.
-    response_items = data.get("response", []) or []
-    print(f"[API-Sports] Got {len(response_items)} odds entries for {dt}")
+    # Print a sample event to the logs so we can see fields (home team, away team, markets etc.)
+    if events:
+        sample = events[0]
+        print("[SportsbookAPI] Sample event (truncated):", str(sample)[:600])
 
-    for item in response_items:
-        try:
-            home = item["teams"]["home"]["name"]
-            away = item["teams"]["away"]["name"]
-        except KeyError:
-            continue
-
-        bookmakers = item.get("bookmakers", []) or []
-        if not bookmakers:
-            continue
-
-        # pick the first bookmaker for now
-        bk = bookmakers[0]
-        bets = bk.get("bets", []) or []
-
-        home_ml = None
-        away_ml = None
-        home_spread = None
-
-        for bet in bets:
-            bet_name = bet.get("name", "").lower()
-            values = bet.get("values", []) or []
-
-            # Moneyline-style market
-            if "winner" in bet_name or "moneyline" in bet_name:
-                for v in values:
-                    # sometimes value is team name or "Home"/"Away"
-                    val = str(v.get("value", "")).strip()
-                    odd_str = v.get("odd")
-                    if odd_str is None:
-                        continue
-
-                    # API-Sports odds may be decimal; your model expects American.
-                    # For now we keep them as decimal and treat them as is, or
-                    # convert to pseudo-American later if you want.
-                    # Here we just store them directly.
-                    if val == home or val.lower() == "home":
-                        home_ml = float(odd_str)
-                    elif val == away or val.lower() == "away":
-                        away_ml = float(odd_str)
-
-            # Spread / handicap
-            if "handicap" in bet_name or "spread" in bet_name:
-                for v in values:
-                    val = str(v.get("value", "")).strip()
-                    handicap = v.get("handicap")
-                    if handicap is None:
-                        continue
-                    if val == home or val.lower() == "home":
-                        try:
-                            home_spread = float(handicap)
-                        except (TypeError, ValueError):
-                            pass
-
-        odds_dict[(home, away)] = {
-            "home_ml": home_ml,
-            "away_ml": away_ml,
-            "home_spread": home_spread,
-        }
-
-    print(f"[API-Sports] Built odds for {len(odds_dict)} games.")
-    print("[API-Sports] Sample keys:", list(odds_dict.keys())[:5])
-    return odds_dict
+    # For now, return empty so your model keeps using 0.5 market probs.
+    # Once we see the logs, we can build a proper odds_dict from this.
+    return {}
 
 # -----------------------------
 # Season / date helpers
