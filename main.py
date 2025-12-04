@@ -18,16 +18,14 @@ def main(argv=None):
 
        bdl_api_key = get_bdl_api_key()
 
-    # 1) Fetch odds from Sportsbook API2 via RapidAPI (DEBUG stub)
+    bdl_api_key = get_bdl_api_key()
+
+    # 1) Load odds from local CSV (manual input)
     try:
-        odds_dict = fetch_odds_for_date_sportsbook(
-            game_date_str=game_date,
-            api_key=get_sportsbook_api_key(),
-        )
-        spreads_dict = {}
-        print(f"Fetched odds (stub) from Sportsbook API2. entries={len(odds_dict)}")
+        odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date)
+        print(f"Loaded odds for {len(odds_dict)} games from CSV.")
     except Exception as e:
-        print(f"Warning: failed to fetch odds from Sportsbook API2: {e}")
+        print(f"Warning: failed to load odds from CSV: {e}")
         odds_dict = {}
         spreads_dict = {}
         print("Proceeding with market_home_prob = 0.5 defaults.")
