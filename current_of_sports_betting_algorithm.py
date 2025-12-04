@@ -6129,4 +6129,12 @@ full_day_with_bets[[
     "model_home_prob", "model_spread_home",
     "edge_home", "edge_away", "spread_edge_home",
     "best_bet"
+    def main():
+    # if your code is currently top-level (not inside a function),
+    # you can move it into here over time.
+    # For now, if everything is already at top-level, you can skip this.
+    pass
+
+if __name__ == "__main__":
+    main()
 ]]
