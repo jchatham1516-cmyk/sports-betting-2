@@ -9,9 +9,6 @@ jobs:
   run-model:
     runs-on: ubuntu-latest
 
-    env:
-      BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
-
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -27,6 +24,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run daily model
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
         run: |
           python "current_of_sports_betting_algorithm.py"
 
