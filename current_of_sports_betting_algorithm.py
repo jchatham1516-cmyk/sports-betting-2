@@ -1,50 +1,54 @@
-pip install balldontlie==0.1.0
 """
-Clean daily NBA betting model script.
+Daily NBA betting model using BallDontLie + ESPN injuries.
+
+Replaces nba_api / stats.nba.com completely.
 
 What it does:
-- Fetches team advanced stats from nba_api
-- Fetches the NBA schedule for a given date
-- Pulls injuries from ESPN
-- Computes a matchup score, converts to win prob & model spread
-- Optionally compares vs betting lines and suggests a bet
-- Writes a CSV in results/ and prints a sorted table
+- Uses BallDontLie to get:
+    - All teams
+    - All regular-season games up to the model date
+    - Daily schedule for a specific date
+- Builds simple team ratings from:
+    - Average points scored (ORtg proxy)
+    - Average points allowed (DRtg proxy)
+- Uses ESPN injuries page to adjust matchup score
+- Computes a matchup score → win probability → model spread
+- Outputs ALL games for the date with:
+    - model_home_prob, edges, model_spread, and a recommendation
+- Saves CSV under results/predictions_MM-DD-YYYY.csv
 
 To run locally:
+    export BALLDONTLIE_API_KEY="your_key_here"
     python current_of_sports_betting_algorithm.py --date 12/04/2025
+
+In GitHub Actions:
+    - Store BALLDONTLIE_API_KEY as a repo secret
 """
 
 import os
 import sys
 import math
 import argparse
+import time
 from datetime import datetime, date
-import time  # <-- ADD THIS
 
 import numpy as np
 import pandas as pd
-import requests  # <-- ADD THIS
+import requests
 
-from nba_api.stats.endpoints import leaguedashteamstats, ScoreboardV2
 
 # -----------------------------
-# Helpers: seasons & odds
+# Season / date helpers
 # -----------------------------
 
-def current_season_str(today=None):
+def season_start_year_for_date(d: date) -> int:
     """
-    Return NBA season string like '2025-26' based on today's date.
+    BallDontLie uses season years like 2024 for the 2024-25 season.
+    NBA season usually starts ~Oct; before August => belongs to prior season.
     """
-    if today is None:
-        today = date.today()
-    year = today.year
-    # NBA season usually starts in October; if before August, we are in prior season year
-    if today.month < 8:
-        start_year = year - 1
-    else:
-        start_year = year
-    end_year_short = (start_year + 1) % 100
-    return f"{start_year}-{end_year_short:02d}"
+    if d.month < 8:
+        return d.year - 1
+    return d.year
 
 
 def american_to_implied_prob(odds):
@@ -59,94 +63,208 @@ def american_to_implied_prob(odds):
 
 
 # -----------------------------
-# Team stats
+# BallDontLie low-level client
 # -----------------------------
 
-def fetch_team_advanced_stats(season=None, max_retries=3, pause_seconds=5):
-    """
-    Fetch league-wide team advanced stats for a given season and return a DataFrame
-    with columns standardized to:
-      TEAM_ID, TEAM_NAME, ORtg, DRtg, eFG, TOV, AST, ORB, DRB, FTAr
+BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
 
-    Retries a few times if stats.nba.com times out.
+
+def get_bdl_api_key():
+    api_key = os.environ.get("BALLDONTLIE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "BALLDONTLIE_API_KEY environment variable is not set. "
+            "Set it locally or configure it as a GitHub Actions secret."
+        )
+    return api_key
+
+
+def bdl_get(path, params=None, api_key=None, max_retries=5):
     """
-    if season is None:
-        season = current_season_str()
+    Generic GET helper for BallDontLie with basic retry + rate-limit handling.
+    """
+    if api_key is None:
+        api_key = get_bdl_api_key()
+
+    url = BALLDONTLIE_BASE_URL.rstrip("/") + "/" + path.lstrip("/")
+    headers = {"Authorization": api_key}
+    params = dict(params or {})
 
     last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
-            stats = leaguedashteamstats.LeagueDashTeamStats(
-                season=season,
-                measure_type_detailed_defense="Advanced",
-                per_mode_detailed="PerGame",
-            ).get_data_frames()[0]
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+            # Handle rate limiting explicitly
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after is not None:
+                    wait = int(retry_after)
+                else:
+                    wait = 15
+                print(
+                    f"[bdl_get] Rate limited (429) on {path}, "
+                    f"attempt {attempt}/{max_retries}. Sleeping {wait}s..."
+                )
+                time.sleep(wait)
+                last_exc = RuntimeError("Rate limited by BallDontLie")
+                continue
 
-            # If we got here, request succeeded, break out of retry loop
-            last_exc = None
+            resp.raise_for_status()
+            return resp.json()
+
+        except requests.exceptions.Timeout as e:
+            last_exc = e
+            print(
+                f"[bdl_get] Timeout calling {path} (attempt {attempt}/{max_retries}): {e}"
+            )
+            if attempt < max_retries:
+                time.sleep(5)
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            print(
+                f"[bdl_get] HTTP error calling {path} (attempt {attempt}/{max_retries}): {e}"
+            )
+            if attempt < max_retries:
+                time.sleep(5)
+
+    raise RuntimeError(
+        f"Failed to GET {path} from BallDontLie after {max_retries} attempts"
+    ) from last_exc
+
+
+# -----------------------------
+# Team ratings built from games
+# -----------------------------
+
+def fetch_team_ratings_bdl(
+    season_year: int,
+    end_date_iso: str,
+    api_key: str,
+):
+    """
+    Build a simple team rating DataFrame from BallDontLie games:
+
+    - ORtg proxy  = average points scored per game
+    - DRtg proxy  = average points allowed per game
+    - W, L, W_PCT from game results
+
+    Returns DataFrame with columns:
+      TEAM_ID, TEAM_NAME, GP, W, L, W_PCT, ORtg, DRtg, eFG, TOV, AST, ORB, DRB, FTAr
+    (Advanced stats are zeroed but kept to match the rest of the model.)
+    """
+    # 1) Get all teams
+    teams_json = bdl_get("teams", params={}, api_key=api_key)
+    teams_data = teams_json.get("data", [])
+
+    # Initialize aggregates
+    agg = {}
+    for t in teams_data:
+        tid = t["id"]
+        agg[tid] = {
+            "TEAM_NAME": t["full_name"],
+            "gp": 0,
+            "pts_for": 0,
+            "pts_against": 0,
+            "wins": 0,
+            "losses": 0,
+        }
+
+    # 2) Get all games for this season up to end_date_iso
+    #    docs: GET /v1/games with seasons[]=YYYY and end_date=YYYY-MM-DD, per_page, cursor :contentReference[oaicite:4]{index=4}
+    params = {
+        "seasons[]": season_year,
+        "end_date": end_date_iso,
+        "per_page": 100,
+    }
+    cursor = None
+
+    while True:
+        if cursor is not None:
+            params["cursor"] = cursor
+        else:
+            params.pop("cursor", None)
+
+        games_json = bdl_get("games", params=params, api_key=api_key)
+        games = games_json.get("data", [])
+        meta = games_json.get("meta", {}) or {}
+        cursor = meta.get("next_cursor")
+
+        for g in games:
+            home_team = g["home_team"]
+            away_team = g["visitor_team"]  # naming from docs :contentReference[oaicite:5]{index=5}
+
+            home_id = home_team["id"]
+            away_id = away_team["id"]
+            home_score = g.get("home_team_score", 0) or 0
+            away_score = g.get("visitor_team_score", 0) or 0
+
+            # Skip games that have no score yet (0-0 and period==0 & status is start_time)
+            if home_score == 0 and away_score == 0 and g.get("period", 0) == 0:
+                continue
+
+            # Home aggregates
+            if home_id in agg:
+                agg[home_id]["gp"] += 1
+                agg[home_id]["pts_for"] += home_score
+                agg[home_id]["pts_against"] += away_score
+            # Away aggregates
+            if away_id in agg:
+                agg[away_id]["gp"] += 1
+                agg[away_id]["pts_for"] += away_score
+                agg[away_id]["pts_against"] += home_score
+
+            # Wins / losses
+            if home_score > away_score:
+                if home_id in agg:
+                    agg[home_id]["wins"] += 1
+                if away_id in agg:
+                    agg[away_id]["losses"] += 1
+            elif away_score > home_score:
+                if away_id in agg:
+                    agg[away_id]["wins"] += 1
+                if home_id in agg:
+                    agg[home_id]["losses"] += 1
+
+        if not cursor:
             break
 
-        except requests.exceptions.ReadTimeout as e:
-            last_exc = e
-            print(
-                f"[fetch_team_advanced_stats] ReadTimeout talking to stats.nba.com "
-                f"(attempt {attempt}/{max_retries})."
-            )
-            if attempt < max_retries:
-                print(f"Sleeping {pause_seconds} seconds before retry...")
-                time.sleep(pause_seconds)
-        except Exception as e:
-            last_exc = e
-            print(
-                f"[fetch_team_advanced_stats] Error talking to stats.nba.com "
-                f"(attempt {attempt}/{max_retries}): {e}"
-            )
-            if attempt < max_retries:
-                print(f"Sleeping {pause_seconds} seconds before retry...")
-                time.sleep(pause_seconds)
+    # 3) Build DataFrame
+    rows = []
+    for tid, rec in agg.items():
+        gp = rec["gp"]
+        wins = rec["wins"]
+        losses = rec["losses"]
+        w_pct = wins / gp if gp > 0 else 0.0
+        or_p = rec["pts_for"] / gp if gp > 0 else 0.0
+        dr_p = rec["pts_against"] / gp if gp > 0 else 0.0
 
-    if last_exc is not None:
-        raise RuntimeError(
-            f"Failed to fetch team stats for season {season} after {max_retries} attempts"
-        ) from last_exc
+        rows.append(
+            {
+                "TEAM_ID": tid,
+                "TEAM_NAME": rec["TEAM_NAME"],
+                "GP": gp,
+                "W": wins,
+                "L": losses,
+                "W_PCT": w_pct,
+                "ORtg": or_p,
+                "DRtg": dr_p,
+                # Keep advanced columns as zeros for now
+                "eFG": 0.0,
+                "TOV": 0.0,
+                "AST": 0.0,
+                "ORB": 0.0,
+                "DRB": 0.0,
+                "FTAr": 0.0,
+            }
+        )
 
-    # Keep a manageable subset of columns
-    cols = [
-        "TEAM_ID",
-        "TEAM_NAME",
-        "GP",
-        "W",
-        "L",
-        "W_PCT",
-        "OFF_RATING",
-        "DEF_RATING",
-        "EFG_PCT",
-        "TM_TOV_PCT",
-        "AST_PCT",
-        "OREB_PCT",
-        "DREB_PCT",
-    ]
-    stats = stats[cols].copy()
-
-    stats.rename(
-        columns={
-            "OFF_RATING": "ORtg",
-            "DEF_RATING": "DRtg",
-            "EFG_PCT": "eFG",
-            "TM_TOV_PCT": "TOV",
-            "AST_PCT": "AST",
-            "OREB_PCT": "ORB",
-            "DREB_PCT": "DRB",
-        },
-        inplace=True,
-    )
-
-    # We don't have FTAr here, keep as 0.0 so Δ_FTAr is 0
-    stats["FTAr"] = 0.0
-
-    return stats
+    df = pd.DataFrame(rows)
+    return df
 
 
+# -----------------------------
+# Team lookup + scoring model
+# -----------------------------
 
 def find_team_row(team_name_input, stats_df):
     """
@@ -167,39 +285,27 @@ def find_team_row(team_name_input, stats_df):
     raise ValueError(f"Could not find a team matching: {team_name_input}")
 
 
-# -----------------------------
-# Matchup scoring & probabilities
-# -----------------------------
-
 def season_matchup_score(home_row, away_row):
     """
     Linear scoring model:
     Positive score => home team stronger.
+
+    Here ORtg/DRtg are simple PTS_for/PTS_against per game built from BallDontLie.
+    Advanced stats are zeros, so only ORtg/DRtg and home edge drive results.
     """
     h = home_row
     a = away_row
 
     d_ORtg = h["ORtg"] - a["ORtg"]
     d_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg is better → flip
-    d_eFG  = h["eFG"]  - a["eFG"]
-    d_TOV  = a["TOV"]  - h["TOV"]    # fewer turnovers better
-    d_AST  = h["AST"]  - a["AST"]
-    d_ORB  = h["ORB"]  - a["ORB"]
-    d_DRB  = h["DRB"]  - a["DRB"]
-    d_FTAr = h["FTAr"] - a["FTAr"]
 
-    home_edge = 2.0  # base home-court advantage
+    home_edge = 2.0  # base home-court advantage (tune if you like)
 
     score = (
         home_edge
         + 0.08 * d_ORtg
         + 0.08 * d_DRtg
-        + 40.0 * d_eFG
-        + 30.0 * d_TOV
-        + 20.0 * d_AST
-        + 25.0 * d_ORB
-        + 25.0 * d_DRB
-        + 10.0 * d_FTAr
+        # advanced metrics currently omitted (all zero)
     )
 
     return score
@@ -289,7 +395,6 @@ def guess_role(player_name, pos):
     In a real model you’d plug in RAPTOR, BPM, on/off, etc.
     """
     pos = (pos or "").upper()
-    # You can customize this however you want later.
     if pos in ["PG", "SG", "SF", "PF"]:
         return "starter"
     if pos in ["C", "F", "G"]:
@@ -375,58 +480,36 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
 
 
 # -----------------------------
-# Schedule / games
+# Schedule / games (BallDontLie)
 # -----------------------------
 
-def fetch_games_for_date(game_date_str, stats_df, max_retries=3, pause_seconds=5):
+def fetch_games_for_date(game_date_str, stats_df, api_key):
     """
     game_date_str format: 'MM/DD/YYYY'
-    Returns a DataFrame with GAME_ID, HOME_TEAM_NAME, AWAY_TEAM_NAME
+    Returns a DataFrame with GAME_ID, HOME_TEAM_NAME, AWAY_TEAM_NAME using BallDontLie.
 
-    Retries a few times if stats.nba.com times out.
+    Uses /v1/games?dates[]=YYYY-MM-DD :contentReference[oaicite:6]{index=6}
     """
-    last_exc = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            sb = ScoreboardV2(
-                game_date=game_date_str,
-                league_id="00",
-                day_offset=0,
-            )
-            games_header = sb.get_data_frames()[0]  # GameHeader
-            last_exc = None
-            break
-        except requests.exceptions.ReadTimeout as e:
-            last_exc = e
-            print(
-                f"[fetch_games_for_date] ReadTimeout talking to stats.nba.com "
-                f"(attempt {attempt}/{max_retries})."
-            )
-            if attempt < max_retries:
-                print(f"Sleeping {pause_seconds} seconds before retry...")
-                time.sleep(pause_seconds)
-        except Exception as e:
-            last_exc = e
-            print(
-                f"[fetch_games_for_date] Error talking to stats.nba.com "
-                f"(attempt {attempt}/{max_retries}): {e}"
-            )
-            if attempt < max_retries:
-                print(f"Sleeping {pause_seconds} seconds before retry...")
-                time.sleep(pause_seconds)
+    dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
+    iso_date = dt.strftime("%Y-%m-%d")
 
-    if last_exc is not None:
-        raise RuntimeError(
-            f"Failed to fetch games for {game_date_str} after {max_retries} attempts"
-        ) from last_exc
+    params = {"dates[]": iso_date, "per_page": 100}
+    games_json = bdl_get("games", params=params, api_key=api_key)
+    games = games_json.get("data", [])
 
-    id_to_name = dict(zip(stats_df["TEAM_ID"], stats_df["TEAM_NAME"]))
+    rows = []
+    for g in games:
+        home_team = g["home_team"]
+        away_team = g["visitor_team"]
+        rows.append(
+            {
+                "GAME_ID": g["id"],
+                "HOME_TEAM_NAME": home_team["full_name"],
+                "AWAY_TEAM_NAME": away_team["full_name"],
+            }
+        )
 
-    games_header["HOME_TEAM_NAME"] = games_header["HOME_TEAM_ID"].map(id_to_name)
-    games_header["AWAY_TEAM_NAME"] = games_header["VISITOR_TEAM_ID"].map(id_to_name)
-
-    games_df = games_header[["GAME_ID", "HOME_TEAM_NAME", "AWAY_TEAM_NAME"]].copy()
-    return games_df
+    return pd.DataFrame(rows)
 
 
 # -----------------------------
@@ -438,6 +521,7 @@ def run_daily_probs_for_date(
     odds_dict=None,      # {(home, away): {"home_ml":..., "away_ml":..., "home_spread":...}}
     spreads_dict=None,   # OPTIONAL: {(home, away): home_spread}
     stats_df=None,
+    api_key=None,
     edge_threshold=0.03,
     lam=0.20,
 ):
@@ -449,8 +533,11 @@ def run_daily_probs_for_date(
       edge_home, edge_away, model_spread, spread_edge_home (if spreads),
       recommended_bet (string).
     """
+    if api_key is None:
+        api_key = get_bdl_api_key()
+
     if stats_df is None:
-        stats_df = fetch_team_advanced_stats()
+        raise ValueError("stats_df must be precomputed for BallDontLie version.")
 
     if odds_dict is None:
         odds_dict = {}
@@ -458,10 +545,10 @@ def run_daily_probs_for_date(
     if spreads_dict is None:
         spreads_dict = {}
 
-    # Fetch schedule
-    games_df = fetch_games_for_date(game_date, stats_df)
+    # Fetch schedule from BallDontLie
+    games_df = fetch_games_for_date(game_date, stats_df, api_key)
 
-    # Fetch injuries
+    # Fetch injuries (ESPN)
     try:
         injury_df = fetch_injury_report_espn()
     except Exception as e:
@@ -498,7 +585,6 @@ def run_daily_probs_for_date(
             home_imp = american_to_implied_prob(home_ml)
             away_imp = american_to_implied_prob(away_ml)
         else:
-            # If no odds, assume market is a coin flip
             home_imp = 0.5
             away_imp = 0.5
 
@@ -535,7 +621,6 @@ def run_daily_probs_for_date(
                     line_str = "home pk"
                 rec = f"Bet HOME spread ({line_str})"
             elif spread_edge_home < -1.5:
-                # edge for away
                 if home_spread > 0:
                     line_str = f"away -{abs(home_spread)}"
                 elif home_spread < 0:
@@ -573,7 +658,6 @@ def run_daily_probs_for_date(
         )
 
     df = pd.DataFrame(rows)
-    # Sort by biggest model edge on home side
     df["abs_edge_home"] = df["edge_home"].abs()
     df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
     return df
@@ -582,8 +666,9 @@ def run_daily_probs_for_date(
 # -----------------------------
 # CLI / entrypoint
 # -----------------------------
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Run daily NBA betting model.")
+    parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
     parser.add_argument(
         "--date",
         type=str,
@@ -600,6 +685,8 @@ def main(argv=None):
 
     print(f"Running model for {game_date}...")
 
+    api_key = get_bdl_api_key()
+
     # You can optionally hardcode your odds here:
     # odds_dict = {
     #   ("Cleveland Cavaliers", "Boston Celtics"): {
@@ -611,13 +698,20 @@ def main(argv=None):
     odds_dict = {}
     spreads_dict = {}
 
-    season = current_season_str()
+    # Determine season year for BallDontLie based on the game date
+    game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
+    season_year = season_start_year_for_date(game_date_obj)
+    end_date_iso = game_date_obj.strftime("%Y-%m-%d")
 
-    # Fetch team stats with retry; fail gracefully if NBA API is down
+    # Fetch team ratings from BallDontLie
     try:
-        stats_df = fetch_team_advanced_stats(season=season)
+        stats_df = fetch_team_ratings_bdl(
+            season_year=season_year,
+            end_date_iso=end_date_iso,
+            api_key=api_key,
+        )
     except Exception as e:
-        print(f"Error: Failed to fetch team stats: {e}")
+        print(f"Error: Failed to fetch team ratings from BallDontLie: {e}")
         print("Exiting without predictions so the workflow can complete gracefully.")
         return
 
@@ -628,6 +722,7 @@ def main(argv=None):
             odds_dict=odds_dict,
             spreads_dict=spreads_dict,
             stats_df=stats_df,
+            api_key=api_key,
         )
     except Exception as e:
         print(f"Error: Failed to run daily model: {e}")
@@ -644,6 +739,7 @@ def main(argv=None):
         print(results_df)
 
     print(f"\nSaved predictions to {out_name}")
+
 
 if __name__ == "__main__":
     main()
