@@ -18,22 +18,20 @@ def main(argv=None):
 
     bdl_api_key = get_bdl_api_key()
 
-    # Fetch odds from The Odds API
+    # Fetch odds from API-Sports
     try:
-        odds_dict = fetch_odds_for_date(
+        odds_dict = fetch_odds_for_date_apisports(
             game_date_str=game_date,
-            sport_key="basketball_nba",
-            region="us",
-            api_key=get_odds_api_key(),
+            api_key=get_apisports_api_key(),
         )
         spreads_dict = {
             k: v["home_spread"]
             for k, v in odds_dict.items()
             if v.get("home_spread") is not None
         }
-        print(f"Fetched odds for {len(odds_dict)} games from The Odds API.")
+        print(f"Fetched odds for {len(odds_dict)} games from API-Sports.")
     except Exception as e:
-        print(f"Warning: failed to fetch odds from The Odds API: {e}")
+        print(f"Warning: failed to fetch odds from API-Sports: {e}")
         odds_dict = {}
         spreads_dict = {}
         print("Proceeding with market_home_prob = 0.5 defaults.")
