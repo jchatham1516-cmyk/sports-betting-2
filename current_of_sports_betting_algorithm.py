@@ -2877,41 +2877,41 @@ parameter_map = {
 
 def calc_stats(df):
     # Possessions estimate
-    df["poss_home"]  df["FGA_home"] + 0.44*df["FTA_home"] - df["OREB_home"] + df["TOV_home"]
-    df["poss_away"]  df["FGA_away"] + 0.44*df["FTA_away"] - df["OREB_away"] + df["TOV_away"]
+    df["poss_home"] = df["FGA_home"] + 0.44*df["FTA_home"] - df["OREB_home"] + df["TOV_home"]
+    df["poss_away"] = df["FGA_away"] + 0.44*df["FTA_away"] - df["OREB_away"] + df["TOV_away"]
 
     # Offensive & Defensive Rating
-    df["home_ORtg"]  (df["PTS_home"] / df["poss_home"]) * 100
-    df["away_ORtg"]  (df["PTS_away"] / df["poss_away"]) * 100
+    df["home_ORtg"] = (df["PTS_home"] / df["poss_home"]) * 100
+    df["away_ORtg"] = (df["PTS_away"] / df["poss_away"]) * 100
 
-    df["home_DRtg"]  (df["PTS_away"] / df["poss_home"]) * 100
-    df["away_DRtg"]  (df["PTS_home"] / df["poss_away"]) * 100
+    df["home_DRtg"] = (df["PTS_away"] / df["poss_home"]) * 100
+    df["away_DRtg"] = (df["PTS_home"] / df["poss_away"]) * 100
 
     # eFG%
-    df["home_eFG"]  (df["FGM_home"] + 0.5 * df["FG3M_home"]) / df["FGA_home"]
-    df["away_eFG"]  (df["FGM_away"] + 0.5 * df["FG3M_away"]) / df["FGA_away"]
+    df["home_eFG"] = (df["FGM_home"] + 0.5 * df["FG3M_home"]) / df["FGA_home"]
+    df["away_eFG"] = (df["FGM_away"] + 0.5 * df["FG3M_away"]) / df["FGA_away"]
 
     # TOV%
-    df["home_TOV"]  df["TOV_home"] / df["poss_home"]
-    df["away_TOV"]  df["TOV_away"] / df["poss_away"]
+    df["home_TOV"] = df["TOV_home"] / df["poss_home"]
+    df["away_TOV"] = df["TOV_away"] / df["poss_away"]
 
     # Assist Rate
-    df["home_AST"]  df["AST_home"] / df["FGM_home"]
-    df["away_AST"]  df["AST_away"] / df["FGM_away"]
+    df["home_AST"] = df["AST_home"] / df["FGM_home"]
+    df["away_AST"] = df["AST_away"] / df["FGM_away"]
 
     # Rebounding %
-    df["home_ORB"]  df["OREB_home"] / (df["OREB_home"] + df["DREB_away"])
-    df["away_ORB"]  df["OREB_away"] / (df["OREB_away"] + df["DREB_home"])
+    df["home_ORB"] = df["OREB_home"] / (df["OREB_home"] + df["DREB_away"])
+    df["away_ORB"] = df["OREB_away"] / (df["OREB_away"] + df["DREB_home"])
 
-    df["home_DRB"]  df["DREB_home"] / (df["DREB_home"] + df["OREB_away"])
-    df["away_DRB"]  df["DREB_away"] / (df["DREB_away"] + df["OREB_home"])
+    df["home_DRB"] = df["DREB_home"] / (df["DREB_home"] + df["OREB_away"])
+    df["away_DRB"] = df["DREB_away"] / (df["DREB_away"] + df["OREB_home"])
 
     # FT Attempt Rate
-    df["home_FTAr"]  df["FTA_home"] / df["FGA_home"]
-    df["away_FTAr"]  df["FTA_away"] / df["FGA_away"]
+    df["home_FTAr"] = df["FTA_home"] / df["FGA_home"]
+    df["away_FTAr"] = df["FTA_away"] / df["FGA_away"]
 
     # Home win label
-    df["home_win"]  (df["PTS_home"] > df["PTS_away"]).astype(int)
+    df["home_win"] = (df["PTS_home"] > df["PTS_away"]).astype(int)
 
     return df
 
@@ -2919,38 +2919,38 @@ df.columns
 
 def calc_stats(df):
     # --- Possessions estimate ---
-    df["poss_home"]  df["FGA_home"] + 0.44*df["FTA_home"] - df["OREB_home"] + df["TOV_home"]
-    df["poss_away"]  df["FGA_away"] + 0.44*df["FTA_away"] - df["OREB_away"] + df["TOV_away"]
+    df["poss_home"] = df["FGA_home"] + 0.44*df["FTA_home"] - df["OREB_home"] + df["TOV_home"]
+    df["poss_away"] = df["FGA_away"] + 0.44*df["FTA_away"] - df["OREB_away"] + df["TOV_away"]
 
     # --- Offensive & Defensive Rating (per 100 possessions) ---
-    df["home_ORtg"]  (df["PTS_home"] / df["poss_home"]) * 100
-    df["away_ORtg"]  (df["PTS_away"] / df["poss_away"]) * 100
+    df["home_ORtg"] = (df["PTS_home"] / df["poss_home"]) * 100
+    df["away_ORtg"] = (df["PTS_away"] / df["poss_away"]) * 100
 
-    df["home_DRtg"]  (df["PTS_away"] / df["poss_home"]) * 100
-    df["away_DRtg"]  (df["PTS_home"] / df["poss_away"]) * 100
+    df["home_DRtg"] = (df["PTS_away"] / df["poss_home"]) * 100
+    df["away_DRtg"] = (df["PTS_home"] / df["poss_away"]) * 100
 
     # --- eFG% ---
-    df["home_eFG"]  (df["FGM_home"] + 0.5 * df["FG3M_home"]) / df["FGA_home"]
-    df["away_eFG"]  (df["FGM_away"] + 0.5 * df["FG3M_away"]) / df["FGA_away"]
+    df["home_eFG"] = (df["FGM_home"] + 0.5 * df["FG3M_home"]) / df["FGA_home"]
+    df["away_eFG"] = (df["FGM_away"] + 0.5 * df["FG3M_away"]) / df["FGA_away"]
 
     # --- Turnover Rate (per possession) ---
-    df["home_TOV"]  df["TOV_home"] / df["poss_home"]
-    df["away_TOV"]  df["TOV_away"] / df["poss_away"]
+    df["home_TOV"] = df["TOV_home"] / df["poss_home"]
+    df["away_TOV"] = df["TOV_away"] / df["poss_away"]
 
     # --- Assist Rate (AST per made FG) ---
-    df["home_AST"]  df["AST_home"] / df["FGM_home"]
-    df["away_AST"]  df["AST_away"] / df["FGM_away"]
+    df["home_AST"] = df["AST_home"] / df["FGM_home"]
+    df["away_AST"] = df["AST_away"] / df["FGM_away"]
 
     # --- Rebounding % (share of available rebounds) ---
-    df["home_ORB"]  df["OREB_home"] / (df["OREB_home"] + df["DREB_away"])
-    df["away_ORB"]  df["OREB_away"] / (df["OREB_away"] + df["DREB_home"])
+    df["home_ORB"] = df["OREB_home"] / (df["OREB_home"] + df["DREB_away"])
+    df["away_ORB"] = df["OREB_away"] / (df["OREB_away"] + df["DREB_home"])
 
-    df["home_DRB"]  df["DREB_home"] / (df["DREB_home"] + df["OREB_away"])
-    df["away_DRB"]  df["DREB_away"] / (df["DREB_away"] + df["OREB_home"])
+    df["home_DRB"] = df["DREB_home"] / (df["DREB_home"] + df["OREB_away"])
+    df["away_DRB"] = df["DREB_away"] / (df["DREB_away"] + df["OREB_home"])
 
     # --- Free Throw Attempt Rate ---
-    df["home_FTAr"]  df["FTA_home"] / df["FGA_home"]
-    df["away_FTAr"]  df["FTA_away"] / df["FGA_away"]
+    df["home_FTAr"] = df["FTA_home"] / df["FGA_home"]
+    df["away_FTAr"] = df["FTA_away"] / df["FGA_away"]
 
     # --- Home win label (target for the model) ---
     df["home_win"]  (df["PTS_home"] > df["PTS_away"]).astype(int)
