@@ -2,12 +2,15 @@ name: Run NBA Betting Model Daily
 
 on:
   schedule:
-    - cron: "0 14 * * *"   # 14:00 UTC ≈ 8:00 AM US Central
+    - cron: "0 14 * * *"
   workflow_dispatch:
 
 jobs:
   run-model:
     runs-on: ubuntu-latest
+
+    env:
+      BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
 
     steps:
       - name: Check out repo
@@ -32,3 +35,4 @@ jobs:
         with:
           name: predictions
           path: results/
+          if-no-files-found: ignore
