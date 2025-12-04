@@ -1,30 +1,21 @@
-"""
+# Daily NBA betting model using BallDontLie + ESPN injuries + The Odds API for odds.
+#
+# What it does:
+# - Uses BallDontLie to get:
+#     - All teams
+#     - All regular-season games up to the model date
+#     - Daily schedule for a specific date
+# - Builds simple team ratings from:
+#     - Average points scored (ORtg proxy)
+#     - Average points allowed (DRtg proxy)
+# - Uses ESPN injuries page to adjust matchup score
+# - Uses The Odds API to pull daily moneyline & spread odds
+# - Computes a matchup score → win probability → model spread
+# - Outputs ALL games for the date with:
+#     - model_home_prob, edges, model_spread, and a recommendation
+# - Saves CSV under results/predictions_MM-DD-YYYY.csv
+
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
-Daily NBA betting model using BallDontLie + ESPN injuries.
-
-Replaces nba_api / stats.nba.com completely.
-
-What it does:
-- Uses BallDontLie to get:
-    - All teams
-    - All regular-season games up to the model date
-    - Daily schedule for a specific date
-- Builds simple team ratings from:
-    - Average points scored (ORtg proxy)
-    - Average points allowed (DRtg proxy)
-- Uses ESPN injuries page to adjust matchup score
-- Computes a matchup score → win probability → model spread
-- Outputs ALL games for the date with:
-    - model_home_prob, edges, model_spread, and a recommendation
-- Saves CSV under results/predictions_MM-DD-YYYY.csv
-
-To run locally:
-    export BALLDONTLIE_API_KEY="your_key_here"
-    python current_of_sports_betting_algorithm.py --date 12/04/2025
-
-In GitHub Actions:
-    - Store BALLDONTLIE_API_KEY as a repo secret
-"""
 
 import os
 import sys
@@ -36,7 +27,6 @@ from datetime import datetime, date
 import numpy as np
 import pandas as pd
 import requests
-
 
 # -----------------------------
 # Season / date helpers
@@ -62,6 +52,10 @@ def american_to_implied_prob(odds):
     else:
         return 100.0 / (odds + 100.0)
 
+# -----------------------------
+# Odds API helpers
+# -----------------------------
+
 def get_odds_api_key():
     """
     Read Odds API key from environment.
@@ -77,6 +71,7 @@ def get_odds_api_key():
         )
     return api_key
 
+
 def odds_get(path, params=None, api_key=None, timeout=30):
     """
     Generic GET for The Odds API v4.
@@ -91,6 +86,88 @@ def odds_get(path, params=None, api_key=None, timeout=30):
     resp = requests.get(url, params=params, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
+
+
+def fetch_odds_for_date(
+    game_date_str,
+    sport_key="basketball_nba",
+    region="us",
+    bookmaker_preference=None,
+    api_key=None,
+):
+    # Fetch moneyline + spread odds for NBA games from The Odds API v4.
+    # We don't filter by date here. We grab all upcoming NBA odds and the
+    # model will match by (home_team, away_team) when looping today's games.
+    if api_key is None:
+        api_key = get_odds_api_key()
+
+    if bookmaker_preference is None:
+        bookmaker_preference = ["draftkings", "fanduel", "betmgm"]
+
+    params = {
+        "regions": region,
+        "markets": "h2h,spreads",
+        "oddsFormat": "american",
+    }
+
+    events = odds_get(f"sports/{sport_key}/odds", params=params, api_key=api_key)
+    print(f"[fetch_odds_for_date] Got {len(events)} events from The Odds API")
+
+    odds_dict = {}
+
+    for ev in events:
+        home_team = ev["home_team"]
+        away_team = ev["away_team"]
+        bookmakers = ev.get("bookmakers", []) or []
+
+        if not bookmakers:
+            continue
+
+        # Preferred bookmaker or fallback
+        chosen = None
+        by_key = {b["key"]: b for b in bookmakers if "key" in b}
+        for bk in bookmaker_preference:
+            if bk in by_key:
+                chosen = by_key[bk]
+                break
+        if chosen is None:
+            chosen = bookmakers[0]
+
+        home_ml = None
+        away_ml = None
+        home_spread = None
+
+        for m in chosen.get("markets", []):
+            mkey = m.get("key")
+            outcomes = m.get("outcomes", []) or []
+
+            if mkey == "h2h":
+                # moneyline
+                for o in outcomes:
+                    name = o.get("name")
+                    price = o.get("price")
+                    if name == home_team:
+                        home_ml = price
+                    elif name == away_team:
+                        away_ml = price
+
+            elif mkey == "spreads":
+                # spread
+                for o in outcomes:
+                    name = o.get("name")
+                    point = o.get("point")
+                    if name == home_team:
+                        home_spread = point
+
+        odds_dict[(home_team, away_team)] = {
+            "home_ml": home_ml,
+            "away_ml": away_ml,
+            "home_spread": home_spread,
+        }
+
+    print(f"[fetch_odds_for_date] Built odds entries for {len(odds_dict)} games.")
+    print("[fetch_odds_for_date] Sample keys:", list(odds_dict.keys())[:5])
+    return odds_dict
     
 def fetch_odds_for_date(
     game_date_str,
@@ -636,17 +713,6 @@ def run_daily_probs_for_date(
     edge_threshold=0.03,
     lam=0.20,
 ):
-    key = (home_name, away_name)
-odds_info = odds_dict.get(key)
-
-if odds_info is None:
-    # debug: show mismatch if any
-    print(f"[run_daily] No odds found for {home_name} vs {away_name}")
-    odds_info = {}
-
-home_ml = odds_info.get("home_ml")
-away_ml = odds_info.get("away_ml")
-
     """
     Run the full model for one NBA date.
 
@@ -699,7 +765,12 @@ away_ml = odds_info.get("away_ml")
 
         # Market data (if provided)
         key = (home_name, away_name)
-        odds_info = odds_dict.get(key, {})
+        odds_info = odds_dict.get(key)
+        if odds_info is None:
+            # debug: show mismatch if any
+            print(f"[run_daily] No odds found for {home_name} vs {away_name}")
+            odds_info = {}
+
         home_ml = odds_info.get("home_ml")
         away_ml = odds_info.get("away_ml")
 
@@ -721,9 +792,6 @@ away_ml = odds_info.get("away_ml")
             spread_edge_home = None
 
         # Recommendation logic:
-        # 1) If we have ML odds, base recommendation on ML edge.
-        # 2) Else if we have spreads, base it on spread edge.
-        # 3) Else simple threshold on model_home_prob vs 0.5.
         rec = "No clear edge"
 
         if home_ml is not None and away_ml is not None:
@@ -783,7 +851,6 @@ away_ml = odds_info.get("away_ml")
     df["abs_edge_home"] = df["edge_home"].abs()
     df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
     return df
-
 
 # -----------------------------
 # CLI / entrypoint
