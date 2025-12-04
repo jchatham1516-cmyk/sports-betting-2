@@ -221,7 +221,7 @@ endpoint_list  [
     "WinProbabilityPBP",
 ]
 
-parameter_variations  {
+parameter_variations = {
     "GameEventID": {
         "default_py_value": "0",
         "parameter_value": "0",
