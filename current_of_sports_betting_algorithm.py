@@ -91,6 +91,7 @@ def odds_get(path, params=None, api_key=None, timeout=30):
     resp = requests.get(url, params=params, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
+    
 def fetch_odds_for_date(
     game_date_str,
     sport_key="basketball_nba",
@@ -98,22 +99,10 @@ def fetch_odds_for_date(
     bookmaker_preference=None,
     api_key=None,
 ):
-    """
-    Fetch moneyline + spread odds for NBA games from The Odds API v4.
+    # Fetch moneyline + spread odds for NBA games from The Odds API v4.
+    # We don't filter by date here. We grab all upcoming NBA odds and the
+    # model will match by (home_team, away_team) when looping today's games.
 
-    We *don't* filter by date here – we get all upcoming NBA odds and let the
-    model match by (home_team, away_team) when it loops through today's games.
-
-    Returns:
-      odds_dict = {
-        (home_team, away_team): {
-            "home_ml": ...,
-            "away_ml": ...,
-            "home_spread": ...,
-        },
-        ...
-      }
-    """
     if api_key is None:
         api_key = get_odds_api_key()
 
@@ -142,7 +131,7 @@ def fetch_odds_for_date(
         # Preferred bookmaker or fallback
         chosen = None
         by_key = {b["key"]: b for b in bookmakers if "key" in b}
-        for bk in ["draftkings", "fanduel", "betmgm"]:
+        for bk in bookmaker_preference:
             if bk in by_key:
                 chosen = by_key[bk]
                 break
@@ -158,16 +147,22 @@ def fetch_odds_for_date(
             outcomes = m.get("outcomes", []) or []
 
             if mkey == "h2h":
+                # moneyline
                 for o in outcomes:
-                    if o.get("name") == home_team:
-                        home_ml = o.get("price")
-                    elif o.get("name") == away_team:
-                        away_ml = o.get("price")
+                    name = o.get("name")
+                    price = o.get("price")
+                    if name == home_team:
+                        home_ml = price
+                    elif name == away_team:
+                        away_ml = price
 
             elif mkey == "spreads":
+                # spread
                 for o in outcomes:
-                    if o.get("name") == home_team:
-                        home_spread = o.get("point")
+                    name = o.get("name")
+                    point = o.get("point")
+                    if name == home_team:
+                        home_spread = point
 
         odds_dict[(home_team, away_team)] = {
             "home_ml": home_ml,
