@@ -2962,14 +2962,14 @@ df[["PTS_home", "PTS_away", "home_ORtg", "away_ORtg", "home_eFG", "home_win"]].h
 
 df_features = df.copy()
 
-df_features["Δ_ORtg"]  df_features["home_ORtg"] - df_features["away_ORtg"]
-df_features["Δ_DRtg"]  df_features["away_DRtg"] - df_features["home_DRtg"]
-df_features["Δ_eFG"]   df_features["home_eFG"]  - df_features["away_eFG"]
-df_features["Δ_TOV"]   df_features["away_TOV"]  - df_features["home_TOV"]
-df_features["Δ_AST"]   df_features["home_AST"]  - df_features["away_AST"]
-df_features["Δ_ORB"]   df_features["home_ORB"]  - df_features["away_ORB"]
-df_features["Δ_DRB"]   df_features["home_DRB"]  - df_features["away_DRB"]
-df_features["Δ_FTAr"]  df_features["home_FTAr"] - df_features["away_FTAr"]
+df_features["Δ_ORtg"] = df_features["home_ORtg"] - df_features["away_ORtg"]
+df_features["Δ_DRtg"] = df_features["away_DRtg"] - df_features["home_DRtg"]
+df_features["Δ_eFG"]  = df_features["home_eFG"]  - df_features["away_eFG"]
+df_features["Δ_TOV"]  = df_features["away_TOV"]  - df_features["home_TOV"]
+df_features["Δ_AST"]  = df_features["home_AST"]  - df_features["away_AST"]
+df_features["Δ_ORB"]  = df_features["home_ORB"]  - df_features["away_ORB"]
+df_features["Δ_DRB"]  = df_features["home_DRB"]  - df_features["away_DRB"]
+df_features["Δ_FTAr"] = df_features["home_FTAr"] - df_features["away_FTAr"]
 
 df_features["Home"]  1
 
@@ -2995,14 +2995,14 @@ X.head()
 # Build feature dferences (Home – Away or Away – Home depending on direction)
 df_features  df.copy()
 
-df_features["Δ_ORtg"]  df_features["home_ORtg"] - df_features["away_ORtg"]
-df_features["Δ_DRtg"]  df_features["away_DRtg"] - df_features["home_DRtg"]  # lower DRtg  better
-df_features["Δ_eFG"]   df_features["home_eFG"]  - df_features["away_eFG"]
-df_features["Δ_TOV"]   df_features["away_TOV"]  - df_features["home_TOV"]   # fewer TOV is better
-df_features["Δ_AST"]   df_features["home_AST"]  - df_features["away_AST"]
-df_features["Δ_ORB"]   df_features["home_ORB"]  - df_features["away_ORB"]
-df_features["Δ_DRB"]   df_features["home_DRB"]  - df_features["away_DRB"]
-df_features["Δ_FTAr"]  df_features["home_FTAr"] - df_features["away_FTAr"]
+df_features["Δ_ORtg"] = df_features["home_ORtg"] - df_features["away_ORtg"]
+df_features["Δ_DRtg"] = df_features["away_DRtg"] - df_features["home_DRtg"]  # lower DRtg  better
+df_features["Δ_eFG"]  = df_features["home_eFG"]  - df_features["away_eFG"]
+df_features["Δ_TOV"]  = df_features["away_TOV"]  - df_features["home_TOV"]   # fewer TOV is better
+df_features["Δ_AST"]  = df_features["home_AST"]  - df_features["away_AST"]
+df_features["Δ_ORB"]  = df_features["home_ORB"]  - df_features["away_ORB"]
+df_features["Δ_DRB"]  = df_features["home_DRB"]  - df_features["away_DRB"]
+df_features["Δ_FTAr"] = df_features["home_FTAr"] - df_features["away_FTAr"]
 
 # Home advantage flag
 df_features["Home"]  1
