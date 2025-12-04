@@ -1,5 +1,5 @@
-nba_api
 pandas
 numpy
+requests
 lxml
 html5lib
