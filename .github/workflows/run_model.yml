@@ -2,7 +2,7 @@ name: Run Betting Model Daily
 
 on:
   schedule:
-    - cron: "0 14 * * *"   # runs every day at 8am CST (14 UTC)
+    - cron: "0 14 * * *"   # 14:00 UTC = 8am CST
   workflow_dispatch:
 
 jobs:
@@ -27,7 +27,7 @@ jobs:
         run: |
           python "current_of_sports_betting_algorithm.py"
 
-      - name: Save output (optional)
+      - name: Upload results (optional)
         uses: actions/upload-artifact@v4
         with:
           name: betting-results
