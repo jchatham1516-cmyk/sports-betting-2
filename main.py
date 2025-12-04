@@ -21,6 +21,7 @@ def main(argv=None):
     bdl_api_key = get_bdl_api_key()
 
     # 1) Fetch odds from The Odds API
+     # 1) Fetch odds from The Odds API
     try:
         odds_dict = fetch_odds_for_date(
             game_date_str=game_date,
@@ -39,7 +40,6 @@ def main(argv=None):
         odds_dict = {}
         spreads_dict = {}
         print("Proceeding with market_home_prob = 0.5 defaults.")
-
     # 2) Build team ratings from BallDontLie up to this date
     game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
     season_year = season_start_year_for_date(game_date_obj)
