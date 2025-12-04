@@ -116,28 +116,38 @@ def fetch_odds_for_date(
         api_key = get_odds_api_key()
 
     if bookmaker_preference is None:
-        # We'll prefer these books if present; otherwise take first
         bookmaker_preference = ["draftkings", "fanduel", "betmgm"]
 
-    # Convert MM/DD/YYYY to ISO boundaries for that day
-    dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
-    from_iso = dt.strftime("%Y-%m-%dT00:00:00Z")
-    to_iso = dt.strftime("%Y-%m-%dT23:59:59Z")
+    # Parse the date we care about
+    target_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
 
+    # 1) Get ALL upcoming NBA odds (no commenceTimeFrom/To filter)
     params = {
-        "regions": region,                   # US books
-        "markets": "h2h,spreads",           # moneyline + spreads
-        "oddsFormat": "american",           # so prices are -110 / +105, etc.
-        "dateFormat": "iso",
-        "commenceTimeFrom": from_iso,
-        "commenceTimeTo": to_iso,
+        "regions": region,
+        "markets": "h2h,spreads",
+        "oddsFormat": "american",
     }
 
     events = odds_get(f"sports/{sport_key}/odds", params=params, api_key=api_key)
+    print(f"[fetch_odds_for_date] Got {len(events)} events from The Odds API")
 
     odds_dict = {}
 
     for ev in events:
+        # Filter to only games on target_date using commence_time
+        comm = ev.get("commence_time")
+        if not comm:
+            continue
+        try:
+            # Example format: "2025-12-04T01:30:00Z"
+            ev_dt = datetime.fromisoformat(comm.replace("Z", "+00:00"))
+            ev_date = ev_dt.date()
+        except Exception:
+            continue
+
+        if ev_date != target_date:
+            continue  # skip games not on our day
+
         home_team = ev["home_team"]
         away_team = ev["away_team"]
         bookmakers = ev.get("bookmakers", []) or []
@@ -163,7 +173,7 @@ def fetch_odds_for_date(
             mkey = m.get("key")
             outcomes = m.get("outcomes", []) or []
 
-            # Moneyline / head-to-head
+            # Moneyline
             if mkey == "h2h":
                 for o in outcomes:
                     name = o.get("name")
@@ -173,12 +183,11 @@ def fetch_odds_for_date(
                     elif name == away_team:
                         away_ml = price
 
-            # Point spread
+            # Spread
             elif mkey == "spreads":
                 for o in outcomes:
                     name = o.get("name")
                     point = o.get("point")
-                    # price = o.get("price")  # available if you want it
                     if name == home_team:
                         home_spread = point
 
@@ -188,8 +197,10 @@ def fetch_odds_for_date(
             "home_spread": home_spread,
         }
 
+    print(f"[fetch_odds_for_date] Built odds for {len(odds_dict)} games on {game_date_str}")
+    # Quick debug sample of keys:
+    print("[fetch_odds_for_date] Sample keys:", list(odds_dict.keys())[:5])
     return odds_dict
-
 # -----------------------------
 # BallDontLie low-level client
 # -----------------------------
