@@ -25,7 +25,7 @@ jobs:
 
       - name: Run daily script
         run: |
-          python "Current_of_sports_betting_algorithm.py"
+          python "current_of_sports_betting_algorithm.py"
 
       - name: Save output (optional)
         uses: actions/upload-artifact@v4
