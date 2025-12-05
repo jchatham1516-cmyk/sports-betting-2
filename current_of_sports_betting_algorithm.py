@@ -1017,7 +1017,7 @@ def main(argv=None):
     else:
         game_date = args.date
 
-      print(f"Running model for {game_date}...")
+    print(f"Running model for {game_date}...")
 
     api_key = get_bdl_api_key()
 
