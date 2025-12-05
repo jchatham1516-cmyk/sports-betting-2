@@ -867,7 +867,6 @@ if home_spread is not None:
     spread_edge_home = model_spread - home_spread
 else:
     spread_edge_home = None
-
         # -------------------------
         # Recommendation logic
         # -------------------------
@@ -894,6 +893,7 @@ else:
                 else:
                     line_str = "home pk"
                 spread_rec = f"Bet HOME spread ({line_str})"
+
             elif spread_edge_home < -spread_threshold_pts:
                 # model likes away side vs line
                 if home_spread > 0:
