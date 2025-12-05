@@ -348,32 +348,30 @@ def season_matchup_base_score(home_row, away_row):
        - Off/Def efficiency
        - Home-court edge
     """
+
     h = home_row
     a = away_row
 
+    # Differences
     d_ORtg = h["ORtg"] - a["ORtg"]
-    d_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg is better → flip
-
+    d_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg is better
     d_pace = h["PACE"] - a["PACE"]
     d_off_eff = h["OFF_EFF"] - a["OFF_EFF"]
     d_def_eff = a["DEF_EFF"] - h["DEF_EFF"]
 
-    home_edge = 2.0  # base home-court advantage
-
+    # ✔ Calibrated weights (realistic)
     home_edge = 1.2   # reduced from 2.0
 
-score = (
-    home_edge
-    + 0.04 * d_ORtg       # half as strong
-    + 0.04 * d_DRtg
-    + 0.01 * d_pace
-    + 2.0 * d_off_eff     # reduced from 8.0
-    + 2.0 * d_def_eff
-)
-
+    score = (
+        home_edge
+        + 0.04 * d_ORtg
+        + 0.04 * d_DRtg
+        + 0.01 * d_pace
+        + 2.0 * d_off_eff
+        + 2.0 * d_def_eff
+    )
 
     return score
-
 
 def score_to_prob(score, lam=0.20):
     """
