@@ -1,19 +1,15 @@
-# Daily NBA betting model using BallDontLie + ESPN injuries + The Odds API for odds.
+# Daily NBA betting model using BallDontLie + ESPN injuries + local odds CSV.
 #
-# What it does:
-# - Uses BallDontLie to get:
-#     - All teams
-#     - All regular-season games up to the model date
-#     - Daily schedule for a specific date
-# - Builds simple team ratings from:
-#     - Average points scored (ORtg proxy)
-#     - Average points allowed (DRtg proxy)
-# - Uses ESPN injuries page to adjust matchup score
-# - Uses The Odds API to pull daily moneyline & spread odds
-# - Computes a matchup score → win probability → model spread
-# - Outputs ALL games for the date with:
-#     - model_home_prob, edges, model_spread, and a recommendation
-# - Saves CSV under results/predictions_MM-DD-YYYY.csv
+# Features:
+# - Team ratings from BallDontLie:
+#     - ORtg/DRtg proxies
+#     - Pace
+#     - Off/Def efficiency
+# - ESPN injuries with a simple player impact model
+# - Schedule fatigue (rest days)
+# - Head-to-head historical matchup adjustment
+# - Local odds CSV for moneyline + spreads
+# - Outputs: model_home_prob, edges, model_spread, ML + spread recommendations
 
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 
@@ -28,10 +24,10 @@ import numpy as np
 import pandas as pd
 import requests
 
-
 # -----------------------------
 # CSV odds loader
 # -----------------------------
+
 def fetch_odds_for_date_from_csv(game_date_str):
     """
     Load odds for a given date from a local CSV file in the 'odds' folder.
@@ -65,7 +61,7 @@ def fetch_odds_for_date_from_csv(game_date_str):
         away = str(row["away"]).strip()
         key = (home, away)
 
-        # DEBUG: show what raw values we read from CSV
+        # Debug: show what raw values we read from CSV
         print(
             "[DEBUG row]", key,
             "| raw home_ml=", row.get("home_ml"),
@@ -99,94 +95,9 @@ def fetch_odds_for_date_from_csv(game_date_str):
 
 
 # -----------------------------
-# Sportsbook API (unused for now)
-# -----------------------------
-SPORTSBOOK_BASE_URL = "https://sportsbook-api2.p.rapidapi.com"
-SPORTSBOOK_HOST = "sportsbook-api2.p.rapidapi.com"
-
-
-def get_sportsbook_api_key():
-    key = os.environ.get("SPORTSBOOK_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError(
-            "SPORTSBOOK_API_KEY is not set. "
-            "Add it as a GitHub Actions secret with your RapidAPI key."
-        )
-    return key
-
-
-def sportsbook_get(path, params=None, api_key=None, timeout=30):
-    """
-    Generic GET helper for Sportsbook API2 via RapidAPI.
-    """
-    if api_key is None:
-        api_key = get_sportsbook_api_key()
-
-    url = SPORTSBOOK_BASE_URL.rstrip("/") + "/" + path.lstrip("/")
-    headers = {
-        "X-RapidAPI-Key": api_key,
-        "X-RapidAPI-Host": SPORTSBOOK_HOST,
-    }
-    resp = requests.get(url, headers=headers, params=params or {}, timeout=timeout)
-    print(f"[SportsbookAPI] GET {url} status={resp.status_code}")
-    resp.raise_for_status()
-    return resp.json()
-
-
-APISPORTS_BASE_URL = "https://v1.basketapi.com"  # API-Sports Basketball base
-
-
-def get_apisports_api_key():
-    api_key = os.environ.get("APISPORTS_API_KEY", "")
-    if api_key is None:
-        api_key = ""
-    api_key = api_key.strip()
-    if not api_key:
-        raise RuntimeError(
-            "APISPORTS_API_KEY environment variable is not set or is empty. "
-            "Set it as a GitHub Actions secret."
-        )
-    return api_key
-
-
-def fetch_odds_for_date_sportsbook(game_date_str, api_key=None):
-    """
-    DEBUG stub: call Sportsbook API2 and print what we get.
-
-    Once we see the shape of the data in the logs, we can map it into
-    (home, away) -> {home_ml, away_ml, home_spread}.
-    """
-    if api_key is None:
-        api_key = get_sportsbook_api_key()
-
-    # TODO: replace this with your actual competition key for NBA from the docs.
-    COMPETITION_KEY = "PUT_YOUR_NBA_COMPETITION_KEY_HERE"
-
-    data = sportsbook_get(
-        f"/v0/competitions/{COMPETITION_KEY}/events",
-        params={},  # we’ll filter by date locally using startTime
-        api_key=api_key,
-    )
-
-    print("[SportsbookAPI] Raw events type:", type(data))
-    if isinstance(data, dict) and "events" in data:
-        events = data.get("events", [])
-    else:
-        events = data
-
-    print(f"[SportsbookAPI] Got {len(events)} events total")
-
-    if events:
-        sample = events[0]
-        print("[SportsbookAPI] Sample event (truncated):", str(sample)[:600])
-
-    # For now, return empty so your model keeps using 0.5 market probs.
-    return {}
-
-
-# -----------------------------
 # Season / date helpers
 # -----------------------------
+
 def season_start_year_for_date(d: date) -> int:
     """
     BallDontLie uses season years like 2024 for the 2024-25 season.
@@ -209,130 +120,10 @@ def american_to_implied_prob(odds):
 
 
 # -----------------------------
-# Odds API helpers (The Odds API)
-# -----------------------------
-def get_odds_api_key():
-    """
-    Read Odds API key from environment.
-    """
-    api_key = os.environ.get("ODDS_API_KEY", "")
-    if api_key is None:
-        api_key = ""
-    api_key = api_key.strip()
-    if not api_key:
-        raise RuntimeError(
-            "ODDS_API_KEY environment variable is not set or is empty. "
-            "Set it as a GitHub Actions secret."
-        )
-    return api_key
-
-
-def odds_get(path, params=None, api_key=None, timeout=30):
-    """
-    Generic GET for The Odds API v4.
-    """
-    if api_key is None:
-        api_key = get_odds_api_key()
-
-    url = ODDS_API_BASE_URL.rstrip("/") + "/" + path.lstrip("/")
-    params = dict(params or {})
-    params["apiKey"] = api_key
-
-    resp = requests.get(url, params=params, timeout=timeout)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def fetch_odds_for_date(
-    game_date_str,
-    sport_key="basketball_nba",
-    region="us",
-    bookmaker_preference=None,
-    api_key=None,
-):
-    """
-    Fetch moneyline + spread odds for NBA games from The Odds API v4.
-
-    We don't filter by date here. We grab all upcoming NBA odds and the
-    model will match by (home_team, away_team) when looping today's games.
-    """
-    if api_key is None:
-        api_key = get_odds_api_key()
-
-    if bookmaker_preference is None:
-        bookmaker_preference = ["draftkings", "fanduel", "betmgm"]
-
-    params = {
-        "regions": region,
-        "markets": "h2h,spreads",
-        "oddsFormat": "american",
-    }
-
-    events = odds_get(f"sports/{sport_key}/odds", params=params, api_key=api_key)
-    print(f"[fetch_odds_for_date] Got {len(events)} events from The Odds API")
-
-    odds_dict = {}
-
-    for ev in events:
-        home_team = ev["home_team"]
-        away_team = ev["away_team"]
-        bookmakers = ev.get("bookmakers", []) or []
-
-        if not bookmakers:
-            continue
-
-        # Preferred bookmaker or fallback
-        chosen = None
-        by_key = {b["key"]: b for b in bookmakers if "key" in b}
-        for bk in bookmaker_preference:
-            if bk in by_key:
-                chosen = by_key[bk]
-                break
-        if chosen is None:
-            chosen = bookmakers[0]
-
-        home_ml = None
-        away_ml = None
-        home_spread = None
-
-        for m in chosen.get("markets", []):
-            mkey = m.get("key")
-            outcomes = m.get("outcomes", []) or []
-
-            if mkey == "h2h":
-                # moneyline
-                for o in outcomes:
-                    name = o.get("name")
-                    price = o.get("price")
-                    if name == home_team:
-                        home_ml = price
-                    elif name == away_team:
-                        away_ml = price
-
-            elif mkey == "spreads":
-                # spread
-                for o in outcomes:
-                    name = o.get("name")
-                    point = o.get("point")
-                    if name == home_team:
-                        home_spread = point
-
-        odds_dict[(home_team, away_team)] = {
-            "home_ml": home_ml,
-            "away_ml": away_ml,
-            "home_spread": home_spread,
-        }
-
-    print(f"[fetch_odds_for_date] Built odds entries for {len(odds_dict)} games.")
-    print("[fetch_odds_for_date] Sample keys:", list(odds_dict.keys())[:5])
-    return odds_dict
-
-
-# -----------------------------
 # BallDontLie low-level client
 # -----------------------------
-BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
 
+BALLDONTLIE_BASE_URL = "https://api.balldondlie.io/v1".replace("dond", "dont")  # avoid typo
 
 def get_bdl_api_key():
     api_key = os.environ.get("BALLDONTLIE_API_KEY")
@@ -399,18 +190,22 @@ def bdl_get(path, params=None, api_key=None, max_retries=5):
 # -----------------------------
 # Team ratings built from games
 # -----------------------------
+
 def fetch_team_ratings_bdl(
     season_year: int,
     end_date_iso: str,
     api_key: str,
 ):
     """
-    Build a simple team rating DataFrame from BallDontLie games:
+    Build a team rating DataFrame from BallDontLie games:
 
     - ORtg proxy  = average points scored per game
     - DRtg proxy  = average points allowed per game
-    - W, L, W_PCT from game results
+    - Pace        = (pts_for + pts_against) / GP
+    - Off_Eff/Def_Eff ~ points per "possession" style proxy
+    - W, L, W_PCT
     """
+    # 1) Get teams
     teams_json = bdl_get("teams", params={}, api_key=api_key)
     teams_data = teams_json.get("data", [])
 
@@ -426,6 +221,7 @@ def fetch_team_ratings_bdl(
             "losses": 0,
         }
 
+    # 2) Get all games for this season up to end_date_iso
     params = {
         "seasons[]": season_year,
         "end_date": end_date_iso,
@@ -453,6 +249,7 @@ def fetch_team_ratings_bdl(
             home_score = g.get("home_team_score", 0) or 0
             away_score = g.get("visitor_team_score", 0) or 0
 
+            # skip not-started games
             if home_score == 0 and away_score == 0 and g.get("period", 0) == 0:
                 continue
 
@@ -465,6 +262,7 @@ def fetch_team_ratings_bdl(
                 agg[away_id]["pts_for"] += away_score
                 agg[away_id]["pts_against"] += home_score
 
+            # wins / losses
             if home_score > away_score:
                 if home_id in agg:
                     agg[home_id]["wins"] += 1
@@ -479,6 +277,7 @@ def fetch_team_ratings_bdl(
         if not cursor:
             break
 
+    # 3) Build DataFrame with pace + efficiency
     rows = []
     for tid, rec in agg.items():
         gp = rec["gp"]
@@ -487,6 +286,16 @@ def fetch_team_ratings_bdl(
         w_pct = wins / gp if gp > 0 else 0.0
         or_p = rec["pts_for"] / gp if gp > 0 else 0.0
         dr_p = rec["pts_against"] / gp if gp > 0 else 0.0
+
+        # Pace approx: total points / games
+        total_pts = rec["pts_for"] + rec["pts_against"]
+        pace = total_pts / gp if gp > 0 else 0.0
+
+        # Simple efficiency proxies
+        # Using total points as possession proxy – this is rough but better than nothing.
+        poss = max(total_pts, 1)
+        off_eff = rec["pts_for"] / poss
+        def_eff = rec["pts_against"] / poss
 
         rows.append(
             {
@@ -498,6 +307,9 @@ def fetch_team_ratings_bdl(
                 "W_PCT": w_pct,
                 "ORtg": or_p,
                 "DRtg": dr_p,
+                "PACE": pace,
+                "OFF_EFF": off_eff,
+                "DEF_EFF": def_eff,
             }
         )
 
@@ -508,6 +320,7 @@ def fetch_team_ratings_bdl(
 # -----------------------------
 # Team lookup + scoring model
 # -----------------------------
+
 def find_team_row(team_name_input, stats_df):
     """
     Fuzzy match a team name against TEAM_NAME in stats_df.
@@ -525,10 +338,15 @@ def find_team_row(team_name_input, stats_df):
     raise ValueError(f"Could not find a team matching: {team_name_input}")
 
 
-def season_matchup_score(home_row, away_row):
+def season_matchup_base_score(home_row, away_row):
     """
-    Linear scoring model:
+    Base linear scoring model without injuries/fatigue/H2H.
     Positive score => home team stronger.
+    Uses:
+       - ORtg / DRtg
+       - Pace
+       - Off/Def efficiency
+       - Home-court edge
     """
     h = home_row
     a = away_row
@@ -536,12 +354,19 @@ def season_matchup_score(home_row, away_row):
     d_ORtg = h["ORtg"] - a["ORtg"]
     d_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg is better → flip
 
+    d_pace = h["PACE"] - a["PACE"]
+    d_off_eff = h["OFF_EFF"] - a["OFF_EFF"]
+    d_def_eff = a["DEF_EFF"] - h["DEF_EFF"]
+
     home_edge = 2.0  # base home-court advantage
 
     score = (
         home_edge
         + 0.08 * d_ORtg
         + 0.08 * d_DRtg
+        + 0.02 * d_pace
+        + 8.0 * d_off_eff
+        + 8.0 * d_def_eff
     )
 
     return score
@@ -566,6 +391,7 @@ def score_to_spread(score, points_per_logit=1.3):
 # -----------------------------
 # Injuries (ESPN scraping)
 # -----------------------------
+
 INJURY_WEIGHTS = {
     "star": 3.0,
     "starter": 1.5,
@@ -583,7 +409,7 @@ INJURY_STATUS_MULTIPLIER = {
 
 def fetch_injury_report_espn():
     """
-    Scrape ESPN NBA injuries page into a DataFrame with columns like:
+    Scrape ESPN NBA injuries page into a DataFrame with columns:
     Player, Team, Pos, Status, Injury
     """
     url = "https://www.espn.com/nba/injuries"
@@ -645,10 +471,22 @@ def status_to_mult(status):
     return 1.0
 
 
+def estimate_player_impact_simple(pos):
+    """
+    Very simple position-based impact proxy.
+    You can replace this later with per-player stats from BDL.
+    """
+    pos = (pos or "").upper()
+    # Starters / main positions get a bit more weight
+    if pos in ["PG", "SG", "SF", "PF", "C"]:
+        return 2.0
+    return 1.0
+
+
 def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
     """
     Build a list of injuries for a given team from ESPN injuries DataFrame.
-    Returns list of tuples: (player_name, role, multiplier)
+    Returns list of tuples: (player_name, role, multiplier, impact_points)
     """
     team = team_name_or_abbrev.lower()
 
@@ -666,14 +504,16 @@ def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
 
         role = guess_role(name, pos)
         mult = status_to_mult(status)
+        impact_points = estimate_player_impact_simple(pos)
 
-        injuries.append((name, role, mult))
+        injuries.append((name, role, mult, impact_points))
 
     return injuries
 
 
 def injury_adjustment(home_injuries=None, away_injuries=None):
     """
+    home_injuries / away_injuries: list of (name, role, mult, impact_points)
     Missing players on the HOME team LOWER the score.
     Missing players on the AWAY team RAISE the score (helps home).
     """
@@ -683,21 +523,23 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
     def parse_inj_list(lst, sign):
         adj = 0.0
         for item in lst:
-            if isinstance(item, dict):
-                role = item.get("role", "starter")
-                mult = float(item.get("mult", 1.0))
+            # (name, role, mult, impact_points)
+            if len(item) == 4:
+                _, role, mult, impact = item
+            elif len(item) == 3:
+                _, role, mult = item
+                impact = 2.0
+            elif len(item) == 2:
+                _, role = item
+                mult = 1.0
+                impact = 2.0
             else:
-                if len(item) == 3:
-                    _, role, mult = item
-                    mult = float(mult)
-                elif len(item) == 2:
-                    _, role = item
-                    mult = 1.0
-                else:
-                    role = "starter"
-                    mult = 1.0
+                role = "starter"
+                mult = 1.0
+                impact = 2.0
+
             weight = INJURY_WEIGHTS.get(role, INJURY_WEIGHTS["starter"])
-            adj += sign * weight * mult
+            adj += sign * weight * mult * (impact / 2.0)
         return adj
 
     total_adj = 0.0
@@ -709,6 +551,7 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
 # -----------------------------
 # Schedule / games (BallDontLie)
 # -----------------------------
+
 def fetch_games_for_date(game_date_str, stats_df, api_key):
     """
     game_date_str format: 'MM/DD/YYYY'
@@ -730,6 +573,9 @@ def fetch_games_for_date(game_date_str, stats_df, api_key):
                 "GAME_ID": g["id"],
                 "HOME_TEAM_NAME": home_team["full_name"],
                 "AWAY_TEAM_NAME": away_team["full_name"],
+                "HOME_TEAM_ID": home_team["id"],
+                "AWAY_TEAM_ID": away_team["id"],
+                "GAME_DATE": g.get("date"),
             }
         )
 
@@ -740,7 +586,6 @@ def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
     """
     If odds/odds_MM-DD-YYYY.csv does not exist, create a template CSV with:
       date, home, away, home_ml, away_ml, home_spread
-    where odds columns are blank for you to fill in manually.
     """
     os.makedirs(odds_dir, exist_ok=True)
     odds_path = os.path.join(odds_dir, f"odds_{game_date_str.replace('/', '-')}.csv")
@@ -777,8 +622,143 @@ def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
 
 
 # -----------------------------
+# Schedule fatigue & H2H helpers
+# -----------------------------
+
+def get_team_last_game_date(team_id, game_date_obj, season_year, api_key):
+    """
+    Find the last completed game for a team BEFORE game_date_obj.
+    Returns a date or None.
+    """
+    iso_date = game_date_obj.strftime("%Y-%m-%d")
+    params = {
+        "seasons[]": season_year,
+        "team_ids[]": team_id,
+        "end_date": iso_date,
+        "per_page": 100,
+    }
+    cursor = None
+    last_date = None
+
+    while True:
+        if cursor is not None:
+            params["cursor"] = cursor
+        else:
+            params.pop("cursor", None)
+
+        games_json = bdl_get("games", params=params, api_key=api_key)
+        games = games_json.get("data", [])
+        meta = games_json.get("meta", {}) or {}
+        cursor = meta.get("next_cursor")
+
+        for g in games:
+            # parse game date
+            g_date_str = g.get("date")
+            if not g_date_str:
+                continue
+            g_date = datetime.fromisoformat(g_date_str.replace("Z", "+00:00")).date()
+            if g_date >= game_date_obj:
+                continue
+
+            home_score = g.get("home_team_score", 0) or 0
+            away_score = g.get("visitor_team_score", 0) or 0
+            if home_score == 0 and away_score == 0 and g.get("period", 0) == 0:
+                continue  # unfinished
+
+            if (last_date is None) or (g_date > last_date):
+                last_date = g_date
+
+        if not cursor:
+            break
+
+    return last_date
+
+
+def rest_days_to_fatigue_adjustment(days_rest):
+    """
+    Map rest days to a fatigue adjustment in points (for the team's score).
+    Positive = more rested (helps team), negative = tired.
+    """
+    if days_rest is None:
+        return 0.0
+    if days_rest <= 1:
+        # back-to-back or 1 day rest
+        return -2.0
+    if days_rest == 2:
+        # 3 in 4 type schedule
+        return -1.0
+    if days_rest >= 4:
+        # very rested
+        return +0.5
+    # 3 days rest → neutral
+    return 0.0
+
+
+def compute_head_to_head_adjustment(home_team_id, away_team_id, season_year, api_key, max_games=5):
+    """
+    Look at up to `max_games` recent games between these two teams this season
+    and create a small adjustment based on average margin.
+    Positive => home historically does better.
+    """
+    params = {
+        "seasons[]": season_year,
+        "team_ids[]": home_team_id,
+        "per_page": 100,
+    }
+    cursor = None
+    margins = []
+
+    while True and len(margins) < max_games:
+        if cursor is not None:
+            params["cursor"] = cursor
+        else:
+            params.pop("cursor", None)
+
+        games_json = bdl_get("games", params=params, api_key=api_key)
+        games = games_json.get("data", [])
+        meta = games_json.get("meta", {}) or {}
+        cursor = meta.get("next_cursor")
+
+        for g in games:
+            if len(margins) >= max_games:
+                break
+
+            home = g["home_team"]["id"]
+            away = g["visitor_team"]["id"]
+            if not (
+                (home == home_team_id and away == away_team_id)
+                or (home == away_team_id and away == home_team_id)
+            ):
+                continue
+
+            home_score = g.get("home_team_score", 0) or 0
+            away_score = g.get("visitor_team_score", 0) or 0
+            if home_score == 0 and away_score == 0 and g.get("period", 0) == 0:
+                continue
+
+            # margin from home-team perspective (for THIS game)
+            margin = home_score - away_score
+            # but we want margin from "our" home_team_id perspective:
+            if home != home_team_id:
+                margin = -margin
+            margins.append(margin)
+
+        if not cursor:
+            break
+
+    if not margins:
+        return 0.0
+
+    avg_margin = sum(margins) / len(margins)
+    # convert to a small adjustment, capped
+    adj = max(min(avg_margin / 5.0, 2.0), -2.0)
+    return adj
+
+
+# -----------------------------
 # Main daily engine
 # -----------------------------
+
 def run_daily_probs_for_date(
     game_date="12/04/2025",
     odds_dict=None,
@@ -803,6 +783,9 @@ def run_daily_probs_for_date(
     if spreads_dict is None:
         spreads_dict = {}
 
+    game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
+    season_year = season_start_year_for_date(game_date_obj)
+
     # Schedule from BallDontLie
     games_df = fetch_games_for_date(game_date, stats_df, api_key)
 
@@ -821,16 +804,36 @@ def run_daily_probs_for_date(
 
         home_row = find_team_row(home_name, stats_df)
         away_row = find_team_row(away_name, stats_df)
+        home_id = int(home_row["TEAM_ID"])
+        away_id = int(away_row["TEAM_ID"])
+
+        # Base matchup
+        base_score = season_matchup_base_score(home_row, away_row)
 
         # Injuries
         home_inj = build_injury_list_for_team_espn(home_name, injury_df)
         away_inj = build_injury_list_for_team_espn(away_name, injury_df)
-
-        base_score = season_matchup_score(home_row, away_row)
         inj_adj = injury_adjustment(home_inj, away_inj)
-        adj_score = base_score + inj_adj
 
-        model_spread = score_to_spread(adj_score)      # home spread
+        # Schedule fatigue
+        home_last = get_team_last_game_date(home_id, game_date_obj, season_year, api_key)
+        away_last = get_team_last_game_date(away_id, game_date_obj, season_year, api_key)
+
+        home_rest_days = (game_date_obj - home_last).days if home_last else None
+        away_rest_days = (game_date_obj - away_last).days if away_last else None
+
+        home_fatigue = rest_days_to_fatigue_adjustment(home_rest_days)
+        away_fatigue = rest_days_to_fatigue_adjustment(away_rest_days)
+
+        fatigue_adj = home_fatigue - away_fatigue  # positive helps home
+
+        # Head-to-head historical adjustment
+        h2h_adj = compute_head_to_head_adjustment(home_id, away_id, season_year, api_key)
+
+        # Final score
+        adj_score = base_score + inj_adj + fatigue_adj + h2h_adj
+
+        model_spread = score_to_spread(adj_score)  # home spread
         model_home_prob = score_to_prob(adj_score, lam)
 
         # Market odds
@@ -853,26 +856,21 @@ def run_daily_probs_for_date(
         edge_home = model_home_prob - home_imp
         edge_away = (1.0 - model_home_prob) - away_imp
 
-                # Spreads
+        # Spreads
         home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
         if home_spread is not None:
             home_spread = float(home_spread)
-            # model_spread = home margin (positive = home favored)
-            # home_spread < 0 means home -points, >0 means home +points
-            # So the edge for the home team vs the market is:
-            #   model_home_margin - ( -home_spread )  = model_spread + home_spread
+            # model_spread: predicted home margin
+            # home_spread: market line (home -pts if negative, +pts if positive)
             spread_edge_home = model_spread + home_spread
         else:
-            home_spread = None
             spread_edge_home = None
 
         # -------------------------
         # Recommendation logic
         # -------------------------
 
-             # -------------------------
         # 1) Moneyline recommendation
-        # -------------------------
         ml_rec = "No strong ML edge"
         if home_ml is not None and away_ml is not None:
             if edge_home > edge_threshold:
@@ -880,15 +878,13 @@ def run_daily_probs_for_date(
             elif edge_away > edge_threshold:
                 ml_rec = f"Bet AWAY ML ({away_ml:+})"
 
-        # -------------------------
-        # 2) Spread recommendation
-        # -------------------------
+        # 2) Spread recommendation (separate threshold in points)
         spread_rec = "No strong spread edge"
-        spread_threshold_pts = 1.5
+        spread_threshold_pts = 1.5  # tweak if you want tighter/looser filter
 
         if home_spread is not None and spread_edge_home is not None:
             if spread_edge_home > spread_threshold_pts:
-                # home should cover more easily
+                # model likes home side vs line
                 if home_spread > 0:
                     line_str = f"home +{abs(home_spread)}"
                 elif home_spread < 0:
@@ -896,9 +892,8 @@ def run_daily_probs_for_date(
                 else:
                     line_str = "home pk"
                 spread_rec = f"Bet HOME spread ({line_str})"
-
             elif spread_edge_home < -spread_threshold_pts:
-                # away should cover
+                # model likes away side vs line
                 if home_spread > 0:
                     line_str = f"away -{abs(home_spread)}"
                 elif home_spread < 0:
@@ -907,45 +902,18 @@ def run_daily_probs_for_date(
                     line_str = "away pk"
                 spread_rec = f"Bet AWAY spread ({line_str})"
 
-        # -------------------------
-        # 3) If no odds at all, fallback ML recommendation
-        # -------------------------
-        if home_ml is None and away_ml is None and home_spread is None:
-            if model_home_prob > 0.55:
-                ml_rec = "Lean HOME ML (no market odds provided)"
-            elif model_home_prob < 0.45:
-                ml_rec = "Lean AWAY ML (no market odds provided)"
-            else:
-                ml_rec = "No clear edge (no market odds provided)"
+        # 3) Primary recommendation: pick whichever has bigger implied edge
+        primary_rec = "No clear edge"
+        ml_edge_abs = abs(edge_home) if (home_ml is not None and away_ml is not None) else 0.0
+        spread_edge_abs = abs(spread_edge_home) / 10.0 if spread_edge_home is not None else 0.0  # scale
 
-        # -------------------------
-        # 4) PRIMARY RECOMMENDATION (ML vs Spread)
-        # -------------------------
-        # ML strength score
-        ml_score = 0.0
-        if ml_rec.startswith("Bet ") and edge_home is not None:
-            ml_score = abs(edge_home) / edge_threshold
-
-        # Spread strength score
-        spread_score = 0.0
-        if spread_rec.startswith("Bet ") and spread_edge_home is not None:
-            spread_score = abs(spread_edge_home) / spread_threshold_pts
-
-        # Determine stronger recommendation
-        if ml_score == 0.0 and spread_score == 0.0:
-            # Neither has a strong edge — fallback
-            if ml_rec != "No strong ML edge":
-                primary_rec = ml_rec
-            else:
-                primary_rec = spread_rec
-        elif ml_score >= spread_score:
+        if ml_edge_abs == 0.0 and spread_edge_abs == 0.0:
+            primary_rec = "No clear edge"
+        elif ml_edge_abs >= spread_edge_abs:
             primary_rec = f"ML: {ml_rec}"
         else:
             primary_rec = f"Spread: {spread_rec}"
 
-        # -------------------------
-        # Store row
-        # -------------------------
         rows.append(
             {
                 "date": game_date,
@@ -975,6 +943,7 @@ def run_daily_probs_for_date(
 # -----------------------------
 # CLI / entrypoint
 # -----------------------------
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
     parser.add_argument(
@@ -994,6 +963,9 @@ def main(argv=None):
     print(f"Running model for {game_date}...")
 
     api_key = get_bdl_api_key()
+
+    # 1) Ensure odds template exists (optional, you can comment this out if you prefer)
+    build_odds_csv_template_if_missing(game_date, api_key=api_key)
 
     # 2) Load odds from local CSV
     try:
@@ -1049,4 +1021,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-
