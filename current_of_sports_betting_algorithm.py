@@ -803,8 +803,10 @@ def run_daily_probs_for_date(
     if spreads_dict is None:
         spreads_dict = {}
 
+    # Schedule from BallDontLie
     games_df = fetch_games_for_date(game_date, stats_df, api_key)
 
+    # Injuries
     try:
         injury_df = fetch_injury_report_espn()
     except Exception as e:
@@ -820,6 +822,7 @@ def run_daily_probs_for_date(
         home_row = find_team_row(home_name, stats_df)
         away_row = find_team_row(away_name, stats_df)
 
+        # Injuries
         home_inj = build_injury_list_for_team_espn(home_name, injury_df)
         away_inj = build_injury_list_for_team_espn(away_name, injury_df)
 
@@ -827,9 +830,10 @@ def run_daily_probs_for_date(
         inj_adj = injury_adjustment(home_inj, away_inj)
         adj_score = base_score + inj_adj
 
-        model_spread = score_to_spread(adj_score)
+        model_spread = score_to_spread(adj_score)      # home spread
         model_home_prob = score_to_prob(adj_score, lam)
 
+        # Market odds
         key = (home_name, away_name)
         odds_info = odds_dict.get(key)
         if odds_info is None:
@@ -849,13 +853,14 @@ def run_daily_probs_for_date(
         edge_home = model_home_prob - home_imp
         edge_away = (1.0 - model_home_prob) - away_imp
 
+        # Spreads
         home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
         if home_spread is not None:
             spread_edge_home = model_spread - float(home_spread)
         else:
             spread_edge_home = None
 
-               # -------------------------
+        # -------------------------
         # Recommendation logic
         # -------------------------
 
@@ -869,7 +874,7 @@ def run_daily_probs_for_date(
 
         # 2) Spread recommendation (separate threshold in points)
         spread_rec = "No strong spread edge"
-        spread_threshold_pts = 1.5  # you can tweak this
+        spread_threshold_pts = 1.5  # tweak this if you want tighter/looser filter
 
         if home_spread is not None and spread_edge_home is not None:
             # model_spread_home - market_home_spread
@@ -892,17 +897,17 @@ def run_daily_probs_for_date(
                     line_str = "away pk"
                 spread_rec = f"Bet AWAY spread ({line_str})"
 
-        # 3) Fallback if no odds at all
-        fallback_rec = "No clear edge"
+        # 3) Fallback if no odds at all → use ML rec text
         if home_ml is None and away_ml is None and home_spread is None:
             if model_home_prob > 0.55:
-                fallback_rec = "Lean HOME ML (no market odds provided)"
+                ml_rec = "Lean HOME ML (no market odds provided)"
             elif model_home_prob < 0.45:
-                fallback_rec = "Lean AWAY ML (no market odds provided)"
+                ml_rec = "Lean AWAY ML (no market odds provided)"
             else:
-                fallback_rec = "No clear edge (no market odds provided)"
+                ml_rec = "No clear edge (no market odds provided)"
 
-                rows.append(
+        # Store row
+        rows.append(
             {
                 "date": game_date,
                 "home": home_name,
