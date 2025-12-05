@@ -870,7 +870,9 @@ def run_daily_probs_for_date(
         # Recommendation logic
         # -------------------------
 
+             # -------------------------
         # 1) Moneyline recommendation
+        # -------------------------
         ml_rec = "No strong ML edge"
         if home_ml is not None and away_ml is not None:
             if edge_home > edge_threshold:
@@ -878,14 +880,15 @@ def run_daily_probs_for_date(
             elif edge_away > edge_threshold:
                 ml_rec = f"Bet AWAY ML ({away_ml:+})"
 
-        # 2) Spread recommendation (separate threshold in points)
+        # -------------------------
+        # 2) Spread recommendation
+        # -------------------------
         spread_rec = "No strong spread edge"
-        spread_threshold_pts = 1.5  # tweak this if you want tighter/looser filter
+        spread_threshold_pts = 1.5
 
         if home_spread is not None and spread_edge_home is not None:
-            # model_spread_home - market_home_spread
             if spread_edge_home > spread_threshold_pts:
-                # model thinks home should be more of a favorite than the line
+                # home should cover more easily
                 if home_spread > 0:
                     line_str = f"home +{abs(home_spread)}"
                 elif home_spread < 0:
@@ -893,8 +896,9 @@ def run_daily_probs_for_date(
                 else:
                     line_str = "home pk"
                 spread_rec = f"Bet HOME spread ({line_str})"
+
             elif spread_edge_home < -spread_threshold_pts:
-                # model likes the away side relative to the line
+                # away should cover
                 if home_spread > 0:
                     line_str = f"away -{abs(home_spread)}"
                 elif home_spread < 0:
@@ -903,7 +907,9 @@ def run_daily_probs_for_date(
                     line_str = "away pk"
                 spread_rec = f"Bet AWAY spread ({line_str})"
 
-        # 3) Fallback if no odds at all → use ML rec text
+        # -------------------------
+        # 3) If no odds at all, fallback ML recommendation
+        # -------------------------
         if home_ml is None and away_ml is None and home_spread is None:
             if model_home_prob > 0.55:
                 ml_rec = "Lean HOME ML (no market odds provided)"
@@ -911,23 +917,23 @@ def run_daily_probs_for_date(
                 ml_rec = "Lean AWAY ML (no market odds provided)"
             else:
                 ml_rec = "No clear edge (no market odds provided)"
-        # 4) Combine ML + spread into a single primary recommendation
-        # We normalise each "edge" to a score so we can compare them.
 
-        # ML score: how many times over the ML edge threshold?
+        # -------------------------
+        # 4) PRIMARY RECOMMENDATION (ML vs Spread)
+        # -------------------------
+        # ML strength score
         ml_score = 0.0
-        if ml_rec.startswith("Bet "):
-            # use the home edge magnitude as a proxy
-            ml_score = abs(edge_home) / edge_threshold  # >1 means above threshold
+        if ml_rec.startswith("Bet ") and edge_home is not None:
+            ml_score = abs(edge_home) / edge_threshold
 
-        # Spread score: how many times over the spread edge threshold?
+        # Spread strength score
         spread_score = 0.0
         if spread_rec.startswith("Bet ") and spread_edge_home is not None:
             spread_score = abs(spread_edge_home) / spread_threshold_pts
 
-        # Decide primary recommendation
+        # Determine stronger recommendation
         if ml_score == 0.0 and spread_score == 0.0:
-            # neither side is a strong bet – just carry over ML text (or spread if ML is neutral)
+            # Neither has a strong edge — fallback
             if ml_rec != "No strong ML edge":
                 primary_rec = ml_rec
             else:
@@ -937,8 +943,10 @@ def run_daily_probs_for_date(
         else:
             primary_rec = f"Spread: {spread_rec}"
 
+        # -------------------------
         # Store row
-                rows.append(
+        # -------------------------
+        rows.append(
             {
                 "date": game_date,
                 "home": home_name,
@@ -954,7 +962,7 @@ def run_daily_probs_for_date(
                 "spread_edge_home": spread_edge_home,
                 "ml_recommendation": ml_rec,
                 "spread_recommendation": spread_rec,
-                "primary_recommendation": primary_rec,  # 👈 NEW
+                "primary_recommendation": primary_rec,
             }
         )
 
