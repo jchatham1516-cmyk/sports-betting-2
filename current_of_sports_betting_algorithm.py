@@ -54,6 +54,32 @@ def fetch_odds_for_date_from_csv(game_date_str):
         raise ValueError(
             f"Odds CSV {fname} must contain columns: {required_cols}. "
             f"Found: {list(df.columns)}"
+            for _, row in df.iterrows():
+    home = str(row["home"]).strip()
+    away = str(row["away"]).strip()
+    key = (home, away)
+
+    print("[DEBUG row]", key,
+          "| raw home_ml=", row["home_ml"],
+          "| raw away_ml=", row["away_ml"],
+          "| raw home_spread=", row["home_spread"])
+
+    home_ml = row["home_ml"]
+    away_ml = row["away_ml"]
+    home_spread = row["home_spread"] if "home_spread" in df.columns else None
+
+    home_ml = float(home_ml) if pd.notna(home_ml) else None
+    away_ml = float(away_ml) if pd.notna(away_ml) else None
+    if home_spread is not None and pd.notna(home_spread):
+        home_spread = float(home_spread)
+    else:
+        home_spread = None
+
+    odds_dict[key] = {
+        "home_ml": home_ml,
+        "away_ml": away_ml,
+        "home_spread": home_spread,
+    }
         )
 
     odds_dict = {}
