@@ -360,14 +360,17 @@ def season_matchup_base_score(home_row, away_row):
 
     home_edge = 2.0  # base home-court advantage
 
-    score = (
-        home_edge
-        + 0.08 * d_ORtg
-        + 0.08 * d_DRtg
-        + 0.02 * d_pace
-        + 8.0 * d_off_eff
-        + 8.0 * d_def_eff
-    )
+    home_edge = 1.2   # reduced from 2.0
+
+score = (
+    home_edge
+    + 0.04 * d_ORtg       # half as strong
+    + 0.04 * d_DRtg
+    + 0.01 * d_pace
+    + 2.0 * d_off_eff     # reduced from 8.0
+    + 2.0 * d_def_eff
+)
+
 
     return score
 
@@ -881,7 +884,7 @@ else:
 
         # 2) Spread recommendation (separate threshold in points)
         spread_rec = "No strong spread edge"
-        spread_threshold_pts = 1.5  # tweak if you want tighter/looser filter
+        spread_threshold_pts = 2.0  # tweak if you want tighter/looser filter
 
         if home_spread is not None and spread_edge_home is not None:
             if spread_edge_home > spread_threshold_pts:
