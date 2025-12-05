@@ -30,63 +30,6 @@ import requests
 import os
 import pandas as pd
 
-def fetch_odds_for_date_from_csv(game_date_str: str):
-    """
-    Load odds for a given date from a local CSV file in the 'odds' folder.
-
-    Expects a file named:
-        odds/odds_MM-DD-YYYY.csv
-
-    with columns at least:
-        date, home, away, home_ml, away_ml, home_spread
-    """
-    fname = os.path.join("odds", f"odds_{game_date_str.replace('/', '-')}.csv")
-    if not os.path.exists(fname):
-        print(f"[odds_csv] No odds file found at {fname}. Using 0.5 market defaults.")
-        return {}, {}
-
-    print(f"[odds_csv] Loading odds from {fname}")
-    df = pd.read_csv(fname)
-
-    required_cols = {"home", "away", "home_ml", "away_ml"}
-    if not required_cols.issubset(df.columns):
-        raise ValueError(
-            f"Odds CSV {fname} must contain columns at least: {required_cols}. "
-            f"Found: {list(df.columns)}"
-        )
-
-    odds_dict = {}
-    spreads_dict = {}
-
-    for _, row in df.iterrows():
-        home = str(row["home"]).strip()
-        away = str(row["away"]).strip()
-        key = (home, away)
-
-        home_ml = row["home_ml"]
-        away_ml = row["away_ml"]
-        home_spread = row["home_spread"] if "home_spread" in df.columns else None
-
-        home_ml = float(home_ml) if pd.notna(home_ml) else None
-        away_ml = float(away_ml) if pd.notna(away_ml) else None
-
-        if home_spread is not None and pd.notna(home_spread):
-            home_spread = float(home_spread)
-        else:
-            home_spread = None
-
-        odds_dict[key] = {
-            "home_ml": home_ml,
-            "away_ml": away_ml,
-            "home_spread": home_spread,
-        }
-
-        if home_spread is not None:
-            spreads_dict[key] = home_spread
-
-    print(f"[odds_csv] Built odds for {len(odds_dict)} games.")
-    print("[odds_csv] Sample keys:", list(odds_dict.keys())[:5])
-    return odds_dict, spreads_dict
     
 def fetch_odds_for_date_from_csv(game_date_str):
     """
@@ -1074,20 +1017,20 @@ def main(argv=None):
     else:
         game_date = args.date
 
-    print(f"Running model for {game_date}...")
+      print(f"Running model for {game_date}...")
 
     api_key = get_bdl_api_key()
 
-    # You can optionally hardcode your odds here:
-    # odds_dict = {
-    #   ("Cleveland Cavaliers", "Boston Celtics"): {
-    #       "home_ml": -120,
-    #       "away_ml": +105,
-    #       "home_spread": -2.5,
-    #   },
-    # }
-    odds_dict = {}
-    spreads_dict = {}
+    # 1) Load odds from local CSV (manual odds)
+    try:
+        odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date)
+        print(f"Loaded odds for {len(odds_dict)} games from CSV.")
+    except Exception as e:
+        print(f"Warning: failed to load odds from CSV: {e}")
+        odds_dict = {}
+        spreads_dict = {}
+        print("Proceeding with market_home_prob = 0.5 defaults.")
+
 
     # Determine season year for BallDontLie based on the game date
     game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
