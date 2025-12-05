@@ -855,43 +855,54 @@ def run_daily_probs_for_date(
         else:
             spread_edge_home = None
 
-        rec = "No clear edge"
+               # -------------------------
+        # Recommendation logic
+        # -------------------------
 
+        # 1) Moneyline recommendation
+        ml_rec = "No strong ML edge"
         if home_ml is not None and away_ml is not None:
             if edge_home > edge_threshold:
-                rec = f"Bet HOME ML ({home_ml:+})"
+                ml_rec = f"Bet HOME ML ({home_ml:+})"
             elif edge_away > edge_threshold:
-                rec = f"Bet AWAY ML ({away_ml:+})"
-            else:
-                rec = "No strong ML edge"
-        elif home_spread is not None and spread_edge_home is not None:
-            if spread_edge_home > 1.5:
+                ml_rec = f"Bet AWAY ML ({away_ml:+})"
+
+        # 2) Spread recommendation (separate threshold in points)
+        spread_rec = "No strong spread edge"
+        spread_threshold_pts = 1.5  # you can tweak this
+
+        if home_spread is not None and spread_edge_home is not None:
+            # model_spread_home - market_home_spread
+            if spread_edge_home > spread_threshold_pts:
+                # model thinks home should be more of a favorite than the line
                 if home_spread > 0:
                     line_str = f"home +{abs(home_spread)}"
                 elif home_spread < 0:
                     line_str = f"home {home_spread}"
                 else:
                     line_str = "home pk"
-                rec = f"Bet HOME spread ({line_str})"
-            elif spread_edge_home < -1.5:
+                spread_rec = f"Bet HOME spread ({line_str})"
+            elif spread_edge_home < -spread_threshold_pts:
+                # model likes the away side relative to the line
                 if home_spread > 0:
                     line_str = f"away -{abs(home_spread)}"
                 elif home_spread < 0:
                     line_str = f"away +{abs(home_spread)}"
                 else:
                     line_str = "away pk"
-                rec = f"Bet AWAY spread ({line_str})"
-            else:
-                rec = "No strong spread edge"
-        else:
-            if model_home_prob > 0.55:
-                rec = "Lean HOME ML (no market odds provided)"
-            elif model_home_prob < 0.45:
-                rec = "Lean AWAY ML (no market odds provided)"
-            else:
-                rec = "No clear edge (no market odds provided)"
+                spread_rec = f"Bet AWAY spread ({line_str})"
 
-        rows.append(
+        # 3) Fallback if no odds at all
+        fallback_rec = "No clear edge"
+        if home_ml is None and away_ml is None and home_spread is None:
+            if model_home_prob > 0.55:
+                fallback_rec = "Lean HOME ML (no market odds provided)"
+            elif model_home_prob < 0.45:
+                fallback_rec = "Lean AWAY ML (no market odds provided)"
+            else:
+                fallback_rec = "No clear edge (no market odds provided)"
+
+                rows.append(
             {
                 "date": game_date,
                 "home": home_name,
@@ -905,7 +916,8 @@ def run_daily_probs_for_date(
                 "away_ml": away_ml,
                 "home_spread": home_spread,
                 "spread_edge_home": spread_edge_home,
-                "recommendation": rec,
+                "ml_recommendation": ml_rec,
+                "spread_recommendation": spread_rec,
             }
         )
 
