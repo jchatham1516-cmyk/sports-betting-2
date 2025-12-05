@@ -27,10 +27,11 @@ from datetime import datetime, date
 import numpy as np
 import pandas as pd
 import requests
-import os
-import pandas as pd
 
-    
+
+# -----------------------------
+# CSV odds loader
+# -----------------------------
 def fetch_odds_for_date_from_csv(game_date_str):
     """
     Load odds for a given date from a local CSV file in the 'odds' folder.
@@ -54,32 +55,6 @@ def fetch_odds_for_date_from_csv(game_date_str):
         raise ValueError(
             f"Odds CSV {fname} must contain columns: {required_cols}. "
             f"Found: {list(df.columns)}"
-            for _, row in df.iterrows():
-    home = str(row["home"]).strip()
-    away = str(row["away"]).strip()
-    key = (home, away)
-
-    print("[DEBUG row]", key,
-          "| raw home_ml=", row["home_ml"],
-          "| raw away_ml=", row["away_ml"],
-          "| raw home_spread=", row["home_spread"])
-
-    home_ml = row["home_ml"]
-    away_ml = row["away_ml"]
-    home_spread = row["home_spread"] if "home_spread" in df.columns else None
-
-    home_ml = float(home_ml) if pd.notna(home_ml) else None
-    away_ml = float(away_ml) if pd.notna(away_ml) else None
-    if home_spread is not None and pd.notna(home_spread):
-        home_spread = float(home_spread)
-    else:
-        home_spread = None
-
-    odds_dict[key] = {
-        "home_ml": home_ml,
-        "away_ml": away_ml,
-        "home_spread": home_spread,
-    }
         )
 
     odds_dict = {}
@@ -89,6 +64,14 @@ def fetch_odds_for_date_from_csv(game_date_str):
         home = str(row["home"]).strip()
         away = str(row["away"]).strip()
         key = (home, away)
+
+        # DEBUG: show what raw values we read from CSV
+        print(
+            "[DEBUG row]", key,
+            "| raw home_ml=", row.get("home_ml"),
+            "| raw away_ml=", row.get("away_ml"),
+            "| raw home_spread=", row.get("home_spread"),
+        )
 
         home_ml = row["home_ml"]
         away_ml = row["away_ml"]
@@ -114,6 +97,10 @@ def fetch_odds_for_date_from_csv(game_date_str):
     print("[odds_csv] Sample keys:", list(odds_dict.keys())[:5])
     return odds_dict, spreads_dict
 
+
+# -----------------------------
+# Sportsbook API (unused for now)
+# -----------------------------
 SPORTSBOOK_BASE_URL = "https://sportsbook-api2.p.rapidapi.com"
 SPORTSBOOK_HOST = "sportsbook-api2.p.rapidapi.com"
 
@@ -145,7 +132,9 @@ def sportsbook_get(path, params=None, api_key=None, timeout=30):
     resp.raise_for_status()
     return resp.json()
 
+
 APISPORTS_BASE_URL = "https://v1.basketapi.com"  # API-Sports Basketball base
+
 
 def get_apisports_api_key():
     api_key = os.environ.get("APISPORTS_API_KEY", "")
@@ -180,9 +169,6 @@ def fetch_odds_for_date_sportsbook(game_date_str, api_key=None):
     )
 
     print("[SportsbookAPI] Raw events type:", type(data))
-    # In some examples this is a list, not a dict:
-    # https://sportsbook-api2.p.rapidapi.com/v0/competitions/Q63E-wddv-ddp4/events  → returns [...]
-    # So we handle both
     if isinstance(data, dict) and "events" in data:
         events = data.get("events", [])
     else:
@@ -190,19 +176,17 @@ def fetch_odds_for_date_sportsbook(game_date_str, api_key=None):
 
     print(f"[SportsbookAPI] Got {len(events)} events total")
 
-    # Print a sample event to the logs so we can see fields (home team, away team, markets etc.)
     if events:
         sample = events[0]
         print("[SportsbookAPI] Sample event (truncated):", str(sample)[:600])
 
     # For now, return empty so your model keeps using 0.5 market probs.
-    # Once we see the logs, we can build a proper odds_dict from this.
     return {}
+
 
 # -----------------------------
 # Season / date helpers
 # -----------------------------
-
 def season_start_year_for_date(d: date) -> int:
     """
     BallDontLie uses season years like 2024 for the 2024-25 season.
@@ -223,10 +207,10 @@ def american_to_implied_prob(odds):
     else:
         return 100.0 / (odds + 100.0)
 
-# -----------------------------
-# Odds API helpers
-# -----------------------------
 
+# -----------------------------
+# Odds API helpers (The Odds API)
+# -----------------------------
 def get_odds_api_key():
     """
     Read Odds API key from environment.
@@ -266,9 +250,12 @@ def fetch_odds_for_date(
     bookmaker_preference=None,
     api_key=None,
 ):
-    # Fetch moneyline + spread odds for NBA games from The Odds API v4.
-    # We don't filter by date here. We grab all upcoming NBA odds and the
-    # model will match by (home_team, away_team) when looping today's games.
+    """
+    Fetch moneyline + spread odds for NBA games from The Odds API v4.
+
+    We don't filter by date here. We grab all upcoming NBA odds and the
+    model will match by (home_team, away_team) when looping today's games.
+    """
     if api_key is None:
         api_key = get_odds_api_key()
 
@@ -339,92 +326,11 @@ def fetch_odds_for_date(
     print(f"[fetch_odds_for_date] Built odds entries for {len(odds_dict)} games.")
     print("[fetch_odds_for_date] Sample keys:", list(odds_dict.keys())[:5])
     return odds_dict
-    
-def fetch_odds_for_date(
-    game_date_str,
-    sport_key="basketball_nba",
-    region="us",
-    bookmaker_preference=None,
-    api_key=None,
-):
-    # Fetch moneyline + spread odds for NBA games from The Odds API v4.
-    # We don't filter by date here. We grab all upcoming NBA odds and the
-    # model will match by (home_team, away_team) when looping today's games.
 
-    if api_key is None:
-        api_key = get_odds_api_key()
 
-    if bookmaker_preference is None:
-        bookmaker_preference = ["draftkings", "fanduel", "betmgm"]
-
-    params = {
-        "regions": region,
-        "markets": "h2h,spreads",
-        "oddsFormat": "american",
-    }
-
-    events = odds_get(f"sports/{sport_key}/odds", params=params, api_key=api_key)
-    print(f"[fetch_odds_for_date] Got {len(events)} events from The Odds API")
-
-    odds_dict = {}
-
-    for ev in events:
-        home_team = ev["home_team"]
-        away_team = ev["away_team"]
-        bookmakers = ev.get("bookmakers", []) or []
-
-        if not bookmakers:
-            continue
-
-        # Preferred bookmaker or fallback
-        chosen = None
-        by_key = {b["key"]: b for b in bookmakers if "key" in b}
-        for bk in bookmaker_preference:
-            if bk in by_key:
-                chosen = by_key[bk]
-                break
-        if chosen is None:
-            chosen = bookmakers[0]
-
-        home_ml = None
-        away_ml = None
-        home_spread = None
-
-        for m in chosen.get("markets", []):
-            mkey = m.get("key")
-            outcomes = m.get("outcomes", []) or []
-
-            if mkey == "h2h":
-                # moneyline
-                for o in outcomes:
-                    name = o.get("name")
-                    price = o.get("price")
-                    if name == home_team:
-                        home_ml = price
-                    elif name == away_team:
-                        away_ml = price
-
-            elif mkey == "spreads":
-                # spread
-                for o in outcomes:
-                    name = o.get("name")
-                    point = o.get("point")
-                    if name == home_team:
-                        home_spread = point
-
-        odds_dict[(home_team, away_team)] = {
-            "home_ml": home_ml,
-            "away_ml": away_ml,
-            "home_spread": home_spread,
-        }
-
-    print(f"[fetch_odds_for_date] Built odds entries for {len(odds_dict)} games.")
-    print("[fetch_odds_for_date] Sample keys:", list(odds_dict.keys())[:5])
-    return odds_dict
 # -----------------------------
 # BallDontLie low-level client
 # -----------------------------
-
 BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
 
 
@@ -453,7 +359,6 @@ def bdl_get(path, params=None, api_key=None, max_retries=5):
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.get(url, headers=headers, params=params, timeout=30)
-            # Handle rate limiting explicitly
             if resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After")
                 if retry_after is not None:
@@ -494,7 +399,6 @@ def bdl_get(path, params=None, api_key=None, max_retries=5):
 # -----------------------------
 # Team ratings built from games
 # -----------------------------
-
 def fetch_team_ratings_bdl(
     season_year: int,
     end_date_iso: str,
@@ -506,16 +410,10 @@ def fetch_team_ratings_bdl(
     - ORtg proxy  = average points scored per game
     - DRtg proxy  = average points allowed per game
     - W, L, W_PCT from game results
-
-    Returns DataFrame with columns:
-      TEAM_ID, TEAM_NAME, GP, W, L, W_PCT, ORtg, DRtg, eFG, TOV, AST, ORB, DRB, FTAr
-    (Advanced stats are zeroed but kept to match the rest of the model.)
     """
-    # 1) Get all teams
     teams_json = bdl_get("teams", params={}, api_key=api_key)
     teams_data = teams_json.get("data", [])
 
-    # Initialize aggregates
     agg = {}
     for t in teams_data:
         tid = t["id"]
@@ -528,8 +426,6 @@ def fetch_team_ratings_bdl(
             "losses": 0,
         }
 
-    # 2) Get all games for this season up to end_date_iso
-    #    docs: GET /v1/games with seasons[]=YYYY and end_date=YYYY-MM-DD, per_page, cursor :contentReference[oaicite:4]{index=4}
     params = {
         "seasons[]": season_year,
         "end_date": end_date_iso,
@@ -550,29 +446,25 @@ def fetch_team_ratings_bdl(
 
         for g in games:
             home_team = g["home_team"]
-            away_team = g["visitor_team"]  # naming from docs :contentReference[oaicite:5]{index=5}
+            away_team = g["visitor_team"]
 
             home_id = home_team["id"]
             away_id = away_team["id"]
             home_score = g.get("home_team_score", 0) or 0
             away_score = g.get("visitor_team_score", 0) or 0
 
-            # Skip games that have no score yet (0-0 and period==0 & status is start_time)
             if home_score == 0 and away_score == 0 and g.get("period", 0) == 0:
                 continue
 
-            # Home aggregates
             if home_id in agg:
                 agg[home_id]["gp"] += 1
                 agg[home_id]["pts_for"] += home_score
                 agg[home_id]["pts_against"] += away_score
-            # Away aggregates
             if away_id in agg:
                 agg[away_id]["gp"] += 1
                 agg[away_id]["pts_for"] += away_score
                 agg[away_id]["pts_against"] += home_score
 
-            # Wins / losses
             if home_score > away_score:
                 if home_id in agg:
                     agg[home_id]["wins"] += 1
@@ -587,7 +479,6 @@ def fetch_team_ratings_bdl(
         if not cursor:
             break
 
-    # 3) Build DataFrame
     rows = []
     for tid, rec in agg.items():
         gp = rec["gp"]
@@ -607,13 +498,6 @@ def fetch_team_ratings_bdl(
                 "W_PCT": w_pct,
                 "ORtg": or_p,
                 "DRtg": dr_p,
-                # Keep advanced columns as zeros for now
-                "eFG": 0.0,
-                "TOV": 0.0,
-                "AST": 0.0,
-                "ORB": 0.0,
-                "DRB": 0.0,
-                "FTAr": 0.0,
             }
         )
 
@@ -624,19 +508,16 @@ def fetch_team_ratings_bdl(
 # -----------------------------
 # Team lookup + scoring model
 # -----------------------------
-
 def find_team_row(team_name_input, stats_df):
     """
     Fuzzy match a team name against TEAM_NAME in stats_df.
     """
     name = team_name_input.strip().lower()
 
-    # Exact
     full_match = stats_df[stats_df["TEAM_NAME"].str.lower() == name]
     if not full_match.empty:
         return full_match.iloc[0]
 
-    # Contains
     contains_match = stats_df[stats_df["TEAM_NAME"].str.lower().str.contains(name)]
     if not contains_match.empty:
         return contains_match.iloc[0]
@@ -648,9 +529,6 @@ def season_matchup_score(home_row, away_row):
     """
     Linear scoring model:
     Positive score => home team stronger.
-
-    Here ORtg/DRtg are simple PTS_for/PTS_against per game built from BallDontLie.
-    Advanced stats are zeros, so only ORtg/DRtg and home edge drive results.
     """
     h = home_row
     a = away_row
@@ -658,13 +536,12 @@ def season_matchup_score(home_row, away_row):
     d_ORtg = h["ORtg"] - a["ORtg"]
     d_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg is better → flip
 
-    home_edge = 2.0  # base home-court advantage (tune if you like)
+    home_edge = 2.0  # base home-court advantage
 
     score = (
         home_edge
         + 0.08 * d_ORtg
         + 0.08 * d_DRtg
-        # advanced metrics currently omitted (all zero)
     )
 
     return score
@@ -689,7 +566,6 @@ def score_to_spread(score, points_per_logit=1.3):
 # -----------------------------
 # Injuries (ESPN scraping)
 # -----------------------------
-
 INJURY_WEIGHTS = {
     "star": 3.0,
     "starter": 1.5,
@@ -726,7 +602,6 @@ def fetch_injury_report_espn():
 
     df = pd.concat(injury_tables, ignore_index=True)
 
-    # Standardize columns if possible
     rename_map = {}
     for c in df.columns:
         lc = str(c).strip().lower()
@@ -751,7 +626,6 @@ def fetch_injury_report_espn():
 def guess_role(player_name, pos):
     """
     Very rough heuristic to map a player to a role category.
-    In a real model you’d plug in RAPTOR, BPM, on/off, etc.
     """
     pos = (pos or "").upper()
     if pos in ["PG", "SG", "SF", "PF"]:
@@ -800,11 +674,6 @@ def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
 
 def injury_adjustment(home_injuries=None, away_injuries=None):
     """
-    home_injuries / away_injuries:
-      - list of tuples: [("Player Name", "role", mult), ...]
-        where role in {"star", "starter", "rotation", "bench"}
-      - or list of dicts: [{"name": "...", "role": "starter", "mult": 1.0}, ...]
-
     Missing players on the HOME team LOWER the score.
     Missing players on the AWAY team RAISE the score (helps home).
     """
@@ -818,7 +687,6 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
                 role = item.get("role", "starter")
                 mult = float(item.get("mult", 1.0))
             else:
-                # tuple: (name, role, mult?) or (name, role)
                 if len(item) == 3:
                     _, role, mult = item
                     mult = float(mult)
@@ -841,13 +709,10 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
 # -----------------------------
 # Schedule / games (BallDontLie)
 # -----------------------------
-
 def fetch_games_for_date(game_date_str, stats_df, api_key):
     """
     game_date_str format: 'MM/DD/YYYY'
     Returns a DataFrame with GAME_ID, HOME_TEAM_NAME, AWAY_TEAM_NAME using BallDontLie.
-
-    Uses /v1/games?dates[]=YYYY-MM-DD :contentReference[oaicite:6]{index=6}
     """
     dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
     iso_date = dt.strftime("%Y-%m-%d")
@@ -869,7 +734,8 @@ def fetch_games_for_date(game_date_str, stats_df, api_key):
         )
 
     return pd.DataFrame(rows)
-    
+
+
 def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
     """
     If odds/odds_MM-DD-YYYY.csv does not exist, create a template CSV with:
@@ -880,12 +746,10 @@ def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
     odds_path = os.path.join(odds_dir, f"odds_{game_date_str.replace('/', '-')}.csv")
 
     if os.path.exists(odds_path):
-        # Nothing to do; you may have filled this already.
         return odds_path
 
     print(f"[template] No odds file found for {game_date_str}, creating template at {odds_path}...")
 
-    # Use BallDontLie to get the schedule for that date
     games_df = fetch_games_for_date(game_date_str, stats_df=None, api_key=api_key)
 
     if games_df.empty:
@@ -911,14 +775,14 @@ def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
     print("[template] Fill in moneylines & spreads, then rerun the script for real edges.")
     return odds_path
 
+
 # -----------------------------
 # Main daily engine
 # -----------------------------
-
 def run_daily_probs_for_date(
     game_date="12/04/2025",
-    odds_dict=None,      # {(home, away): {"home_ml":..., "away_ml":..., "home_spread":...}}
-    spreads_dict=None,   # OPTIONAL: {(home, away): home_spread}
+    odds_dict=None,
+    spreads_dict=None,
     stats_df=None,
     api_key=None,
     edge_threshold=0.03,
@@ -926,11 +790,6 @@ def run_daily_probs_for_date(
 ):
     """
     Run the full model for one NBA date.
-
-    Returns a DataFrame with:
-      home, away, model_home_prob, market_home_prob (if odds),
-      edge_home, edge_away, model_spread, spread_edge_home (if spreads),
-      recommended_bet (string).
     """
     if api_key is None:
         api_key = get_bdl_api_key()
@@ -944,10 +803,8 @@ def run_daily_probs_for_date(
     if spreads_dict is None:
         spreads_dict = {}
 
-    # Fetch schedule from BallDontLie
     games_df = fetch_games_for_date(game_date, stats_df, api_key)
 
-    # Fetch injuries (ESPN)
     try:
         injury_df = fetch_injury_report_espn()
     except Exception as e:
@@ -963,7 +820,6 @@ def run_daily_probs_for_date(
         home_row = find_team_row(home_name, stats_df)
         away_row = find_team_row(away_name, stats_df)
 
-        # Build injuries
         home_inj = build_injury_list_for_team_espn(home_name, injury_df)
         away_inj = build_injury_list_for_team_espn(away_name, injury_df)
 
@@ -971,14 +827,12 @@ def run_daily_probs_for_date(
         inj_adj = injury_adjustment(home_inj, away_inj)
         adj_score = base_score + inj_adj
 
-        model_spread = score_to_spread(adj_score)  # positive = home favorite
+        model_spread = score_to_spread(adj_score)
         model_home_prob = score_to_prob(adj_score, lam)
 
-        # Market data (if provided)
         key = (home_name, away_name)
         odds_info = odds_dict.get(key)
         if odds_info is None:
-            # debug: show mismatch if any
             print(f"[run_daily] No odds found for {home_name} vs {away_name}")
             odds_info = {}
 
@@ -995,14 +849,12 @@ def run_daily_probs_for_date(
         edge_home = model_home_prob - home_imp
         edge_away = (1.0 - model_home_prob) - away_imp
 
-        # Spreads (optional)
         home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
         if home_spread is not None:
             spread_edge_home = model_spread - float(home_spread)
         else:
             spread_edge_home = None
 
-        # Recommendation logic:
         rec = "No clear edge"
 
         if home_ml is not None and away_ml is not None:
@@ -1032,7 +884,6 @@ def run_daily_probs_for_date(
             else:
                 rec = "No strong spread edge"
         else:
-            # No odds at all: just lean ML with a confidence threshold
             if model_home_prob > 0.55:
                 rec = "Lean HOME ML (no market odds provided)"
             elif model_home_prob < 0.45:
@@ -1063,10 +914,10 @@ def run_daily_probs_for_date(
     df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
     return df
 
+
 # -----------------------------
 # CLI / entrypoint
 # -----------------------------
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
     parser.add_argument(
@@ -1087,10 +938,10 @@ def main(argv=None):
 
     api_key = get_bdl_api_key()
 
-    # 🆕 1) Auto-build odds CSV template if it doesn't exist
+    # 1) Auto-build odds CSV template if it doesn't exist
     build_odds_csv_template_if_missing(game_date, api_key=api_key)
 
-    # 2) Load odds from local CSV (manual odds)
+    # 2) Load odds from local CSV
     try:
         odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date)
         print(f"Loaded odds for {len(odds_dict)} games from CSV.")
@@ -1100,12 +951,12 @@ def main(argv=None):
         spreads_dict = {}
         print("Proceeding with market_home_prob = 0.5 defaults.")
 
-    # Determine season year for BallDontLie based on the game date
+    # 3) Determine season year
     game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
     season_year = season_start_year_for_date(game_date_obj)
     end_date_iso = game_date_obj.strftime("%Y-%m-%d")
 
-    # Fetch team ratings from BallDontLie
+    # 4) Fetch team ratings
     try:
         stats_df = fetch_team_ratings_bdl(
             season_year=season_year,
@@ -1117,7 +968,7 @@ def main(argv=None):
         print("Exiting without predictions so the workflow can complete gracefully.")
         return
 
-    # Run daily model; also fail gracefully if something blows up
+    # 5) Run daily model
     try:
         results_df = run_daily_probs_for_date(
             game_date=game_date,
@@ -1131,55 +982,11 @@ def main(argv=None):
         print("Exiting without predictions so the workflow can complete gracefully.")
         return
 
-    # Ensure output directory
+    # 6) Save + print
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{game_date.replace('/', '-')}.csv"
     results_df.to_csv(out_name, index=False)
 
-    # Pretty print to console
-    with pd.option_context("display.max_columns", None):
-        print(results_df)
-
-    print(f"\nSaved predictions to {out_name}")
-
-
-    # Determine season year for BallDontLie based on the game date
-    game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
-    season_year = season_start_year_for_date(game_date_obj)
-    end_date_iso = game_date_obj.strftime("%Y-%m-%d")
-
-    # Fetch team ratings from BallDontLie
-    try:
-        stats_df = fetch_team_ratings_bdl(
-            season_year=season_year,
-            end_date_iso=end_date_iso,
-            api_key=api_key,
-        )
-    except Exception as e:
-        print(f"Error: Failed to fetch team ratings from BallDontLie: {e}")
-        print("Exiting without predictions so the workflow can complete gracefully.")
-        return
-
-    # Run daily model; also fail gracefully if something blows up
-    try:
-        results_df = run_daily_probs_for_date(
-            game_date=game_date,
-            odds_dict=odds_dict,
-            spreads_dict=spreads_dict,
-            stats_df=stats_df,
-            api_key=api_key,
-        )
-    except Exception as e:
-        print(f"Error: Failed to run daily model: {e}")
-        print("Exiting without predictions so the workflow can complete gracefully.")
-        return
-
-    # Ensure output directory
-    os.makedirs("results", exist_ok=True)
-    out_name = f"results/predictions_{game_date.replace('/', '-')}.csv"
-    results_df.to_csv(out_name, index=False)
-
-    # Pretty print to console
     with pd.option_context("display.max_columns", None):
         print(results_df)
 
@@ -1188,3 +995,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+
