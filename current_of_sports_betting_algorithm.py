@@ -854,11 +854,14 @@ def run_daily_probs_for_date(
         edge_away = (1.0 - model_home_prob) - away_imp
 
         # Spreads
-        home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
-        if home_spread is not None:
-            spread_edge_home = model_spread - float(home_spread)
-        else:
-            spread_edge_home = None
+       home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
+if home_spread is not None:
+    home_spread = float(home_spread)
+    # model_spread = home margin (positive = home favored)
+    # home_spread < 0 means home -points, >0 means home +points
+    spread_edge_home = model_spread + home_spread
+else:
+    spread_edge_home = None
 
         # -------------------------
         # Recommendation logic
