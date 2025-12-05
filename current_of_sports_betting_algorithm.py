@@ -938,9 +938,6 @@ def main(argv=None):
 
     api_key = get_bdl_api_key()
 
-    # 1) Auto-build odds CSV template if it doesn't exist
-    build_odds_csv_template_if_missing(game_date, api_key=api_key)
-
     # 2) Load odds from local CSV
     try:
         odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date)
