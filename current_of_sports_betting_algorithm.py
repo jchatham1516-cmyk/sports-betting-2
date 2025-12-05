@@ -882,7 +882,7 @@ def run_daily_probs_for_date(
 
         # 2) Spread recommendation (separate threshold in points)
         spread_rec = "No strong spread edge"
-        spread_threshold_pts = 2.0  # tweak if you want tighter/looser filter
+        spread_threshold_pts = 3.0  # tweak if you want tighter/looser filter
 
         if home_spread is not None and spread_edge_home is not None:
             if spread_edge_home > spread_threshold_pts:
@@ -905,14 +905,25 @@ def run_daily_probs_for_date(
                     line_str = "away pk"
                 spread_rec = f"Bet AWAY spread ({line_str})"
 
-        # 3) Primary recommendation: pick whichever has bigger implied edge
+               # 3) Primary recommendation: compare ML vs spread on a similar scale
+        # Treat spread edge in "probability" units ~ 0.04 win-prob per point of edge
         primary_rec = "No clear edge"
-        ml_edge_abs = abs(edge_home) if (home_ml is not None and away_ml is not None) else 0.0
-        spread_edge_abs = abs(spread_edge_home) / 10.0 if spread_edge_home is not None else 0.0  # scale
 
-        if ml_edge_abs == 0.0 and spread_edge_abs == 0.0:
+        # Only count ML edge if we actually like a side
+        if home_ml is not None and away_ml is not None and ml_rec != "No strong ML edge":
+            ml_edge_abs = abs(edge_home)
+        else:
+            ml_edge_abs = 0.0
+
+        # Only count spread edge if we actually like a side
+        if spread_edge_home is not None and spread_rec != "No strong spread edge":
+            spread_edge_prob = min(abs(spread_edge_home) * 0.04, 0.5)  # cap at 50% edge
+        else:
+            spread_edge_prob = 0.0
+
+        if ml_edge_abs == 0.0 and spread_edge_prob == 0.0:
             primary_rec = "No clear edge"
-        elif ml_edge_abs >= spread_edge_abs:
+        elif ml_edge_abs >= spread_edge_prob:
             primary_rec = f"ML: {ml_rec}"
         else:
             primary_rec = f"Spread: {spread_rec}"
