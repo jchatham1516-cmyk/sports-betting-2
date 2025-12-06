@@ -313,7 +313,31 @@ def fetch_team_ratings_bdl(
             }
         )
 
-    df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+
+    # ------------------------------------
+    # Add absolute edge (already existed)
+    # ------------------------------------
+    df["abs_edge_home"] = df["edge_home"].abs()
+
+    # ------------------------------------
+    # Add Value Tier Classification
+    # ------------------------------------
+    def classify_value(edge):
+        if edge >= 0.20:
+            return "HIGH VALUE"
+        elif edge >= 0.10:
+            return "MEDIUM VALUE"
+        else:
+            return "LOW VALUE"
+
+    df["value_tier"] = df["abs_edge_home"].apply(classify_value)
+
+    # ------------------------------------
+    # Sort by strongest edges
+    # ------------------------------------
+    df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
+
     return df
 
 # -----------------------------
