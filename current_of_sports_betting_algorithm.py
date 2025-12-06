@@ -292,7 +292,6 @@ def fetch_team_ratings_bdl(
         pace = total_pts / gp if gp > 0 else 0.0
 
         # Simple efficiency proxies
-        # Using total points as possession proxy – this is rough but better than nothing.
         poss = max(total_pts, 1)
         off_eff = rec["pts_for"] / poss
         def_eff = rec["pts_against"] / poss
@@ -313,32 +312,9 @@ def fetch_team_ratings_bdl(
             }
         )
 
-        df = pd.DataFrame(rows)
-
-    # ------------------------------------
-    # Add absolute edge (already existed)
-    # ------------------------------------
-    df["abs_edge_home"] = df["edge_home"].abs()
-
-    # ------------------------------------
-    # Add Value Tier Classification
-    # ------------------------------------
-    def classify_value(edge):
-        if edge >= 0.20:
-            return "HIGH VALUE"
-        elif edge >= 0.10:
-            return "MEDIUM VALUE"
-        else:
-            return "LOW VALUE"
-
-    df["value_tier"] = df["abs_edge_home"].apply(classify_value)
-
-    # ------------------------------------
-    # Sort by strongest edges
-    # ------------------------------------
-    df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
-
+    df = pd.DataFrame(rows)
     return df
+
 
 # -----------------------------
 # Team lookup + scoring model
@@ -382,7 +358,7 @@ def season_matchup_base_score(home_row, away_row):
     d_off_eff = h["OFF_EFF"] - a["OFF_EFF"]
     d_def_eff = a["DEF_EFF"] - h["DEF_EFF"]
 
-    # ✔ Calibrated weights (realistic)
+    # Calibrated weights
     home_edge = 1.2   # reduced from 2.0
 
     score = (
@@ -395,6 +371,7 @@ def season_matchup_base_score(home_row, away_row):
     )
 
     return score
+
 
 def score_to_prob(score, lam=0.20):
     """
@@ -880,12 +857,10 @@ def run_daily_probs_for_date(
         edge_home = model_home_prob - home_imp
         edge_away = (1.0 - model_home_prob) - away_imp
 
-                # Spreads
+        # Spreads
         home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
         if home_spread is not None:
             home_spread = float(home_spread)
-            # model_spread: predicted home margin
-            # home_spread: market line (home -pts if negative, +pts if positive)
             # Positive spread_edge_home = model thinks home should be more of a favorite
             spread_edge_home = model_spread - home_spread
         else:
@@ -928,8 +903,7 @@ def run_daily_probs_for_date(
                     line_str = "away pk"
                 spread_rec = f"Bet AWAY spread ({line_str})"
 
-               # 3) Primary recommendation: compare ML vs spread on a similar scale
-        # Treat spread edge in "probability" units ~ 0.04 win-prob per point of edge
+        # 3) Primary recommendation: compare ML vs spread on a similar scale
         primary_rec = "No clear edge"
 
         # Only count ML edge if we actually like a side
@@ -973,30 +947,31 @@ def run_daily_probs_for_date(
 
     df = pd.DataFrame(rows)
 
-# ------------------------------------
-# Add absolute edge (already existed)
-# ------------------------------------
-df["abs_edge_home"] = df["edge_home"].abs()
+    # ------------------------------------
+    # Add absolute edge column
+    # ------------------------------------
+    df["abs_edge_home"] = df["edge_home"].abs()
 
-# ------------------------------------
-# Add Value Tier Classification
-# ------------------------------------
-def classify_value(edge):
-    if edge >= 0.20:
-        return "HIGH VALUE"
-    elif edge >= 0.10:
-        return "MEDIUM VALUE"
-    else:
-        return "LOW VALUE"
+    # ------------------------------------
+    # Add Value Tier Classification
+    # ------------------------------------
+    def classify_value(edge):
+        if edge >= 0.20:
+            return "HIGH VALUE"
+        elif edge >= 0.10:
+            return "MEDIUM VALUE"
+        else:
+            return "LOW VALUE"
 
-df["value_tier"] = df["abs_edge_home"].apply(classify_value)
+    df["value_tier"] = df["abs_edge_home"].apply(classify_value)
 
-# ------------------------------------
-# Sort by strongest edges
-# ------------------------------------
-df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
+    # ------------------------------------
+    # Sort by strongest edges
+    # ------------------------------------
+    df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
 
-return df
+    return df
+
 
 # -----------------------------
 # CLI / entrypoint
