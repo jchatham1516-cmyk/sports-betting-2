@@ -53,6 +53,23 @@ def fetch_odds_for_date_from_csv(game_date_str):
             f"Found: {list(df.columns)}"
         )
 
+    def _parse_number(val):
+        """Robustly parse odds/spread values from CSV."""
+        if pd.isna(val):
+            return None
+        if isinstance(val, str):
+            s = val.strip()
+            if s == "":
+                return None
+            try:
+                return float(s)
+            except ValueError:
+                return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
     odds_dict = {}
     spreads_dict = {}
 
@@ -61,25 +78,21 @@ def fetch_odds_for_date_from_csv(game_date_str):
         away = str(row["away"]).strip()
         key = (home, away)
 
+        raw_home_ml = row.get("home_ml")
+        raw_away_ml = row.get("away_ml")
+        raw_home_spread = row.get("home_spread") if "home_spread" in df.columns else None
+
         # Debug: show what raw values we read from CSV
         print(
             "[DEBUG row]", key,
-            "| raw home_ml=", row.get("home_ml"),
-            "| raw away_ml=", row.get("away_ml"),
-            "| raw home_spread=", row.get("home_spread"),
+            "| raw home_ml=", raw_home_ml,
+            "| raw away_ml=", raw_away_ml,
+            "| raw home_spread=", raw_home_spread,
         )
 
-        home_ml = row["home_ml"]
-        away_ml = row["away_ml"]
-        home_spread = row["home_spread"] if "home_spread" in df.columns else None
-
-        # Convert to float if not null
-        home_ml = float(home_ml) if pd.notna(home_ml) else None
-        away_ml = float(away_ml) if pd.notna(away_ml) else None
-        if home_spread is not None and pd.notna(home_spread):
-            home_spread = float(home_spread)
-        else:
-            home_spread = None
+        home_ml = _parse_number(raw_home_ml)
+        away_ml = _parse_number(raw_away_ml)
+        home_spread = _parse_number(raw_home_spread)
 
         odds_dict[key] = {
             "home_ml": home_ml,
@@ -110,13 +123,16 @@ def season_start_year_for_date(d: date) -> int:
 
 def american_to_implied_prob(odds):
     """
-    Convert American odds (e.g. -150, +130) into implied probability in [0,1].
+    Convert American odds (e.g. -150, +130) into implied *raw* probability in (0,1),
+    WITHOUT removing the bookmaker's vig.
     """
     odds = float(odds)
     if odds < 0:
-        return (-odds) / ((-odds) + 100.0)
+        p = (-odds) / ((-odds) + 100.0)
     else:
-        return 100.0 / (odds + 100.0)
+        p = 100.0 / (odds + 100.0)
+    # Clamp for numerical safety
+    return max(min(p, 0.9999), 0.0001)
 
 
 # -----------------------------
@@ -358,7 +374,7 @@ def season_matchup_base_score(home_row, away_row):
     d_off_eff = h["OFF_EFF"] - a["OFF_EFF"]
     d_def_eff = a["DEF_EFF"] - h["DEF_EFF"]
 
-    # Calibrated weights
+    # Calibrated weights (tweak these to tune the model)
     home_edge = 1.2   # reduced from 2.0
 
     score = (
@@ -847,12 +863,24 @@ def run_daily_probs_for_date(
         home_ml = odds_info.get("home_ml")
         away_ml = odds_info.get("away_ml")
 
+        # Convert American odds -> fair win probabilities (normalize out the vig)
         if home_ml is not None and away_ml is not None:
+            raw_home_prob = american_to_implied_prob(home_ml)
+            raw_away_prob = american_to_implied_prob(away_ml)
+            total = raw_home_prob + raw_away_prob
+            if total > 0:
+                home_imp = raw_home_prob / total
+                away_imp = raw_away_prob / total
+            else:
+                home_imp = away_imp = 0.5
+        elif home_ml is not None:
             home_imp = american_to_implied_prob(home_ml)
+            away_imp = 1.0 - home_imp
+        elif away_ml is not None:
             away_imp = american_to_implied_prob(away_ml)
+            home_imp = 1.0 - away_imp
         else:
-            home_imp = 0.5
-            away_imp = 0.5
+            home_imp = away_imp = 0.5
 
         edge_home = model_home_prob - home_imp
         edge_away = (1.0 - model_home_prob) - away_imp
@@ -872,10 +900,10 @@ def run_daily_probs_for_date(
 
         # 1) Moneyline recommendation
         ml_rec = "No strong ML edge"
-        if home_ml is not None and away_ml is not None:
-            if edge_home > edge_threshold:
+        if home_ml is not None or away_ml is not None:
+            if edge_home > edge_threshold and home_ml is not None:
                 ml_rec = f"Bet HOME ML ({home_ml:+})"
-            elif edge_away > edge_threshold:
+            elif edge_away > edge_threshold and away_ml is not None:
                 ml_rec = f"Bet AWAY ML ({away_ml:+})"
 
         # 2) Spread recommendation (separate threshold in points)
@@ -907,8 +935,10 @@ def run_daily_probs_for_date(
         primary_rec = "No clear edge"
 
         # Only count ML edge if we actually like a side
-        if home_ml is not None and away_ml is not None and ml_rec != "No strong ML edge":
+        if ml_rec.startswith("Bet HOME") and home_ml is not None:
             ml_edge_abs = abs(edge_home)
+        elif ml_rec.startswith("Bet AWAY") and away_ml is not None:
+            ml_edge_abs = abs(edge_away)
         else:
             ml_edge_abs = 0.0
 
@@ -948,9 +978,9 @@ def run_daily_probs_for_date(
     df = pd.DataFrame(rows)
 
     # ------------------------------------
-    # Add absolute edge column
+    # Add absolute edge column (best side)
     # ------------------------------------
-    df["abs_edge_home"] = df["edge_home"].abs()
+    df["abs_edge_home"] = df[["edge_home", "edge_away"]].abs().max(axis=1)
 
     # ------------------------------------
     # Add Value Tier Classification
