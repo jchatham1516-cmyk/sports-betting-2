@@ -429,7 +429,7 @@ def season_matchup_base_score(home_row, away_row):
     return score
 
 
-def score_to_prob(score, lam=0.12):
+def score_to_prob(score, lam=0.20):
     """
     Convert matchup score into win probability via logistic function.
 
@@ -875,7 +875,7 @@ def run_daily_probs_for_date(
     stats_df=None,
     api_key=None,
     edge_threshold=0.03,
-    lam=0.12,
+    lam=0.20,  # <- make sure this is 0.20
 ):
     """
     Run the full model for one NBA date.
