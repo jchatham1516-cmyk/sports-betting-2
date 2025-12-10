@@ -8,7 +8,7 @@ def main(argv=None):
         help="Game date in MM/DD/YYYY (default: today in UTC).",
     )
 
-    # Optional training mode (you may leave this unused for now)
+    # Training mode (you can ignore this unless needed)
     parser.add_argument(
         "--train-season",
         type=int,
@@ -20,18 +20,18 @@ def main(argv=None):
 
     api_key = get_bdl_api_key()
 
-    # ----------------------
-    # Training mode section
-    # ----------------------
+    # --------------------------
+    # TRAINING MODE
+    # --------------------------
     if args.train_season is not None:
         season_year = args.train_season
         print(f"[MAIN] Training matchup weights for season {season_year}...")
         train_matchup_weights(season_year, api_key)
         return
 
-    # ----------------------
-    # Normal daily mode
-    # ----------------------
+    # --------------------------
+    # NORMAL DAILY MODE
+    # --------------------------
     if args.date is None:
         today = datetime.utcnow().date()
         game_date = today.strftime("%m/%d/%Y")
@@ -40,7 +40,7 @@ def main(argv=None):
 
     print(f"Running model for {game_date}...")
 
-    # 1) Ensure odds CSV exists
+    # 1) Ensure odds template exists
     build_odds_csv_template_if_missing(game_date, api_key=api_key)
 
     # 2) Load odds
@@ -52,12 +52,12 @@ def main(argv=None):
         odds_dict = {}
         spreads_dict = {}
 
-    # 3) Season year + cutoff date
+    # 3) Determine season year
     game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
     season_year = season_start_year_for_date(game_date_obj)
     end_date_iso = game_date_obj.strftime("%Y-%m-%d")
 
-    # 4) Team ratings
+    # 4) Fetch team ratings
     try:
         stats_df = fetch_team_ratings_bdl(
             season_year=season_year,
@@ -81,7 +81,7 @@ def main(argv=None):
         print(f"Error: failed to run daily model: {e}")
         return
 
-    # 6) Save predictions
+    # 6) Save output CSV
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{game_date.replace('/', '-')}.csv"
     results_df.to_csv(out_name, index=False)
