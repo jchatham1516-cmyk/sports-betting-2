@@ -1106,7 +1106,6 @@ def run_daily_probs_for_date(
 
     return df
 
-
 # -----------------------------
 # CLI / entrypoint
 # -----------------------------
@@ -1119,41 +1118,8 @@ def main(argv=None):
         default=None,
         help="Game date in MM/DD/YYYY (default: today in UTC).",
     )
-    parser.add_argument(
-        "--train-season",
-        type=int,
-        default=None,
-        help="If set, train matchup weights on this NBA season (e.g. 2023).",
-    )
     args = parser.parse_args(argv)
 
-    api_key = get_bdl_api_key()
-
-    # ----------------------
-    # Training mode
-    # ----------------------
-        parser.add_argument(
-        "--train-season",
-        type=int,
-        default=None,
-        help="If set, train matchup weights on this NBA season (e.g. 2023).",
-    )
-    args = parser.parse_args(argv)
-
-    api_key = get_bdl_api_key()
-
-    # ----------------------
-    # Training mode
-    # ----------------------
-    if args.train_season is not None:
-        season_year = args.train_season
-        print(f"[MAIN] Training matchup weights for season {season_year}...")
-        train_matchup_weights(season_year, api_key)
-        return
-
-    # ----------------------
-    # Normal daily mode
-    # ----------------------
     if args.date is None:
         today = datetime.utcnow().date()
         game_date = today.strftime("%m/%d/%Y")
@@ -1161,7 +1127,8 @@ def main(argv=None):
         game_date = args.date
 
     print(f"Running model for {game_date}...")
-    ...
+
+    api_key = get_bdl_api_key()
 
     # 1) Ensure odds template exists (optional, you can comment this out if you prefer)
     build_odds_csv_template_if_missing(game_date, api_key=api_key)
