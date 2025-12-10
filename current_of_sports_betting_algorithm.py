@@ -396,14 +396,15 @@ def score_to_prob(score, lam=0.20):
     """
     return 1.0 / (1.0 + math.exp(-lam * score))
 
-
 def score_to_spread(score, points_per_logit=1.3):
     """
-    Convert model 'score' into predicted point spread for HOME team.
-    Positive = home favorite by that many points.
-    """
-    return score * points_per_logit
+    Convert model 'score' into a *Vegas-style* point spread for the HOME team.
 
+    - Negative number  => home is favored (e.g., -5.5 means home -5.5)
+    - Positive number  => home is an underdog (e.g., +3.5 means home +3.5)
+    """
+    # Positive score = home stronger → home should be a minus favorite
+    return -score * points_per_logit
 
 # -----------------------------
 # Injuries (ESPN scraping)
@@ -850,8 +851,8 @@ def run_daily_probs_for_date(
         # Final score
         adj_score = base_score + inj_adj + fatigue_adj + h2h_adj
 
-        model_spread = score_to_spread(adj_score)  # home spread
-        model_home_prob = score_to_prob(adj_score, lam)
+               # Model spread (Vegas-style: negative = home favorite)
+        model_spread = score_to_spread(adj_score)
 
         # Market odds
         key = (home_name, away_name)
@@ -863,34 +864,19 @@ def run_daily_probs_for_date(
         home_ml = odds_info.get("home_ml")
         away_ml = odds_info.get("away_ml")
 
-        # Convert American odds -> fair win probabilities (normalize out the vig)
-        if home_ml is not None and away_ml is not None:
-            raw_home_prob = american_to_implied_prob(home_ml)
-            raw_away_prob = american_to_implied_prob(away_ml)
-            total = raw_home_prob + raw_away_prob
-            if total > 0:
-                home_imp = raw_home_prob / total
-                away_imp = raw_away_prob / total
-            else:
-                home_imp = away_imp = 0.5
-        elif home_ml is not None:
-            home_imp = american_to_implied_prob(home_ml)
-            away_imp = 1.0 - home_imp
-        elif away_ml is not None:
-            away_imp = american_to_implied_prob(away_ml)
-            home_imp = 1.0 - away_imp
-        else:
-            home_imp = away_imp = 0.5
-
-        edge_home = model_home_prob - home_imp
-        edge_away = (1.0 - model_home_prob) - away_imp
-
+        ...
         # Spreads
         home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
         if home_spread is not None:
             home_spread = float(home_spread)
-            # Positive spread_edge_home = model thinks home should be more of a favorite
-            spread_edge_home = model_spread - home_spread
+
+            # spread_edge_home > 0  => model thinks HOME side has value at this line
+            # spread_edge_home < 0  => model thinks AWAY side has value
+            #
+            # For a home favorite (negative numbers), a more generous line
+            # means the market line is closer to 0 than the model line
+            # (e.g. model -10, market -5 → home_spread - model_spread = 5 > 0).
+            spread_edge_home = home_spread - model_spread
         else:
             spread_edge_home = None
 
