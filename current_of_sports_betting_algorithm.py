@@ -23,6 +23,7 @@ from datetime import datetime, date
 import numpy as np
 import pandas as pd
 import requests
+
 # -----------------------------
 # CSV odds loader
 # -----------------------------
@@ -350,6 +351,7 @@ def find_team_row(team_name_input, stats_df):
         return contains_match.iloc[0]
 
     raise ValueError(f"Could not find a team matching: {team_name_input}")
+
 # Global weights for the base matchup model.
 # We'll retrain these from data; this is just an initial guess.
 MATCHUP_WEIGHTS = np.array([
@@ -403,6 +405,7 @@ def season_matchup_base_score(home_row, away_row):
     x = build_matchup_features(home_row, away_row)
     return float(np.dot(MATCHUP_WEIGHTS, x))
 
+    # (Old manual weight code below is unreachable now, left here only as reference)
     h = home_row
     a = away_row
 
@@ -687,6 +690,19 @@ def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
 # Schedule fatigue & H2H helpers
 # -----------------------------
 
+def compute_head_to_head_adjustment(home_team_id, away_team_id, season_year, api_key, max_seasons_back=3):
+    """
+    TEMP STUB: head-to-head adjustment is currently disabled to avoid additional
+    BallDontLie calls and rate limits. Returns 0.0 so it won't affect the score.
+
+    You can later replace this with a real implementation that:
+      - fetches historical games between these two teams over the last
+        `max_seasons_back` seasons, and
+      - computes an average margin to convert into a small adjustment.
+    """
+    return 0.0
+
+
 def get_team_last_game_date(team_id, game_date_obj, season_year, api_key):
     """
     Find the last completed game for a team BEFORE game_date_obj.
@@ -835,6 +851,8 @@ def train_matchup_weights(season_year: int, api_key: str):
     This implicitly learns both the per-feature weights AND the overall scale
     (so you no longer need to manually tune lam separately).
     """
+    from sklearn.linear_model import LogisticRegression
+
     X, y = build_training_dataset_for_season(season_year, api_key)
 
     # Fit logistic regression with no additional intercept
