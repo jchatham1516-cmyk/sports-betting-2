@@ -23,7 +23,7 @@ from datetime import datetime, date
 import numpy as np
 import pandas as pd
 import requests
-
+from sklearn.linear_model import LogisticRegression
 # -----------------------------
 # CSV odds loader
 # -----------------------------
@@ -351,18 +351,58 @@ def find_team_row(team_name_input, stats_df):
         return contains_match.iloc[0]
 
     raise ValueError(f"Could not find a team matching: {team_name_input}")
+# Global weights for the base matchup model.
+# We'll retrain these from data; this is just an initial guess.
+MATCHUP_WEIGHTS = np.array([
+    1.2,   # home_edge baseline (like a constant/home-court term)
+    0.04,  # d_ORtg
+    0.04,  # d_DRtg
+    0.01,  # d_pace
+    2.0,   # d_off_eff
+    2.0,   # d_def_eff
+])
 
+def build_matchup_features(home_row, away_row):
+    """
+    Build a feature vector [home_edge, d_ORtg, d_DRtg, d_pace, d_off_eff, d_def_eff]
+    for the home team.
+    """
+    h = home_row
+    a = away_row
+
+    d_ORtg = h["ORtg"] - a["ORtg"]
+    d_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg is better
+    d_pace = h["PACE"] - a["PACE"]
+    d_off_eff = h["OFF_EFF"] - a["OFF_EFF"]
+    d_def_eff = a["DEF_EFF"] - h["DEF_EFF"]
+
+    home_edge = 1.0  # this acts like a constant/home-court bias term
+
+    return np.array([
+        home_edge,
+        d_ORtg,
+        d_DRtg,
+        d_pace,
+        d_off_eff,
+        d_def_eff,
+    ], dtype=float)
 
 def season_matchup_base_score(home_row, away_row):
     """
     Base linear scoring model without injuries/fatigue/H2H.
+
     Positive score => home team stronger.
+
     Uses:
        - ORtg / DRtg
        - Pace
        - Off/Def efficiency
-       - Home-court edge
+       - Home-court edge (via constant feature)
+
+    The actual weights are stored in MATCHUP_WEIGHTS and can be retrained.
     """
+    x = build_matchup_features(home_row, away_row)
+    return float(np.dot(MATCHUP_WEIGHTS, x))
 
     h = home_row
     a = away_row
@@ -717,21 +757,33 @@ def rest_days_to_fatigue_adjustment(days_rest):
     return 0.0
 
 
-def compute_head_to_head_adjustment(home_team_id, away_team_id, season_year, api_key, max_games=5):
+def build_training_dataset_for_season(season_year: int, api_key: str):
     """
-    Look at up to `max_games` recent games between these two teams this season
-    and create a small adjustment based on average margin.
-    Positive => home historically does better.
+    Build a training dataset (X, y) for a full NBA season.
+
+    X: feature vectors from build_matchup_features(home_row, away_row)
+    y: 1 if home team won, 0 if home lost
     """
+    # Use all games up to the end of the season
+    end_date_iso = f"{season_year + 1}-07-31"
+
+    # Team ratings over full season (for feature values)
+    stats_df = fetch_team_ratings_bdl(
+        season_year=season_year,
+        end_date_iso=end_date_iso,
+        api_key=api_key,
+    )
+
+    X = []
+    y = []
+
     params = {
         "seasons[]": season_year,
-        "team_ids[]": home_team_id,
         "per_page": 100,
     }
     cursor = None
-    margins = []
 
-    while True and len(margins) < max_games:
+    while True:
         if cursor is not None:
             params["cursor"] = cursor
         else:
@@ -743,39 +795,73 @@ def compute_head_to_head_adjustment(home_team_id, away_team_id, season_year, api
         cursor = meta.get("next_cursor")
 
         for g in games:
-            if len(margins) >= max_games:
-                break
+            home_team = g["home_team"]
+            away_team = g["visitor_team"]
 
-            home = g["home_team"]["id"]
-            away = g["visitor_team"]["id"]
-            if not (
-                (home == home_team_id and away == away_team_id)
-                or (home == away_team_id and away == home_team_id)
-            ):
-                continue
+            home_name = home_team["full_name"]
+            away_name = away_team["full_name"]
 
             home_score = g.get("home_team_score", 0) or 0
             away_score = g.get("visitor_team_score", 0) or 0
+
+            # skip unfinished games
             if home_score == 0 and away_score == 0 and g.get("period", 0) == 0:
                 continue
 
-            # margin from home-team perspective (for THIS game)
-            margin = home_score - away_score
-            # but we want margin from "our" home_team_id perspective:
-            if home != home_team_id:
-                margin = -margin
-            margins.append(margin)
+            try:
+                home_row = find_team_row(home_name, stats_df)
+                away_row = find_team_row(away_name, stats_df)
+            except ValueError:
+                # If a team name doesn't match for some reason, skip this game
+                continue
+
+            feats = build_matchup_features(home_row, away_row)
+            X.append(feats)
+
+            y.append(1 if home_score > away_score else 0)
 
         if not cursor:
             break
 
-    if not margins:
-        return 0.0
+    X = np.vstack(X)
+    y = np.array(y, dtype=int)
 
-    avg_margin = sum(margins) / len(margins)
-    # convert to a small adjustment, capped
-    adj = max(min(avg_margin / 5.0, 2.0), -2.0)
-    return adj
+    print(f"[TRAIN] Built training dataset for season {season_year}: X shape={X.shape}, y shape={y.shape}")
+    return X, y
+
+
+def train_matchup_weights(season_year: int, api_key: str):
+    """
+    Train MATCHUP_WEIGHTS using logistic regression on a full season of games.
+    This implicitly learns both the per-feature weights AND the overall scale
+    (so you no longer need to manually tune lam separately).
+    """
+    X, y = build_training_dataset_for_season(season_year, api_key)
+
+    # Fit logistic regression with no additional intercept
+    model = LogisticRegression(
+        fit_intercept=False,
+        max_iter=1000,
+        solver="lbfgs",
+    )
+    model.fit(X, y)
+
+    new_weights = model.coef_[0]
+    print("\n[TRAIN] New MATCHUP_WEIGHTS learned from data:")
+    for i, w in enumerate(new_weights):
+        print(f"  w[{i}] = {w:.6f}")
+    print("\n[TRAIN] Paste these into MATCHUP_WEIGHTS in your code to update the model.\n")
+
+    # Evaluate simple accuracy & Brier score
+    from sklearn.metrics import accuracy_score, brier_score_loss
+
+    probs = model.predict_proba(X)[:, 1]
+    acc = accuracy_score(y, (probs >= 0.5).astype(int))
+    brier = brier_score_loss(y, probs)
+    print(f"[TRAIN] Training accuracy: {acc:.4f}")
+    print(f"[TRAIN] Training Brier score: {brier:.4f}")
+
+    return new_weights, acc, brier
 
 
 # -----------------------------
@@ -1033,8 +1119,41 @@ def main(argv=None):
         default=None,
         help="Game date in MM/DD/YYYY (default: today in UTC).",
     )
+    parser.add_argument(
+        "--train-season",
+        type=int,
+        default=None,
+        help="If set, train matchup weights on this NBA season (e.g. 2023).",
+    )
     args = parser.parse_args(argv)
 
+    api_key = get_bdl_api_key()
+
+    # ----------------------
+    # Training mode
+    # ----------------------
+        parser.add_argument(
+        "--train-season",
+        type=int,
+        default=None,
+        help="If set, train matchup weights on this NBA season (e.g. 2023).",
+    )
+    args = parser.parse_args(argv)
+
+    api_key = get_bdl_api_key()
+
+    # ----------------------
+    # Training mode
+    # ----------------------
+    if args.train_season is not None:
+        season_year = args.train_season
+        print(f"[MAIN] Training matchup weights for season {season_year}...")
+        train_matchup_weights(season_year, api_key)
+        return
+
+    # ----------------------
+    # Normal daily mode
+    # ----------------------
     if args.date is None:
         today = datetime.utcnow().date()
         game_date = today.strftime("%m/%d/%Y")
@@ -1042,8 +1161,7 @@ def main(argv=None):
         game_date = args.date
 
     print(f"Running model for {game_date}...")
-
-    api_key = get_bdl_api_key()
+    ...
 
     # 1) Ensure odds template exists (optional, you can comment this out if you prefer)
     build_odds_csv_template_if_missing(game_date, api_key=api_key)
