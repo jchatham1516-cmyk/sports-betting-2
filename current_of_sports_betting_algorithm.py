@@ -389,10 +389,13 @@ def season_matchup_base_score(home_row, away_row):
     return score
 
 
-def score_to_prob(score, lam=0.20):
+def score_to_prob(score, lam=0.12):
     """
     Convert matchup score into win probability via logistic function.
-    lam controls steepness.
+
+    lam controls steepness:
+    - Larger lam  -> probabilities move toward 0 or 1 faster (more extreme).
+    - Smaller lam -> probabilities stay closer to 0.5 (more conservative).
     """
     return 1.0 / (1.0 + math.exp(-lam * score))
 
@@ -786,7 +789,7 @@ def run_daily_probs_for_date(
     stats_df=None,
     api_key=None,
     edge_threshold=0.03,
-    lam=0.20,
+    lam=0.12,
 ):
     """
     Run the full model for one NBA date.
