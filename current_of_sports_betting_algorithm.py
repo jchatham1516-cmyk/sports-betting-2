@@ -547,16 +547,16 @@ def estimate_player_impact_simple(pos):
         return 2.0
     return 1.0
 
-
 def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
     """
     Build a list of injuries for a given team from ESPN injuries DataFrame.
     Returns list of tuples: (player_name, role, multiplier, impact_points)
     """
-    team = team_name_or_abbrev.lower()
+    team_key = team_name_or_abbrev
+    abbr = ESPN_TEAM_ABBR.get(team_key, team_key).lower()
 
     if "Team" in injury_df.columns:
-        mask = injury_df["Team"].astype(str).str.lower().str.contains(team)
+        mask = injury_df["Team"].astype(str).str.lower().str.contains(abbr)
         df_team = injury_df[mask].copy()
     else:
         df_team = injury_df.iloc[0:0].copy()
@@ -574,7 +574,6 @@ def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
         injuries.append((name, role, mult, impact_points))
 
     return injuries
-
 
 def injury_adjustment(home_injuries=None, away_injuries=None):
     """
@@ -915,6 +914,8 @@ def run_daily_probs_for_date(
     # Schedule from BallDontLie
     games_df = fetch_games_for_date(game_date, stats_df, api_key)
 
+        print(f"[inj] {home_name} injuries={len(home_inj)}, "
+              f"{away_name} injuries={len(away_inj)}, inj_adj={inj_adj:.3f}")
     # Injuries
     try:
         injury_df = fetch_injury_report_espn()
@@ -935,6 +936,39 @@ def run_daily_probs_for_date(
 
         # Base matchup
         base_score = season_matchup_base_score(home_row, away_row)
+        
+ESPN_TEAM_ABBR = {
+    "Atlanta Hawks": "ATL",
+    "Boston Celtics": "BOS",
+    "Brooklyn Nets": "BKN",
+    "Charlotte Hornets": "CHA",
+    "Chicago Bulls": "CHI",
+    "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL",
+    "Denver Nuggets": "DEN",
+    "Detroit Pistons": "DET",
+    "Golden State Warriors": "GS",
+    "Houston Rockets": "HOU",
+    "Indiana Pacers": "IND",
+    "Los Angeles Clippers": "LAC",
+    "Los Angeles Lakers": "LAL",
+    "Memphis Grizzlies": "MEM",
+    "Miami Heat": "MIA",
+    "Milwaukee Bucks": "MIL",
+    "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NO",
+    "New York Knicks": "NY",
+    "Oklahoma City Thunder": "OKC",
+    "Orlando Magic": "ORL",
+    "Philadelphia 76ers": "PHI",
+    "Phoenix Suns": "PHX",
+    "Portland Trail Blazers": "POR",
+    "Sacramento Kings": "SAC",
+    "San Antonio Spurs": "SA",
+    "Toronto Raptors": "TOR",
+    "Utah Jazz": "UTAH",
+    "Washington Wizards": "WSH",
+}
 
         # Injuries
         home_inj = build_injury_list_for_team_espn(home_name, injury_df)
