@@ -1,4 +1,4 @@
-# Daily NBA betting model using BallDontLie + ESPN injuries + local odds CSV.
+   # Daily NBA betting model using BallDontLie + ESPN injuries + local odds CSV.
 #
 # Features:
 # - Team ratings from BallDontLie:
@@ -7,7 +7,7 @@
 #     - Off/Def efficiency
 # - ESPN injuries with a simple player impact model
 # - Schedule fatigue (rest days)
-# - Head-to-head historical matchup adjustment
+# - Head-to-head historical matchup adjustment (currently stubbed)
 # - Local odds CSV for moneyline + spreads
 # - Outputs: model_home_prob, edges, model_spread, ML + spread recommendations
 
@@ -27,6 +27,7 @@ import requests
 # -----------------------------
 # CSV odds loader
 # -----------------------------
+
 
 def fetch_odds_for_date_from_csv(game_date_str):
     """
@@ -84,10 +85,14 @@ def fetch_odds_for_date_from_csv(game_date_str):
 
         # Debug: show what raw values we read from CSV
         print(
-            "[DEBUG row]", key,
-            "| raw home_ml=", raw_home_ml,
-            "| raw away_ml=", raw_away_ml,
-            "| raw home_spread=", raw_home_spread,
+            "[DEBUG row]",
+            key,
+            "| raw home_ml=",
+            raw_home_ml,
+            "| raw away_ml=",
+            raw_away_ml,
+            "| raw home_spread=",
+            raw_home_spread,
         )
 
         home_ml = _parse_number(raw_home_ml)
@@ -110,6 +115,7 @@ def fetch_odds_for_date_from_csv(game_date_str):
 # -----------------------------
 # Season / date helpers
 # -----------------------------
+
 
 def season_start_year_for_date(d: date) -> int:
     """
@@ -140,6 +146,7 @@ def american_to_implied_prob(odds):
 # -----------------------------
 
 BALLDONTLIE_BASE_URL = "https://api.balldondlie.io/v1".replace("dond", "dont")  # avoid typo
+
 
 def get_bdl_api_key():
     api_key = os.environ.get("BALLDONTLIE_API_KEY")
@@ -206,6 +213,7 @@ def bdl_get(path, params=None, api_key=None, max_retries=5):
 # -----------------------------
 # Team ratings built from games
 # -----------------------------
+
 
 def fetch_team_ratings_bdl(
     season_year: int,
@@ -336,6 +344,7 @@ def fetch_team_ratings_bdl(
 # Team lookup + scoring model
 # -----------------------------
 
+
 def find_team_row(team_name_input, stats_df):
     """
     Fuzzy match a team name against TEAM_NAME in stats_df.
@@ -352,16 +361,20 @@ def find_team_row(team_name_input, stats_df):
 
     raise ValueError(f"Could not find a team matching: {team_name_input}")
 
+
 # Global weights for the base matchup model.
 # We'll retrain these from data; this is just an initial guess.
-MATCHUP_WEIGHTS = np.array([
-    0.6,   # home_edge baseline (smaller home-court term)
-    0.06,  # d_ORtg
-    0.06,  # d_DRtg
-    0.015, # d_pace
-    2.5,   # d_off_eff
-    2.5,   # d_def_eff
-])
+MATCHUP_WEIGHTS = np.array(
+    [
+        0.6,   # home_edge baseline (smaller home-court term)
+        0.06,  # d_ORtg
+        0.06,  # d_DRtg
+        0.015, # d_pace
+        2.5,   # d_off_eff
+        2.5,   # d_def_eff
+    ]
+)
+
 
 def build_matchup_features(home_row, away_row):
     """
@@ -372,21 +385,25 @@ def build_matchup_features(home_row, away_row):
     a = away_row
 
     d_ORtg = h["ORtg"] - a["ORtg"]
-    d_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg is better
+    d_DRtg = a["DRtg"] - h["DRtg"]  # lower DRtg is better
     d_pace = h["PACE"] - a["PACE"]
     d_off_eff = h["OFF_EFF"] - a["OFF_EFF"]
     d_def_eff = a["DEF_EFF"] - h["DEF_EFF"]
 
     home_edge = 1.0  # this acts like a constant/home-court bias term
 
-    return np.array([
-        home_edge,
-        d_ORtg,
-        d_DRtg,
-        d_pace,
-        d_off_eff,
-        d_def_eff,
-    ], dtype=float)
+    return np.array(
+        [
+            home_edge,
+            d_ORtg,
+            d_DRtg,
+            d_pace,
+            d_off_eff,
+            d_def_eff,
+        ],
+        dtype=float,
+    )
+
 
 def season_matchup_base_score(home_row, away_row):
     """
@@ -404,31 +421,6 @@ def season_matchup_base_score(home_row, away_row):
     """
     x = build_matchup_features(home_row, away_row)
     return float(np.dot(MATCHUP_WEIGHTS, x))
-
-    # (Old manual weight code below is unreachable now, left here only as reference)
-    h = home_row
-    a = away_row
-
-    # Differences
-    d_ORtg = h["ORtg"] - a["ORtg"]
-    d_DRtg = a["DRtg"] - h["DRtg"]   # lower DRtg is better
-    d_pace = h["PACE"] - a["PACE"]
-    d_off_eff = h["OFF_EFF"] - a["OFF_EFF"]
-    d_def_eff = a["DEF_EFF"] - h["DEF_EFF"]
-
-    # Calibrated weights (tweak these to tune the model)
-    home_edge = 1.2   # reduced from 2.0
-
-    score = (
-        home_edge
-        + 0.04 * d_ORtg
-        + 0.04 * d_DRtg
-        + 0.01 * d_pace
-        + 2.0 * d_off_eff
-        + 2.0 * d_def_eff
-    )
-
-    return score
 
 
 def score_to_prob(score, lam=0.25):
@@ -469,6 +461,40 @@ INJURY_STATUS_MULTIPLIER = {
     "doubtful": 0.75,
     "questionable": 0.5,
     "probable": 0.25,
+}
+
+# Map full team names (from BallDontLie) to ESPN injury-page abbreviations.
+ESPN_TEAM_ABBR = {
+    "Atlanta Hawks": "ATL",
+    "Boston Celtics": "BOS",
+    "Brooklyn Nets": "BKN",
+    "Charlotte Hornets": "CHA",
+    "Chicago Bulls": "CHI",
+    "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL",
+    "Denver Nuggets": "DEN",
+    "Detroit Pistons": "DET",
+    "Golden State Warriors": "GS",
+    "Houston Rockets": "HOU",
+    "Indiana Pacers": "IND",
+    "Los Angeles Clippers": "LAC",
+    "Los Angeles Lakers": "LAL",
+    "Memphis Grizzlies": "MEM",
+    "Miami Heat": "MIA",
+    "Milwaukee Bucks": "MIL",
+    "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NO",
+    "New York Knicks": "NY",
+    "Oklahoma City Thunder": "OKC",
+    "Orlando Magic": "ORL",
+    "Philadelphia 76ers": "PHI",
+    "Phoenix Suns": "PHX",
+    "Portland Trail Blazers": "POR",
+    "Sacramento Kings": "SAC",
+    "San Antonio Spurs": "SA",
+    "Toronto Raptors": "TOR",
+    "Utah Jazz": "UTAH",
+    "Washington Wizards": "WSH",
 }
 
 
@@ -547,13 +573,14 @@ def estimate_player_impact_simple(pos):
         return 2.0
     return 1.0
 
+
 def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
     """
     Build a list of injuries for a given team from ESPN injuries DataFrame.
     Returns list of tuples: (player_name, role, multiplier, impact_points)
     """
-    team_key = team_name_or_abbrev
-    abbr = ESPN_TEAM_ABBR.get(team_key, team_key).lower()
+    # Map full team name (e.g. "Milwaukee Bucks") to abbrev (e.g. "MIL")
+    abbr = ESPN_TEAM_ABBR.get(team_name_or_abbrev, team_name_or_abbrev).lower()
 
     if "Team" in injury_df.columns:
         mask = injury_df["Team"].astype(str).str.lower().str.contains(abbr)
@@ -574,6 +601,7 @@ def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
         injuries.append((name, role, mult, impact_points))
 
     return injuries
+
 
 def injury_adjustment(home_injuries=None, away_injuries=None):
     """
@@ -615,6 +643,7 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
 # -----------------------------
 # Schedule / games (BallDontLie)
 # -----------------------------
+
 
 def fetch_games_for_date(game_date_str, stats_df, api_key):
     """
@@ -688,6 +717,7 @@ def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
 # -----------------------------
 # Schedule fatigue & H2H helpers
 # -----------------------------
+
 
 def compute_head_to_head_adjustment(home_team_id, away_team_id, season_year, api_key, max_seasons_back=3):
     """
@@ -884,6 +914,7 @@ def train_matchup_weights(season_year: int, api_key: str):
 # Main daily engine
 # -----------------------------
 
+
 def run_daily_probs_for_date(
     game_date="12/04/2025",
     odds_dict=None,
@@ -914,8 +945,6 @@ def run_daily_probs_for_date(
     # Schedule from BallDontLie
     games_df = fetch_games_for_date(game_date, stats_df, api_key)
 
-        print(f"[inj] {home_name} injuries={len(home_inj)}, "
-              f"{away_name} injuries={len(away_inj)}, inj_adj={inj_adj:.3f}")
     # Injuries
     try:
         injury_df = fetch_injury_report_espn()
@@ -936,39 +965,7 @@ def run_daily_probs_for_date(
 
         # Base matchup
         base_score = season_matchup_base_score(home_row, away_row)
-        
-ESPN_TEAM_ABBR = {
-    "Atlanta Hawks": "ATL",
-    "Boston Celtics": "BOS",
-    "Brooklyn Nets": "BKN",
-    "Charlotte Hornets": "CHA",
-    "Chicago Bulls": "CHI",
-    "Cleveland Cavaliers": "CLE",
-    "Dallas Mavericks": "DAL",
-    "Denver Nuggets": "DEN",
-    "Detroit Pistons": "DET",
-    "Golden State Warriors": "GS",
-    "Houston Rockets": "HOU",
-    "Indiana Pacers": "IND",
-    "Los Angeles Clippers": "LAC",
-    "Los Angeles Lakers": "LAL",
-    "Memphis Grizzlies": "MEM",
-    "Miami Heat": "MIA",
-    "Milwaukee Bucks": "MIL",
-    "Minnesota Timberwolves": "MIN",
-    "New Orleans Pelicans": "NO",
-    "New York Knicks": "NY",
-    "Oklahoma City Thunder": "OKC",
-    "Orlando Magic": "ORL",
-    "Philadelphia 76ers": "PHI",
-    "Phoenix Suns": "PHX",
-    "Portland Trail Blazers": "POR",
-    "Sacramento Kings": "SAC",
-    "San Antonio Spurs": "SA",
-    "Toronto Raptors": "TOR",
-    "Utah Jazz": "UTAH",
-    "Washington Wizards": "WSH",
-}
+
         # Injuries
         home_inj = build_injury_list_for_team_espn(home_name, injury_df)
         away_inj = build_injury_list_for_team_espn(away_name, injury_df)
@@ -1162,9 +1159,11 @@ ESPN_TEAM_ABBR = {
 
     return df
 
+
 # -----------------------------
 # CLI / entrypoint
 # -----------------------------
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
