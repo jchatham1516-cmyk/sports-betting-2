@@ -1,4 +1,4 @@
-   # Daily NBA betting model using BallDontLie + ESPN injuries + local odds CSV.
+# Daily NBA betting model using BallDontLie + ESPN injuries + local odds CSV.
 #
 # Features:
 # - Team ratings from BallDontLie:
@@ -363,15 +363,15 @@ def find_team_row(team_name_input, stats_df):
 
 
 # Global weights for the base matchup model.
-# We'll retrain these from data; this is just an initial guess.
+# Updated to reduce home bias and increase team-strength impact.
 MATCHUP_WEIGHTS = np.array(
     [
-        0.6,   # home_edge baseline (smaller home-court term)
-        0.06,  # d_ORtg
-        0.06,  # d_DRtg
-        0.015, # d_pace
-        2.5,   # d_off_eff
-        2.5,   # d_def_eff
+        0.2,   # home_edge baseline (smaller)
+        0.12,  # d_ORtg  (bigger impact)
+        0.12,  # d_DRtg
+        0.03,  # d_pace
+        4.0,   # d_off_eff
+        4.0,   # d_def_eff
     ]
 )
 
@@ -1030,8 +1030,14 @@ def run_daily_probs_for_date(
         else:
             home_imp = away_imp = 0.5
 
-        edge_home = model_home_prob - home_imp
-        edge_away = (1.0 - model_home_prob) - away_imp
+        # Raw edges vs market
+        edge_home_raw = model_home_prob - home_imp
+        edge_away_raw = (1.0 - model_home_prob) - away_imp
+
+        # Shrink edges to be less aggressive (safety valve)
+        edge_shrink = 0.5  # keep only 50% of the raw edge
+        edge_home = edge_home_raw * edge_shrink
+        edge_away = edge_away_raw * edge_shrink
 
         # -------------------------
         # Spreads (Vegas style)
