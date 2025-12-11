@@ -355,12 +355,12 @@ def find_team_row(team_name_input, stats_df):
 # Global weights for the base matchup model.
 # We'll retrain these from data; this is just an initial guess.
 MATCHUP_WEIGHTS = np.array([
-    1.2,   # home_edge baseline (like a constant/home-court term)
-    0.04,  # d_ORtg
-    0.04,  # d_DRtg
-    0.01,  # d_pace
-    2.0,   # d_off_eff
-    2.0,   # d_def_eff
+    0.6,   # home_edge baseline (smaller home-court term)
+    0.06,  # d_ORtg
+    0.06,  # d_DRtg
+    0.015, # d_pace
+    2.5,   # d_off_eff
+    2.5,   # d_def_eff
 ])
 
 def build_matchup_features(home_row, away_row):
@@ -431,7 +431,7 @@ def season_matchup_base_score(home_row, away_row):
     return score
 
 
-def score_to_prob(score, lam=0.20):
+def score_to_prob(score, lam=0.25):
     """
     Convert matchup score into win probability via logistic function.
 
@@ -892,7 +892,7 @@ def run_daily_probs_for_date(
     stats_df=None,
     api_key=None,
     edge_threshold=0.03,
-    lam=0.20,  # <- make sure this is 0.20
+    lam=0.25,  # slightly steeper logistic for more extreme favorites/dogs
 ):
     """
     Run the full model for one NBA date.
