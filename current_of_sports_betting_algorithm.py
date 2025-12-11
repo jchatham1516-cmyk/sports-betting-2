@@ -969,11 +969,16 @@ ESPN_TEAM_ABBR = {
     "Utah Jazz": "UTAH",
     "Washington Wizards": "WSH",
 }
-
         # Injuries
         home_inj = build_injury_list_for_team_espn(home_name, injury_df)
         away_inj = build_injury_list_for_team_espn(away_name, injury_df)
         inj_adj = injury_adjustment(home_inj, away_inj)
+
+        # Debug injury info
+        print(
+            f"[inj] {home_name} injuries={len(home_inj)}, "
+            f"{away_name} injuries={len(away_inj)}, inj_adj={inj_adj:.3f}"
+        )
 
         # Schedule fatigue
         home_last = get_team_last_game_date(home_id, game_date_obj, season_year, api_key)
