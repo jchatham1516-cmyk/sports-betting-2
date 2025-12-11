@@ -921,11 +921,16 @@ def run_daily_probs_for_date(
     spreads_dict=None,
     stats_df=None,
     api_key=None,
-    edge_threshold=0.03,
-    lam=0.25,  # slightly steeper logistic for more extreme favorites/dogs
+    edge_threshold=0.03,  # kept for reference, no longer drives recs
+    lam=0.25,
 ):
     """
     Run the full model for one NBA date.
+
+    NOTE: This version focuses recommendations on the model's likelihood of being correct,
+    NOT on "value" vs the market. Edges vs the market are still computed for reference,
+    but ml_recommendation / spread_recommendation / primary_recommendation are driven
+    by model probabilities only.
     """
     if api_key is None:
         api_key = get_bdl_api_key()
@@ -971,7 +976,6 @@ def run_daily_probs_for_date(
         away_inj = build_injury_list_for_team_espn(away_name, injury_df)
         inj_adj = injury_adjustment(home_inj, away_inj)
 
-        # Debug injury info
         print(
             f"[inj] {home_name} injuries={len(home_inj)}, "
             f"{away_name} injuries={len(away_inj)}, inj_adj={inj_adj:.3f}"
@@ -989,7 +993,7 @@ def run_daily_probs_for_date(
 
         fatigue_adj = home_fatigue - away_fatigue  # positive helps home
 
-        # Head-to-head historical adjustment
+        # Head-to-head historical adjustment (currently 0.0)
         h2h_adj = compute_head_to_head_adjustment(home_id, away_id, season_year, api_key)
 
         # Final score
@@ -1000,7 +1004,7 @@ def run_daily_probs_for_date(
         model_spread = score_to_spread(adj_score)  # VEGAS STYLE: negative = home favorite
 
         # -------------------------
-        # Market odds (ML)
+        # Market odds (ML) – still computed, but NOT used for decisions
         # -------------------------
         key = (home_name, away_name)
         odds_info = odds_dict.get(key)
@@ -1030,12 +1034,12 @@ def run_daily_probs_for_date(
         else:
             home_imp = away_imp = 0.5
 
-        # Raw edges vs market
+        # Raw edges vs market (KEPT for reference only)
         edge_home_raw = model_home_prob - home_imp
         edge_away_raw = (1.0 - model_home_prob) - away_imp
 
-        # Shrink edges to be less aggressive (safety valve)
-        edge_shrink = 0.5  # keep only 50% of the raw edge
+        # Small shrink just to avoid gigantic edge numbers
+        edge_shrink = 0.5
         edge_home = edge_home_raw * edge_shrink
         edge_away = edge_away_raw * edge_shrink
 
@@ -1045,78 +1049,43 @@ def run_daily_probs_for_date(
         home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
         if home_spread is not None:
             home_spread = float(home_spread)
-
-            # spread_edge_home > 0  => model likes HOME vs this line
-            # spread_edge_home < 0  => model likes AWAY vs this line
-            #
-            # Example:
-            #   model_spread = -5   (home -5)
-            #   home_spread = -10   (home -10)
-            #   spread_edge_home = -10 - (-5) = -5  => prefers away +10
             spread_edge_home = home_spread - model_spread
         else:
             spread_edge_home = None
 
         # -------------------------
-        # Recommendation logic
+        # NEW: Recommendation logic focused on correctness
         # -------------------------
 
-        # 1) Moneyline recommendation
-        ml_rec = "No strong ML edge"
-        if home_ml is not None or away_ml is not None:
-            if edge_home > edge_threshold and home_ml is not None:
-                ml_rec = f"Bet HOME ML ({home_ml:+})"
-            elif edge_away > edge_threshold and away_ml is not None:
-                ml_rec = f"Bet AWAY ML ({away_ml:+})"
-
-        # 2) Spread recommendation (separate threshold in points)
-        spread_rec = "No strong spread edge"
-        spread_threshold_pts = 3.0  # tweak if you want tighter/looser filter
-
-        if home_spread is not None and spread_edge_home is not None:
-            if spread_edge_home > spread_threshold_pts:
-                # model likes home side vs line
-                if home_spread > 0:
-                    line_str = f"home +{abs(home_spread)}"
-                elif home_spread < 0:
-                    line_str = f"home {home_spread}"
-                else:
-                    line_str = "home pk"
-                spread_rec = f"Bet HOME spread ({line_str})"
-
-            elif spread_edge_home < -spread_threshold_pts:
-                # model likes away side vs line
-                if home_spread > 0:
-                    line_str = f"away -{abs(home_spread)}"
-                elif home_spread < 0:
-                    line_str = f"away +{abs(home_spread)}"
-                else:
-                    line_str = "away pk"
-                spread_rec = f"Bet AWAY spread ({line_str})"
-
-        # 3) Primary recommendation: compare ML vs spread on a similar scale
-        primary_rec = "No clear edge"
-
-        # Only count ML edge if we actually like a side
-        if ml_rec.startswith("Bet HOME") and home_ml is not None:
-            ml_edge_abs = abs(edge_home)
-        elif ml_rec.startswith("Bet AWAY") and away_ml is not None:
-            ml_edge_abs = abs(edge_away)
+        # 1) Moneyline recommendation: based ONLY on model_home_prob
+        #    (ignores market probabilities)
+        if model_home_prob >= 0.60:
+            ml_rec = "Model PICK: HOME (strong)"
+        elif model_home_prob <= 0.40:
+            ml_rec = "Model PICK: AWAY (strong)"
+        elif 0.55 <= model_home_prob < 0.60:
+            ml_rec = "Model lean: HOME"
+        elif 0.40 < model_home_prob <= 0.45:
+            ml_rec = "Model lean: AWAY"
         else:
-            ml_edge_abs = 0.0
+            ml_rec = "Too close to call (coin flip)"
 
-        # Only count spread edge if we actually like a side
-        if spread_edge_home is not None and spread_rec != "No strong spread edge":
-            spread_edge_prob = min(abs(spread_edge_home) * 0.04, 0.5)  # cap at 50% edge
+        # 2) Spread recommendation: based on model_spread_home vs 0
+        #    (which side the model thinks is stronger in spread terms),
+        #    not on "value" vs current line.
+        if model_spread <= -5:
+            spread_rec = "Model PICK ATS: HOME (clear favorite)"
+        elif model_spread >= 5:
+            spread_rec = "Model PICK ATS: AWAY (clear underdog)"
+        elif -5 < model_spread <= -2:
+            spread_rec = "Model lean ATS: HOME"
+        elif 2 <= model_spread < 5:
+            spread_rec = "Model lean ATS: AWAY"
         else:
-            spread_edge_prob = 0.0
+            spread_rec = "Too close to call ATS"
 
-        if ml_edge_abs == 0.0 and spread_edge_prob == 0.0:
-            primary_rec = "No clear edge"
-        elif ml_edge_abs >= spread_edge_prob:
-            primary_rec = f"ML: {ml_rec}"
-        else:
-            primary_rec = f"Spread: {spread_rec}"
+        # 3) Primary recommendation: just mirror the ML call
+        primary_rec = ml_rec
 
         rows.append(
             {
@@ -1141,25 +1110,23 @@ def run_daily_probs_for_date(
     df = pd.DataFrame(rows)
 
     # ------------------------------------
-    # Add absolute edge column (best side)
+    # CONFIDENCE metric (instead of "pure value")
+    # abs_edge_home is now |model_home_prob - 0.5|
     # ------------------------------------
-    df["abs_edge_home"] = df[["edge_home", "edge_away"]].abs().max(axis=1)
+    df["abs_edge_home"] = (df["model_home_prob"] - 0.5).abs()
 
-    # ------------------------------------
-    # Add Value Tier Classification
-    # ------------------------------------
-    def classify_value(edge):
-        if edge >= 0.20:
-            return "HIGH VALUE"
-        elif edge >= 0.10:
-            return "MEDIUM VALUE"
+    def classify_confidence(conf):
+        if conf >= 0.20:
+            return "HIGH CONFIDENCE"
+        elif conf >= 0.10:
+            return "MEDIUM CONFIDENCE"
         else:
-            return "LOW VALUE"
+            return "LOW CONFIDENCE"
 
-    df["value_tier"] = df["abs_edge_home"].apply(classify_value)
+    df["value_tier"] = df["abs_edge_home"].apply(classify_confidence)
 
     # ------------------------------------
-    # Sort by strongest edges
+    # Sort by strongest model-confidence
     # ------------------------------------
     df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
 
