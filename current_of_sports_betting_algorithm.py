@@ -382,12 +382,13 @@ def season_matchup_base_score(home_row, away_row):
 
 def score_to_prob(score, lam=0.25):
     return 1.0 / (1.0 + math.exp(-lam * score))
-
-def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
-    """Vegas-style HOME spread: negative=home favored, positive=home dog."""
+def score_to_spread(score, points_per_logit=4.0):
+    """
+    Convert model score to a HOME spread.
+    Negative = home favored
+    """
     s = float(score)
-    return -(s * points_per_logit + (s ** 2) * 1.5)
-
+    return -(s * points_per_logit)
 
 # -----------------------------
 # Injuries (KEEPING YOUR LOGIC)
