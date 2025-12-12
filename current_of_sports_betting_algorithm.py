@@ -1,22 +1,25 @@
 # current_of_sports_betting_algorithm.py
 #
-# Daily NBA betting model using BallDontLie + Official NBA injury report PDFs + local odds CSV.
+# Daily NBA betting model using BallDontLie + Official NBA injury report PDF + local odds CSV.
 #
 # Features:
-# - Team ratings from BallDontLie games (simple ORtg/DRtg proxies)
+# - Team ratings from BallDontLie:
+#     - ORtg/DRtg proxies
+#     - Pace
+#     - Off/Def efficiency
 # - Recent form weighting (season + last N games)
-# - Official NBA injury report (PDF) parsing with fallback to empty injuries
+# - Official NBA injury report (PDF) with a simple player impact model
 # - Schedule fatigue (rest days → B2B / 3-in-4 approximation)
 # - Local odds CSV for moneyline + spreads
 # - Outputs: model_home_prob, edges, model_spread, ML + spread recommendations
 
 import os
+import re
 import math
 import argparse
 import time
-import re
-from io import BytesIO
 from datetime import datetime, date
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
@@ -28,7 +31,9 @@ from pypdf import PdfReader
 # Global tuning constants
 # -----------------------------
 
-SPREAD_SCALE_FACTOR = 1.35  # converts score -> spread magnitude
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+
+SPREAD_SCALE_FACTOR = 1.35
 
 RECENT_FORM_WEIGHT = 0.35
 SEASON_FORM_WEIGHT = 1.0 - RECENT_FORM_WEIGHT
@@ -39,19 +44,26 @@ STRONG_EDGE_THRESHOLD = 0.12
 SPREAD_EDGE_THRESHOLD = 2.5
 MIN_MODEL_CONFIDENCE = 0.05
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def normalize_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").replace("\xa0", " ").strip())
+
+def normalize_team_name(s: str) -> str:
+    s = normalize_spaces(s).lower()
+    s = s.replace(".", "")
+    return s
 
 # -----------------------------
 # CSV odds loader
 # -----------------------------
 
-
 def fetch_odds_for_date_from_csv(game_date_str: str):
     """
-    Load odds for a given date from a local CSV file in the 'odds' folder.
-
     Expects: odds/odds_MM-DD-YYYY.csv
-    Columns: date, home, away, home_ml, away_ml, home_spread
+    columns: date, home, away, home_ml, away_ml, home_spread
     """
     fname = os.path.join("odds", f"odds_{game_date_str.replace('/', '-')}.csv")
     if not os.path.exists(fname):
@@ -123,11 +135,9 @@ def fetch_odds_for_date_from_csv(game_date_str: str):
 # Season / date helpers
 # -----------------------------
 
-
 def season_start_year_for_date(d: date) -> int:
-    # NBA season starts in fall; before Aug => prior season year label
+    # NBA season starts ~Oct; before Aug belongs to prior season year label for BDL
     return d.year - 1 if d.month < 8 else d.year
-
 
 def american_to_implied_prob(odds):
     odds = float(odds)
@@ -139,21 +149,18 @@ def american_to_implied_prob(odds):
 
 
 # -----------------------------
-# BallDontLie client
+# BallDontLie low-level client
 # -----------------------------
 
 BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
-
 
 def get_bdl_api_key():
     api_key = os.environ.get("BALLDONTLIE_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "BALLDONTLIE_API_KEY environment variable is not set. "
-            "Set it locally or configure it as a GitHub Actions secret."
+            "BALLDONTLIE_API_KEY environment variable is not set."
         )
     return api_key
-
 
 def bdl_get(path, params=None, api_key=None, max_retries=5):
     if api_key is None:
@@ -196,14 +203,12 @@ def bdl_get(path, params=None, api_key=None, max_retries=5):
 # Team ratings built from games
 # -----------------------------
 
-
 def fetch_team_ratings_bdl(season_year: int, end_date_iso: str, api_key: str):
     teams_json = bdl_get("teams", params={}, api_key=api_key)
     teams_data = teams_json.get("data", [])
 
     agg = {}
     games_by_team = {}
-
     for t in teams_data:
         tid = t["id"]
         agg[tid] = {
@@ -239,7 +244,6 @@ def fetch_team_ratings_bdl(season_year: int, end_date_iso: str, api_key: str):
             home_score = g.get("home_team_score", 0) or 0
             away_score = g.get("visitor_team_score", 0) or 0
 
-            # skip not-started games
             if home_score == 0 and away_score == 0 and g.get("period", 0) == 0:
                 continue
 
@@ -264,15 +268,11 @@ def fetch_team_ratings_bdl(season_year: int, end_date_iso: str, api_key: str):
                     games_by_team[away_id].append({"date": g_date, "pts_for": away_score, "pts_against": home_score})
 
             if home_score > away_score:
-                if home_id in agg:
-                    agg[home_id]["wins"] += 1
-                if away_id in agg:
-                    agg[away_id]["losses"] += 1
+                if home_id in agg: agg[home_id]["wins"] += 1
+                if away_id in agg: agg[away_id]["losses"] += 1
             elif away_score > home_score:
-                if away_id in agg:
-                    agg[away_id]["wins"] += 1
-                if home_id in agg:
-                    agg[home_id]["losses"] += 1
+                if away_id in agg: agg[away_id]["wins"] += 1
+                if home_id in agg: agg[home_id]["losses"] += 1
 
         if not cursor:
             break
@@ -295,6 +295,7 @@ def fetch_team_ratings_bdl(season_year: int, end_date_iso: str, api_key: str):
 
         recent_games = sorted(games_by_team[tid], key=lambda x: x["date"])[-RECENT_GAMES_WINDOW:]
         gp_recent = len(recent_games)
+
         if gp_recent > 0:
             pts_for_recent = sum(g["pts_for"] for g in recent_games)
             pts_against_recent = sum(g["pts_against"] for g in recent_games)
@@ -307,32 +308,27 @@ def fetch_team_ratings_bdl(season_year: int, end_date_iso: str, api_key: str):
             off_eff_recent = pts_for_recent / poss_recent
             def_eff_recent = pts_against_recent / poss_recent
         else:
-            or_p_recent = or_p
-            dr_p_recent = dr_p
-            pace_recent = pace
-            off_eff_recent = off_eff
-            def_eff_recent = def_eff
+            or_p_recent, dr_p_recent, pace_recent = or_p, dr_p, pace
+            off_eff_recent, def_eff_recent = off_eff, def_eff
 
-        rows.append(
-            {
-                "TEAM_ID": tid,
-                "TEAM_NAME": rec["TEAM_NAME"],
-                "GP": gp,
-                "W": wins,
-                "L": losses,
-                "W_PCT": w_pct,
-                "ORtg": or_p,
-                "DRtg": dr_p,
-                "PACE": pace,
-                "OFF_EFF": off_eff,
-                "DEF_EFF": def_eff,
-                "ORtg_RECENT": or_p_recent,
-                "DRtg_RECENT": dr_p_recent,
-                "PACE_RECENT": pace_recent,
-                "OFF_EFF_RECENT": off_eff_recent,
-                "DEF_EFF_RECENT": def_eff_recent,
-            }
-        )
+        rows.append({
+            "TEAM_ID": tid,
+            "TEAM_NAME": rec["TEAM_NAME"],
+            "GP": gp,
+            "W": wins,
+            "L": losses,
+            "W_PCT": w_pct,
+            "ORtg": or_p,
+            "DRtg": dr_p,
+            "PACE": pace,
+            "OFF_EFF": off_eff,
+            "DEF_EFF": def_eff,
+            "ORtg_RECENT": or_p_recent,
+            "DRtg_RECENT": dr_p_recent,
+            "PACE_RECENT": pace_recent,
+            "OFF_EFF_RECENT": off_eff_recent,
+            "DEF_EFF_RECENT": def_eff_recent,
+        })
 
     return pd.DataFrame(rows)
 
@@ -341,10 +337,8 @@ def fetch_team_ratings_bdl(season_year: int, end_date_iso: str, api_key: str):
 # Team lookup + scoring model
 # -----------------------------
 
-
 def find_team_row(team_name_input, stats_df):
     name = team_name_input.strip().lower()
-
     full_match = stats_df[stats_df["TEAM_NAME"].str.lower() == name]
     if not full_match.empty:
         return full_match.iloc[0]
@@ -355,32 +349,24 @@ def find_team_row(team_name_input, stats_df):
 
     raise ValueError(f"Could not find a team matching: {team_name_input}")
 
-
 MATCHUP_WEIGHTS = np.array([0.2, 0.12, 0.12, 0.03, 4.0, 4.0])
-
 
 def _blend_stat(row, base_col, recent_col):
     base_val = float(row[base_col])
-    if recent_col in row.index:
-        recent_val = float(row[recent_col])
-        return SEASON_FORM_WEIGHT * base_val + RECENT_FORM_WEIGHT * recent_val
-    return base_val
-
+    recent_val = float(row[recent_col]) if recent_col in row.index else base_val
+    return SEASON_FORM_WEIGHT * base_val + RECENT_FORM_WEIGHT * recent_val
 
 def build_matchup_features(home_row, away_row):
-    h = home_row
-    a = away_row
-
-    h_ORtg = _blend_stat(h, "ORtg", "ORtg_RECENT")
-    a_ORtg = _blend_stat(a, "ORtg", "ORtg_RECENT")
-    h_DRtg = _blend_stat(h, "DRtg", "DRtg_RECENT")
-    a_DRtg = _blend_stat(a, "DRtg", "DRtg_RECENT")
-    h_PACE = _blend_stat(h, "PACE", "PACE_RECENT")
-    a_PACE = _blend_stat(a, "PACE", "PACE_RECENT")
-    h_OFF = _blend_stat(h, "OFF_EFF", "OFF_EFF_RECENT")
-    a_OFF = _blend_stat(a, "OFF_EFF", "OFF_EFF_RECENT")
-    h_DEF = _blend_stat(h, "DEF_EFF", "DEF_EFF_RECENT")
-    a_DEF = _blend_stat(a, "DEF_EFF", "DEF_EFF_RECENT")
+    h_ORtg = _blend_stat(home_row, "ORtg", "ORtg_RECENT")
+    a_ORtg = _blend_stat(away_row, "ORtg", "ORtg_RECENT")
+    h_DRtg = _blend_stat(home_row, "DRtg", "DRtg_RECENT")
+    a_DRtg = _blend_stat(away_row, "DRtg", "DRtg_RECENT")
+    h_PACE = _blend_stat(home_row, "PACE", "PACE_RECENT")
+    a_PACE = _blend_stat(away_row, "PACE", "PACE_RECENT")
+    h_OFF = _blend_stat(home_row, "OFF_EFF", "OFF_EFF_RECENT")
+    a_OFF = _blend_stat(away_row, "OFF_EFF", "OFF_EFF_RECENT")
+    h_DEF = _blend_stat(home_row, "DEF_EFF", "DEF_EFF_RECENT")
+    a_DEF = _blend_stat(away_row, "DEF_EFF", "DEF_EFF_RECENT")
 
     d_ORtg = h_ORtg - a_ORtg
     d_DRtg = a_DRtg - h_DRtg
@@ -391,18 +377,13 @@ def build_matchup_features(home_row, away_row):
     home_edge = 1.0
     return np.array([home_edge, d_ORtg, d_DRtg, d_pace, d_off_eff, d_def_eff], dtype=float)
 
-
 def season_matchup_base_score(home_row, away_row):
-    x = build_matchup_features(home_row, away_row)
-    return float(np.dot(MATCHUP_WEIGHTS, x))
-
+    return float(np.dot(MATCHUP_WEIGHTS, build_matchup_features(home_row, away_row)))
 
 def score_to_prob(score, lam=0.25):
     return 1.0 / (1.0 + math.exp(-lam * score))
 
-
 def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
-    # negative = home favored
     return -score * points_per_logit
 
 
@@ -410,46 +391,15 @@ def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
 # Injuries (Official NBA PDF)
 # -----------------------------
 
-_WEIGHTS = {"star": 3.0, "starter": 1.5, "rotation": 1.0, "bench": 0.5}
-_STATUS_MULTIPLIER = {"out": 1.0, "doubtful": 0.75, "questionable": 0.5, "probable": 0.25}
+INJURY_WEIGHTS = {"star": 3.0, "starter": 1.5, "rotation": 1.0, "bench": 0.5}
 
-TEAM_ALIASES = {
-    "la clippers": "los angeles clippers",
-    "la lakers": "los angeles lakers",
-    "ny knicks": "new york knicks",
-    "no pelicans": "new orleans pelicans",
-    "okc thunder": "oklahoma city thunder",
-    "sa spurs": "san antonio spurs",
+INJURY_STATUS_MULTIPLIER = {
+    "out": 1.0,
+    "doubtful": 0.75,
+    "questionable": 0.5,
+    "probable": 0.25,
 }
 
-
-def normalize_team_name(s: str) -> str:
-    s = (s or "").strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    return TEAM_ALIASES.get(s, s)
-
-
-def guess_role(player_name, pos):
-    pos = (pos or "").upper()
-    if pos in ["PG", "SG", "SF", "PF", "C"]:
-        return "starter"
-    return "rotation"
-
-
-def status_to_mult(status):
-    if not isinstance(status, str):
-        return 1.0
-    s = status.lower()
-    for key, mult in INJURY_STATUS_MULTIPLIER.items():
-        if key in s:
-            return mult
-    return 1.0
-
-
-def estimate_player_impact_simple(pos):
-    pos = (pos or "").upper()
-    return 2.0 if pos in ["PG", "SG", "SF", "PF", "C", "G", "F"] else 1.0
-    
 NBA_TEAM_NAMES = [
     "Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "Charlotte Hornets", "Chicago Bulls",
     "Cleveland Cavaliers", "Dallas Mavericks", "Denver Nuggets", "Detroit Pistons",
@@ -460,59 +410,65 @@ NBA_TEAM_NAMES = [
     "Portland Trail Blazers", "Sacramento Kings", "San Antonio Spurs", "Toronto Raptors",
     "Utah Jazz", "Washington Wizards",
 ]
+NBA_TEAM_NAMES_NORM = {normalize_team_name(t): t for t in NBA_TEAM_NAMES}
 
-NBA_TEAM_NAMES_NORM = {t.lower(): t for t in NBA_TEAM_NAMES}
+def guess_role(player_name, pos):
+    pos = (pos or "").upper()
+    if pos in ["PG", "SG", "SF", "PF"]:
+        return "starter"
+    if pos in ["C", "F", "G"]:
+        return "rotation"
+    return "rotation"
 
-def normalize_spaces(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip())
+def status_to_mult(status):
+    if not isinstance(status, str):
+        return 1.0
+    s = status.lower()
+    for key, mult in INJURY_STATUS_MULTIPLIER.items():
+        if key in s:
+            return mult
+    return 1.0
 
-def nba_injury_report_page_url(season_label: str) -> str:
+def estimate_player_impact_simple(pos):
+    pos = (pos or "").upper()
+    if pos in ["PG", "SG", "SF", "PF", "C"]:
+        return 2.0
+    return 1.0
+
+def nba_injury_report_page_url(season_label: str):
     return f"https://official.nba.com/nba-injury-report-{season_label}-season/"
 
-
-def infer_season_label(game_date_obj: date) -> str:
-    # 2025-26 label style
-    y = game_date_obj.year
-    if game_date_obj.month < 8:
-        start = y - 1
-    else:
-        start = y
-    return f"{start}-{str(start + 1)[-2:]}"
-
-
-def get_latest_nba_injury_pdf_url_for_date(game_date_obj: date, season_label: str) -> str:
+def get_latest_nba_injury_pdf_url_for_date(game_date_obj: date, season_label: str):
     url = nba_injury_report_page_url(season_label)
+    print(f"[inj-fetch] NBA injury report page: {url}")
+
     r = requests.get(url, timeout=30, headers={"User-Agent": USER_AGENT})
     r.raise_for_status()
-
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # We look for a block that contains the date label (e.g., "December 12:")
-    month_name = game_date_obj.strftime("%B")
-    day_num = str(int(game_date_obj.strftime("%d")))
+    month_name = game_date_obj.strftime("%B")          # December
+    day_num = str(int(game_date_obj.strftime("%d")))   # 12
     needle = f"{month_name} {day_num}:"
 
     container = None
-    for tag in soup.find_all(["p", "div", "li"]):
-        txt = tag.get_text(" ", strip=True)
+    for node in soup.find_all(["p", "div", "li"]):
+        txt = node.get_text(" ", strip=True)
         if txt.startswith(needle):
-            container = tag
+            container = node
             break
 
     if container is None:
-        raise RuntimeError(f"Could not find date block '{needle}' on {url}")
+        raise RuntimeError(f"Could not find injury report links for '{needle}' on {url}")
 
     links = container.find_all("a", href=True)
     pdfs = [
-        a["href"]
-        for a in links
+        a["href"] for a in links
         if "ak-static.cms.nba.com" in a["href"].lower() and a["href"].lower().endswith(".pdf")
     ]
     if not pdfs:
-        raise RuntimeError(f"Found date block '{needle}' but no PDF links inside it.")
+        raise RuntimeError(f"Found date block for '{needle}' but no PDF links.")
 
-    return pdfs[-1]  # latest
-
+    return pdfs[-1]
 
 def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
     r = requests.get(pdf_url, timeout=30, headers={"User-Agent": USER_AGENT})
@@ -520,41 +476,27 @@ def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
 
     reader = PdfReader(BytesIO(r.content))
 
-    # Try multiple extraction modes (some PDFs only work with layout)
-    all_text_chunks = []
+    text_chunks = []
     for page in reader.pages:
-        txt = ""
         try:
             txt = page.extract_text(extraction_mode="layout") or ""
         except TypeError:
-            # older pypdf versions don't support extraction_mode
             txt = page.extract_text() or ""
         except Exception:
             txt = page.extract_text() or ""
-        all_text_chunks.append(txt)
+        text_chunks.append(txt)
 
-    text = "\n".join(all_text_chunks)
-    text = normalize_spaces(text.replace("\xa0", " "))
-
-    # If pypdf extracted nothing, it's probably an image-based PDF (rare but possible)
-    if not text.strip():
+    if not any((c or "").strip() for c in text_chunks):
         print("[inj-parse] WARNING: PDF text extraction returned empty text.")
         return pd.DataFrame(columns=["Team", "Player", "Pos", "Status", "Injury"])
 
-    # Keep line structure for parsing (don’t normalize newlines away)
     raw_lines = []
-    for chunk in all_text_chunks:
+    for chunk in text_chunks:
         for ln in (chunk or "").splitlines():
             ln = ln.replace("\xa0", " ").strip()
             if ln:
                 raw_lines.append(ln)
 
-    # Status & position detection
-    statuses = ["Out", "Doubtful", "Questionable", "Probable"]
-    pos_tokens = ["PG", "SG", "SF", "PF", "C", "G", "F"]
-
-    # This pattern is tolerant: find POS then STATUS anywhere later in the line
-    # and treat everything after STATUS as injury text.
     player_line_re = re.compile(
         r"(?P<Player>[A-Za-z\.\'\- ]+?)\s+"
         r"(?P<Pos>PG|SG|SF|PF|C|G|F)\s+"
@@ -568,80 +510,68 @@ def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
 
     for ln in raw_lines:
         ln_clean = normalize_spaces(ln)
+        ln_norm = normalize_team_name(ln_clean)
 
-        # Detect team headers by exact match against known team names
-        ln_lower = ln_clean.lower()
-        if ln_lower in NBA_TEAM_NAMES_NORM:
-            current_team = NBA_TEAM_NAMES_NORM[ln_lower]
+        # Team header detection (exact match vs NBA team names)
+        if ln_norm in NBA_TEAM_NAMES_NORM:
+            current_team = NBA_TEAM_NAMES_NORM[ln_norm]
             last_row_idx = None
-            continue
-
-        # Ignore obvious header/footer noise
-        if any(k in ln_lower for k in ["injury report", "referee", "page", "game date", "report time", "player", "status"]):
             continue
 
         if current_team is None:
             continue
 
-        # Try to find a player row
+        ln_lower = ln_clean.lower()
+        if any(k in ln_lower for k in ["injury report", "referee", "page", "report time", "game date"]):
+            continue
+
         m = player_line_re.search(ln_clean)
         if m:
-            player = normalize_spaces(m.group("Player"))
-            pos = m.group("Pos").strip()
-            status = m.group("Status").strip()
-            injury = normalize_spaces(m.group("Injury"))
-
-            # Guard against false positives: player should be at least two chars
-            if len(player) < 2 or pos not in pos_tokens or status not in statuses:
-                continue
-
-            rows.append(
-                {
-                    "Team": current_team,
-                    "Player": player,
-                    "Pos": pos,
-                    "Status": status,
-                    "Injury": injury,
-                }
-            )
+            rows.append({
+                "Team": current_team,
+                "Player": normalize_spaces(m.group("Player")),
+                "Pos": m.group("Pos").strip(),
+                "Status": m.group("Status").strip(),
+                "Injury": normalize_spaces(m.group("Injury")),
+            })
             last_row_idx = len(rows) - 1
             continue
 
-        # Handle wrapped injury descriptions (continuation lines)
+        # Continuation lines for injury text
         if last_row_idx is not None:
-            # If the next line looks like it starts a new player, don't append
-            has_status_word = any(st.lower() in ln_lower for st in [s.lower() for s in statuses])
-            has_pos = any(f" {p} " in f" {ln_clean} " for p in pos_tokens)
-            looks_like_new_player = has_status_word and has_pos
-
-            if not looks_like_new_player:
+            # If line doesn't look like a new player row, append to injury text
+            if not player_line_re.search(ln_clean):
                 extra = normalize_spaces(ln_clean)
-                if extra and rows[last_row_idx]["Injury"]:
-                    rows[last_row_idx]["Injury"] = normalize_spaces(rows[last_row_idx]["Injury"] + " " + extra)
-                elif extra:
-                    rows[last_row_idx]["Injury"] = extra
+                if extra:
+                    prev = rows[last_row_idx]["Injury"]
+                    rows[last_row_idx]["Injury"] = normalize_spaces((prev + " " + extra).strip())
 
-    df = pd.DataFrame(rows, columns=["Team", "Player", "Pos", "Status", "Injury"])
+    return pd.DataFrame(rows, columns=["Team", "Player", "Pos", "Status", "Injury"])
+
+def fetch_injury_report_official_nba(game_date_obj: date) -> pd.DataFrame:
+    # If you want to compute season_label automatically, you can. Hardcoding is fine.
+    season_label = "2025-26"
+    pdf_url = get_latest_nba_injury_pdf_url_for_date(game_date_obj, season_label=season_label)
+    print(f"[inj-fetch] Using NBA official injury PDF: {pdf_url}")
+    df = parse_nba_injury_pdf_to_df(pdf_url)
+    print(f"[inj-fetch] Parsed injury rows: {len(df)}")
+    if not df.empty:
+        print("[inj-fetch] Sample:\n", df.head(10))
     return df
-
 
 def build_injury_list_for_team_official(team_name: str, injury_df: pd.DataFrame):
     if injury_df is None or injury_df.empty or "Team" not in injury_df.columns:
         return []
 
-    target = normalize_team_name(team_name)
-
-    # normalize pdf team col for matching
+    team_norm = normalize_team_name(team_name)
     df = injury_df.copy()
     df["Team_norm"] = df["Team"].astype(str).apply(normalize_team_name)
 
-    # Try exact-ish containment both ways
-    mask = df["Team_norm"].apply(lambda x: (target in x) or (x in target))
-    df_team = df[mask].copy()
+    df_team = df[df["Team_norm"] == team_norm].copy()
 
-    # Fallback: match nickname only (last word)
     if df_team.empty:
-        nick = target.split()[-1]
+        # fallback: match by nickname (last word)
+        nick = team_norm.split()[-1]
         df_team = df[df["Team_norm"].str.contains(nick, na=False)].copy()
 
     if df_team.empty:
@@ -659,7 +589,6 @@ def build_injury_list_for_team_official(team_name: str, injury_df: pd.DataFrame)
 
     return injuries
 
-
 def injury_adjustment(home_injuries=None, away_injuries=None):
     home_injuries = home_injuries or []
     away_injuries = away_injuries or []
@@ -669,14 +598,8 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
         for item in lst:
             if len(item) == 4:
                 _, role, mult, impact = item
-            elif len(item) == 3:
-                _, role, mult = item
-                impact = 2.0
             else:
-                role = "starter"
-                mult = 1.0
-                impact = 2.0
-
+                continue
             weight = INJURY_WEIGHTS.get(role, INJURY_WEIGHTS["starter"])
             adj += sign * weight * mult * (impact / 2.0)
         return adj
@@ -685,9 +608,8 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
 
 
 # -----------------------------
-# Schedule / games
+# Schedule / games (BallDontLie)
 # -----------------------------
-
 
 def fetch_games_for_date(game_date_str, api_key):
     dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
@@ -701,55 +623,46 @@ def fetch_games_for_date(game_date_str, api_key):
     for g in games:
         home_team = g["home_team"]
         away_team = g["visitor_team"]
-        rows.append(
-            {
-                "GAME_ID": g["id"],
-                "HOME_TEAM_NAME": home_team["full_name"],
-                "AWAY_TEAM_NAME": away_team["full_name"],
-                "HOME_TEAM_ID": home_team["id"],
-                "AWAY_TEAM_ID": away_team["id"],
-                "GAME_DATE": g.get("date"),
-            }
-        )
+        rows.append({
+            "GAME_ID": g["id"],
+            "HOME_TEAM_NAME": home_team["full_name"],
+            "AWAY_TEAM_NAME": away_team["full_name"],
+            "HOME_TEAM_ID": home_team["id"],
+            "AWAY_TEAM_ID": away_team["id"],
+            "GAME_DATE": g.get("date"),
+        })
 
     return pd.DataFrame(rows)
-
 
 def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
     os.makedirs(odds_dir, exist_ok=True)
     odds_path = os.path.join(odds_dir, f"odds_{game_date_str.replace('/', '-')}.csv")
-
     if os.path.exists(odds_path):
         return odds_path
 
     print(f"[template] No odds file found for {game_date_str}, creating template at {odds_path}...")
-
     games_df = fetch_games_for_date(game_date_str, api_key=api_key)
     if games_df.empty:
         print(f"[template] No games found on {game_date_str}; not creating odds template.")
         return odds_path
 
-    df = pd.DataFrame(
-        [
-            {
-                "date": game_date_str,
-                "home": r["HOME_TEAM_NAME"],
-                "away": r["AWAY_TEAM_NAME"],
-                "home_ml": "",
-                "away_ml": "",
-                "home_spread": "",
-            }
-            for _, r in games_df.iterrows()
-        ]
-    )
-    df.to_csv(odds_path, index=False)
+    out_rows = []
+    for _, row in games_df.iterrows():
+        out_rows.append({
+            "date": game_date_str,
+            "home": row["HOME_TEAM_NAME"],
+            "away": row["AWAY_TEAM_NAME"],
+            "home_ml": "",
+            "away_ml": "",
+            "home_spread": "",
+        })
+
+    pd.DataFrame(out_rows).to_csv(odds_path, index=False)
     print(f"[template] Template odds file created: {odds_path}")
     return odds_path
 
-
 def compute_head_to_head_adjustment(home_team_id, away_team_id, season_year, api_key, max_seasons_back=3):
     return 0.0
-
 
 def get_team_last_game_date(team_id, game_date_obj, season_year, api_key):
     iso_date = game_date_obj.strftime("%Y-%m-%d")
@@ -789,7 +702,6 @@ def get_team_last_game_date(team_id, game_date_obj, season_year, api_key):
 
     return last_date
 
-
 def rest_days_to_fatigue_adjustment(days_rest):
     if days_rest is None:
         return 0.0
@@ -806,15 +718,22 @@ def rest_days_to_fatigue_adjustment(days_rest):
 # Main daily engine
 # -----------------------------
 
-
 def run_daily_probs_for_date(
-    game_date,
-    odds_dict,
-    spreads_dict,
-    stats_df,
-    api_key,
+    game_date: str,
+    odds_dict=None,
+    spreads_dict=None,
+    stats_df=None,
+    api_key=None,
     lam=0.25,
 ):
+    if api_key is None:
+        api_key = get_bdl_api_key()
+    if stats_df is None:
+        raise ValueError("stats_df must be precomputed.")
+
+    odds_dict = odds_dict or {}
+    spreads_dict = spreads_dict or {}
+
     game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
     season_year = season_start_year_for_date(game_date_obj)
 
@@ -823,7 +742,7 @@ def run_daily_probs_for_date(
     if games_df.empty:
         return pd.DataFrame()
 
-    # Injuries (fetch ONCE)
+    # Load injuries ONCE
     try:
         injury_df = fetch_injury_report_official_nba(game_date_obj)
     except Exception as e:
@@ -844,7 +763,7 @@ def run_daily_probs_for_date(
 
         base_score = season_matchup_base_score(home_row, away_row)
 
-        # Injuries (per team)
+        # Injuries from OFFICIAL DF
         home_inj = build_injury_list_for_team_official(home_name, injury_df)
         away_inj = build_injury_list_for_team_official(away_name, injury_df)
         inj_adj = injury_adjustment(home_inj, away_inj)
@@ -854,24 +773,18 @@ def run_daily_probs_for_date(
         # Fatigue
         home_last = get_team_last_game_date(home_id, game_date_obj, season_year, api_key)
         away_last = get_team_last_game_date(away_id, game_date_obj, season_year, api_key)
-
         home_rest_days = (game_date_obj - home_last).days if home_last else None
         away_rest_days = (game_date_obj - away_last).days if away_last else None
-
-        home_fatigue = rest_days_to_fatigue_adjustment(home_rest_days)
-        away_fatigue = rest_days_to_fatigue_adjustment(away_rest_days)
-        fatigue_adj = home_fatigue - away_fatigue
+        fatigue_adj = rest_days_to_fatigue_adjustment(home_rest_days) - rest_days_to_fatigue_adjustment(away_rest_days)
 
         h2h_adj = compute_head_to_head_adjustment(home_id, away_id, season_year, api_key)
-        adj_score = base_score + inj_adj + fatigue_adj + h2h_adj
 
+        adj_score = base_score + inj_adj + fatigue_adj + h2h_adj
         model_home_prob = score_to_prob(adj_score, lam)
         model_spread = score_to_spread(adj_score)
 
-        # Market odds
         key = (home_name, away_name)
         odds_info = odds_dict.get(key, {}) or {}
-
         home_ml = odds_info.get("home_ml")
         away_ml = odds_info.get("away_ml")
 
@@ -892,12 +805,10 @@ def run_daily_probs_for_date(
 
         edge_home_raw = model_home_prob - home_imp
         edge_away_raw = (1.0 - model_home_prob) - away_imp
-
         edge_shrink = 0.5
         edge_home = edge_home_raw * edge_shrink
         edge_away = edge_away_raw * edge_shrink
 
-        # Spread edge
         home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
         if home_spread is not None:
             home_spread = float(home_spread)
@@ -905,7 +816,6 @@ def run_daily_probs_for_date(
         else:
             spread_edge_home = None
 
-        # Recs
         value_edge = abs(edge_home)
         model_conf = abs(model_home_prob - 0.5)
 
@@ -934,40 +844,37 @@ def run_daily_probs_for_date(
         else:
             primary_rec = spread_rec
 
-        rows.append(
-            {
-                "date": game_date,
-                "home": home_name,
-                "away": away_name,
-                "model_home_prob": model_home_prob,
-                "market_home_prob": home_imp,
-                "edge_home": edge_home,
-                "edge_away": edge_away,
-                "model_spread_home": model_spread,
-                "home_ml": home_ml,
-                "away_ml": away_ml,
-                "home_spread": home_spread,
-                "spread_edge_home": spread_edge_home,
-                "ml_recommendation": ml_rec,
-                "spread_recommendation": spread_rec,
-                "primary_recommendation": primary_rec,
-            }
-        )
+        rows.append({
+            "date": game_date,
+            "home": home_name,
+            "away": away_name,
+            "model_home_prob": model_home_prob,
+            "market_home_prob": home_imp,
+            "edge_home": edge_home,
+            "edge_away": edge_away,
+            "model_spread_home": model_spread,
+            "home_ml": home_ml,
+            "away_ml": away_ml,
+            "home_spread": home_spread,
+            "spread_edge_home": spread_edge_home,
+            "ml_recommendation": ml_rec,
+            "spread_recommendation": spread_rec,
+            "primary_recommendation": primary_rec,
+        })
 
     df = pd.DataFrame(rows)
-
     df["abs_edge_home"] = (df["model_home_prob"] - 0.5).abs()
 
     def classify_conf(conf):
         if conf >= 0.20:
             return "HIGH CONFIDENCE"
-        if conf >= 0.10:
+        elif conf >= 0.10:
             return "MEDIUM CONFIDENCE"
-        return "LOW CONFIDENCE"
+        else:
+            return "LOW CONFIDENCE"
 
     df["value_tier"] = df["abs_edge_home"].apply(classify_conf)
     df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
-
     return df
 
 
@@ -975,10 +882,9 @@ def run_daily_probs_for_date(
 # CLI / entrypoint
 # -----------------------------
 
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
-    parser.add_argument("--date", type=str, default=None, help="Game date in MM/DD/YYYY (default: today in UTC).")
+    parser.add_argument("--date", type=str, default=None, help="Game date in MM/DD/YYYY (default: today UTC).")
     args = parser.parse_args(argv)
 
     if args.date is None:
@@ -991,10 +897,10 @@ def main(argv=None):
 
     api_key = get_bdl_api_key()
 
-    # Ensure odds template exists (optional)
+    # Ensure odds template exists
     build_odds_csv_template_if_missing(game_date, api_key=api_key)
 
-    # Load odds CSV
+    # Load odds
     try:
         odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date)
         print(f"Loaded odds for {len(odds_dict)} games from CSV.")
@@ -1007,15 +913,12 @@ def main(argv=None):
     season_year = season_start_year_for_date(game_date_obj)
     end_date_iso = game_date_obj.strftime("%Y-%m-%d")
 
-    # Team ratings
     try:
         stats_df = fetch_team_ratings_bdl(season_year=season_year, end_date_iso=end_date_iso, api_key=api_key)
     except Exception as e:
         print(f"Error: Failed to fetch team ratings from BallDontLie: {e}")
-        print("Exiting without predictions so the workflow can complete gracefully.")
         return
 
-    # Run daily model
     try:
         results_df = run_daily_probs_for_date(
             game_date=game_date,
@@ -1026,10 +929,8 @@ def main(argv=None):
         )
     except Exception as e:
         print(f"Error: Failed to run daily model: {e}")
-        print("Exiting without predictions so the workflow can complete gracefully.")
         return
 
-    # Save
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{game_date.replace('/', '-')}.csv"
     results_df.to_csv(out_name, index=False)
