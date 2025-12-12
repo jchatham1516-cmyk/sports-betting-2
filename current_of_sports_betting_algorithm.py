@@ -678,16 +678,81 @@ def estimate_player_impact_simple(pos):
 def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
     """
     Build a list of injuries for a given team from ESPN injuries DataFrame.
-    Returns list of tuples: (player_name, role, multiplier, impact_points)
-    """
-    # Map full team name (e.g. "Milwaukee Bucks") to abbrev (e.g. "MIL")
-    abbr = ESPN_TEAM_ABBR.get(team_name_or_abbrev, team_name_or_abbrev).lower()
+    Returns list of tuples: (player_name, role, multiplier, impact_points).
 
-    if "Team" in injury_df.columns:
-        mask = injury_df["Team"].astype(str).str.lower().str.contains(abbr)
-        df_team = injury_df[mask].copy()
+    This version is more robust:
+    - Uses full team name, city, nickname, ESPN abbreviation, and a 3-letter code.
+    - Matches if ANY of those tokens appears in the ESPN 'Team' cell.
+    """
+    if "Team" not in injury_df.columns:
+        return []
+
+    # Full name from BDL (e.g. "Milwaukee Bucks")
+    full_name = str(team_name_or_abbrev).strip()
+    full_lower = full_name.lower()
+
+    # Split into city + nickname (e.g. "Milwaukee", "Bucks")
+    parts = full_lower.split()
+    if len(parts) > 1:
+        city = " ".join(parts[:-1])
+        nickname = parts[-1]
     else:
-        df_team = injury_df.iloc[0:0].copy()
+        city = full_lower
+        nickname = full_lower
+
+    # ESPN abbreviation mapping (if present)
+    mapped_abbr = ESPN_TEAM_ABBR.get(full_name, full_name).lower()
+
+    # Simple 3-letter code (common NBA-style abbr)
+    # e.g. "Milwaukee Bucks" -> "mil" (city first 3 letters)
+    fallback_abbr = city.replace(".", "").replace(",", "").replace("-", "")
+    fallback_abbr = fallback_abbr[:3].lower() if len(fallback_abbr) >= 3 else fallback_abbr
+
+    # Add a few special-case alternates for known weird ones
+    special_tokens = set()
+    if "golden state" in full_lower:
+        special_tokens.update(["gs", "gsw"])
+    if "new orleans" in full_lower:
+        special_tokens.update(["no", "nop"])
+    if "san antonio" in full_lower:
+        special_tokens.update(["sa", "sas"])
+    if "new york" in full_lower:
+        special_tokens.update(["ny", "nyk"])
+    if "los angeles clippers" in full_lower:
+        special_tokens.update(["lac", "la clippers"])
+    if "los angeles lakers" in full_lower:
+        special_tokens.update(["lal", "la lakers"])
+    if "utah jazz" in full_lower:
+        special_tokens.update(["uta", "utah"])
+
+    # Build candidate tokens to look for in ESPN 'Team' column
+    candidate_tokens = {
+        full_lower,
+        city,
+        nickname,
+        mapped_abbr,
+        fallback_abbr,
+    }
+    candidate_tokens |= {t for t in special_tokens if t}
+
+    # Clean out empty strings
+    candidate_tokens = {t for t in candidate_tokens if t}
+
+    team_col = injury_df["Team"].astype(str).str.lower()
+
+    def match_row(team_str: str) -> bool:
+        return any(tok in team_str for tok in candidate_tokens)
+
+    mask = team_col.apply(match_row)
+    df_team = injury_df[mask].copy()
+
+    # Optional: debug when nothing matched, to help tuning
+    if df_team.empty:
+        sample = injury_df["Team"].dropna().astype(str).unique()[:10]
+        print(
+            f"[inj-match] WARNING: no ESPN injury rows matched for '{full_name}'. "
+            f"Tokens={sorted(candidate_tokens)}. Sample Team values={sample}"
+        )
 
     injuries = []
     for _, row in df_team.iterrows():
@@ -702,7 +767,6 @@ def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
         injuries.append((name, role, mult, impact_points))
 
     return injuries
-
 
 def injury_adjustment(home_injuries=None, away_injuries=None):
     """
