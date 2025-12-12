@@ -1,3 +1,5 @@
+# current_of_sports_betting_algorithm.py
+#
 # Daily NBA betting model using BallDontLie + ESPN injuries + local odds CSV.
 #
 # Features:
@@ -5,31 +7,30 @@
 #     - ORtg/DRtg proxies
 #     - Pace
 #     - Off/Def efficiency
-# - ESPN per-team injuries with a simple player impact model
-# - Schedule fatigue (rest days, approximating B2B / 3-in-4 / 4-in-6)
-# - Head-to-head historical matchup adjustment (currently stubbed)
+# - Recent form weighting (season + last N games)
+# - ESPN league-wide injuries with a simple player impact model
+# - Schedule fatigue (rest days → B2B / 3-in-4 approximation)
 # - Local odds CSV for moneyline + spreads
 # - Outputs: model_home_prob, edges, model_spread, ML + spread recommendations
-
-ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 
 import os
 import sys
 import math
 import argparse
 import time
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 
 import numpy as np
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 
 # -----------------------------
 # Global tuning constants
 # -----------------------------
 
 # Scale factor to convert model score -> spread (bigger = more extreme spreads)
-SPREAD_SCALE_FACTOR = 1.35  # ~1.3–1.4 works well
+SPREAD_SCALE_FACTOR = 1.35  # ~1.3–1.4 is usually reasonable
 
 # Recent form vs full-season weighting (for ORtg/DRtg, etc.)
 RECENT_FORM_WEIGHT = 0.35
@@ -47,7 +48,7 @@ MIN_MODEL_CONFIDENCE = 0.05      # |model_home_prob - 0.5|
 # -----------------------------
 
 
-def fetch_odds_for_date_from_csv(game_date_str):
+def fetch_odds_for_date_from_csv(game_date_str: str):
     """
     Load odds for a given date from a local CSV file in the 'odds' folder.
 
@@ -163,7 +164,7 @@ def american_to_implied_prob(odds):
 # BallDontLie low-level client
 # -----------------------------
 
-BALLDONTLIE_BASE_URL = "https://api.balldondlie.io/v1".replace("dond", "dont")  # avoid typo
+BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
 
 
 def get_bdl_api_key():
@@ -247,8 +248,8 @@ def fetch_team_ratings_bdl(
     - Off_Eff/Def_Eff ~ points per "possession" style proxy
     - W, L, W_PCT
 
-    NEW: also computes "recent form" (last RECENT_GAMES_WINDOW games)
-         and blends it in via global RECENT_FORM_WEIGHT.
+    Also computes "recent form" (last RECENT_GAMES_WINDOW games)
+    and blends it in via global RECENT_FORM_WEIGHT.
     """
     # 1) Get teams
     teams_json = bdl_get("teams", params={}, api_key=api_key)
@@ -441,7 +442,7 @@ def find_team_row(team_name_input, stats_df):
 # Global weights for the base matchup model.
 MATCHUP_WEIGHTS = np.array(
     [
-        0.2,   # home_edge baseline (smaller)
+        0.2,   # home_edge baseline
         0.12,  # d_ORtg
         0.12,  # d_DRtg
         0.03,  # d_pace
@@ -533,7 +534,7 @@ def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
 
 
 # -----------------------------
-# Injuries (ESPN per-team)
+# Injuries (ESPN league-wide)
 # -----------------------------
 
 INJURY_WEIGHTS = {
@@ -550,38 +551,38 @@ INJURY_STATUS_MULTIPLIER = {
     "probable": 0.25,
 }
 
-# Map full team names (from BallDontLie) to ESPN injury-page abbreviations.
+# Map full team names (from BallDontLie) to ESPN-related tokens.
 ESPN_TEAM_ABBR = {
-    "Atlanta Hawks": "ATL",
-    "Boston Celtics": "BOS",
-    "Brooklyn Nets": "BKN",
-    "Charlotte Hornets": "CHA",
-    "Chicago Bulls": "CHI",
-    "Cleveland Cavaliers": "CLE",
-    "Dallas Mavericks": "DAL",
-    "Denver Nuggets": "DEN",
-    "Detroit Pistons": "DET",
-    "Golden State Warriors": "GS",
-    "Houston Rockets": "HOU",
-    "Indiana Pacers": "IND",
-    "Los Angeles Clippers": "LAC",
-    "Los Angeles Lakers": "LAL",
-    "Memphis Grizzlies": "MEM",
-    "Miami Heat": "MIA",
-    "Milwaukee Bucks": "MIL",
-    "Minnesota Timberwolves": "MIN",
-    "New Orleans Pelicans": "NO",
-    "New York Knicks": "NY",
-    "Oklahoma City Thunder": "OKC",
-    "Orlando Magic": "ORL",
-    "Philadelphia 76ers": "PHI",
-    "Phoenix Suns": "PHX",
-    "Portland Trail Blazers": "POR",
-    "Sacramento Kings": "SAC",
-    "San Antonio Spurs": "SA",
-    "Toronto Raptors": "TOR",
-    "Utah Jazz": "UTAH",
-    "Washington Wizards": "WSH",
+    "Atlanta Hawks": "atl",
+    "Boston Celtics": "bos",
+    "Brooklyn Nets": "bkn",
+    "Charlotte Hornets": "cha",
+    "Chicago Bulls": "chi",
+    "Cleveland Cavaliers": "cle",
+    "Dallas Mavericks": "dal",
+    "Denver Nuggets": "den",
+    "Detroit Pistons": "det",
+    "Golden State Warriors": "gs",
+    "Houston Rockets": "hou",
+    "Indiana Pacers": "ind",
+    "Los Angeles Clippers": "lac",
+    "Los Angeles Lakers": "lal",
+    "Memphis Grizzlies": "mem",
+    "Miami Heat": "mia",
+    "Milwaukee Bucks": "mil",
+    "Minnesota Timberwolves": "min",
+    "New Orleans Pelicans": "no",
+    "New York Knicks": "ny",
+    "Oklahoma City Thunder": "okc",
+    "Orlando Magic": "orl",
+    "Philadelphia 76ers": "phi",
+    "Phoenix Suns": "phx",
+    "Portland Trail Blazers": "por",
+    "Sacramento Kings": "sac",
+    "San Antonio Spurs": "sa",
+    "Toronto Raptors": "tor",
+    "Utah Jazz": "utah",
+    "Washington Wizards": "wsh",
 }
 
 
@@ -617,33 +618,59 @@ def estimate_player_impact_simple(pos):
         return 2.0
     return 1.0
 
+
 def fetch_injury_report_espn():
     """
     Scrape ESPN league-wide NBA injuries page into a DataFrame with columns:
         Player, Team, Pos, Status, Injury
+
+    This uses requests + BeautifulSoup + pandas.read_html on each <table>.
+    If anything fails, returns an empty DataFrame and the model falls back
+    to 'no injuries'.
     """
     url = "https://www.espn.com/nba/injuries"
-    tables = pd.read_html(url)
-
-    if not tables:
-        print("[inj-fetch] No tables found on ESPN injuries page.")
+    print(f"[inj-fetch] Fetching league-wide injuries from {url}")
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"[inj-fetch] Failed HTTP fetch for ESPN injuries: {e}")
         return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
 
-    injury_tables = []
-    for t in tables:
-        cols_norm = [str(c).strip().lower() for c in t.columns]
-        # Heuristic: keep tables that look like injury tables
-        if any("player" in c or "name" in c for c in cols_norm) and any(
-            "team" in c for c in cols_norm
-        ):
-            injury_tables.append(t)
+    html = resp.text
+    soup = BeautifulSoup(html, "html.parser")
+    tables = soup.find_all("table")
+    frames = []
 
-    if not injury_tables:
-        print("[inj-fetch] No matching injury tables found on ESPN injuries page.")
+    for tbl in tables:
+        try:
+            # read_html expects string of HTML
+            tbl_html = str(tbl)
+            tdf_list = pd.read_html(tbl_html)
+            if not tdf_list:
+                continue
+            tdf = tdf_list[0]
+
+            cols_low = [str(c).lower() for c in tdf.columns]
+            if (
+                any("player" in c or "name" in c for c in cols_low)
+                and any("team" in c for c in cols_low)
+            ):
+                frames.append(tdf)
+        except Exception:
+            continue
+
+    if not frames:
+        print("[inj-fetch] No valid injury tables could be parsed.")
         return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
 
-    df = pd.concat(injury_tables, ignore_index=True)
+    df = pd.concat(frames, ignore_index=True)
 
+    # Normalize column names
     rename_map = {}
     for c in df.columns:
         lc = str(c).strip().lower()
@@ -659,32 +686,51 @@ def fetch_injury_report_espn():
             rename_map[c] = "Injury"
 
     df = df.rename(columns=rename_map)
+
     keep_cols = [c for c in ["Player", "Team", "Pos", "Status", "Injury"] if c in df.columns]
     df = df[keep_cols].copy()
 
     print(f"[inj-fetch] League-wide injuries rows: {len(df)}")
-    print("[inj-fetch] Sample:\n", df.head())
+    if not df.empty:
+        print("[inj-fetch] Sample injuries:\n", df.head())
+
     return df
 
 
-def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
+def build_injury_list_for_team_espn(team_name, injury_df):
     """
-    Build a list of injuries for a given team from our per-team ESPN injuries DataFrame.
+    Build a list of injuries for a given team from league-wide ESPN injuries DataFrame.
     Returns list of tuples: (player_name, role, multiplier, impact_points).
     """
     if injury_df is None or injury_df.empty:
         return []
 
-    full_name = str(team_name_or_abbrev).strip()
+    full_name = str(team_name).strip()
+    full_name_l = full_name.lower()
 
     if "Team" not in injury_df.columns:
         print(f"[inj-match] No 'Team' column in injury_df when looking for {full_name}.")
         return []
 
-    df_team = injury_df[injury_df["Team"].astype(str) == full_name].copy()
+    team_col = injury_df["Team"].astype(str)
+    team_col_l = team_col.str.lower()
+
+    abbr = ESPN_TEAM_ABBR.get(full_name, "").lower()
+    # Basic heuristics: exact match, contains abbr, contains city, contains nickname
+    parts = full_name_l.split()
+    city = parts[0] if parts else ""
+    nickname = parts[-1] if len(parts) > 1 else ""
+
+    mask_exact = team_col_l == full_name_l
+    mask_abbr = team_col_l.str.contains(abbr) if abbr else False
+    mask_city = team_col_l.str.contains(city) if city else False
+    mask_nick = team_col_l.str.contains(nickname) if nickname else False
+
+    mask = mask_exact | mask_abbr | mask_city | mask_nick
+    df_team = injury_df[mask].copy()
 
     if df_team.empty:
-        print(f"[inj-match] No injuries found in DataFrame for '{full_name}'.")
+        print(f"[inj-match] No injuries matched for '{full_name}'.")
         return []
 
     injuries = []
@@ -815,7 +861,7 @@ def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
 
 
 # -----------------------------
-# Schedule fatigue & H2H helpers
+# Schedule fatigue helpers
 # -----------------------------
 
 
@@ -853,7 +899,6 @@ def get_team_last_game_date(team_id, game_date_obj, season_year, api_key):
         cursor = meta.get("next_cursor")
 
         for g in games:
-            # parse game date
             g_date_str = g.get("date")
             if not g_date_str:
                 continue
@@ -906,7 +951,7 @@ def run_daily_probs_for_date(
     spreads_dict=None,
     stats_df=None,
     api_key=None,
-    edge_threshold=0.03,  # kept for reference, no longer drives recs
+    edge_threshold=0.03,  # kept for reference, no longer drives recs by itself
     lam=0.25,
 ):
     """
@@ -936,14 +981,12 @@ def run_daily_probs_for_date(
     games_df = fetch_games_for_date(game_date, stats_df, api_key)
     print(f"[run_daily] Found {len(games_df)} games for {game_date}.")
 
-  # Injuries: league-wide once
-try:
-    injury_df = fetch_injury_report_espn()
-except Exception as e:
-    print(f"Warning: failed to fetch ESPN injuries: {e}")
-    injury_df = pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
+    if games_df.empty:
+        return pd.DataFrame()
 
-print(f"[run_daily] injury_df rows = {len(injury_df)}")
+    # Injuries: league-wide, once
+    injury_df = fetch_injury_report_espn()
+    print(f"[run_daily] injury_df rows = {len(injury_df)}")
 
     rows = []
 
@@ -969,7 +1012,7 @@ print(f"[run_daily] injury_df rows = {len(injury_df)}")
             f"{away_name} injuries={len(away_inj)}, inj_adj={inj_adj:.3f}"
         )
 
-        # Schedule fatigue (rest days as B2B / 3-in-4 approximation)
+        # Schedule fatigue (rest days)
         home_last = get_team_last_game_date(home_id, game_date_obj, season_year, api_key)
         away_last = get_team_last_game_date(away_id, game_date_obj, season_year, api_key)
 
@@ -1045,7 +1088,7 @@ print(f"[run_daily] injury_df rows = {len(injury_df)}")
         # Recommendation logic with filters
         # -------------------------
         value_edge = abs(edge_home)                     # vs market
-        model_confidence = abs(model_home_prob - 0.5)   # vs 0.5 coin flip
+        model_confidence = abs(model_home_prob - 0.5)   # vs coin flip
 
         # 1) Moneyline recommendation
         if (value_edge < EDGE_PROB_THRESHOLD) or (model_confidence < MIN_MODEL_CONFIDENCE):
@@ -1072,6 +1115,7 @@ print(f"[run_daily] injury_df rows = {len(injury_df)}")
                 spread_rec = "Too close to call ATS (edge too small)"
             else:
                 if spread_edge_home > 0:
+                    # market line spots more points to home than model -> like away +points
                     spread_rec = "Model lean ATS: AWAY"
                 else:
                     spread_rec = "Model lean ATS: HOME"
@@ -1086,7 +1130,8 @@ print(f"[run_daily] injury_df rows = {len(injury_df)}")
         elif "No ML bet" in ml_rec:
             primary_rec = spread_rec
         else:
-            primary_rec = spread_rec  # usually prefer spread
+            # If both are viable, usually prefer spread
+            primary_rec = spread_rec
 
         rows.append(
             {
