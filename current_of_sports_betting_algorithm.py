@@ -470,11 +470,35 @@ def get_latest_nba_injury_pdf_url_for_date(game_date_obj: date, season_label: st
 
     return pdfs[-1]
 
-def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
-    r = requests.get(pdf_url, timeout=30, headers={"User-Agent": USER_AGENT})
+def download_pdf_bytes(url: str, timeout: int = 30) -> bytes:
+    """Download a PDF with headers and sanity-check that we actually got a PDF."""
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/pdf,application/octet-stream,*/*",
+        "Referer": "https://official.nba.com/",
+    }
+    r = requests.get(url, timeout=timeout, headers=headers, allow_redirects=True)
     r.raise_for_status()
+    data = r.content or b""
 
-    reader = PdfReader(BytesIO(r.content))
+    # Ensure it's a real PDF (NBA sometimes serves HTML/redirect pages)
+    if not data.startswith(b"%PDF"):
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        snippet = data[:200].decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"[inj-parse] Downloaded content is not a PDF. Content-Type={ctype}. "
+            f"First bytes/snippet: {snippet}"
+        )
+    if len(data) < 10_000:
+        raise RuntimeError(f"[inj-parse] PDF seems too small ({len(data)} bytes) — likely blocked/redirected.")
+
+    return data
+
+def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
+    pdf_bytes = download_pdf_bytes(pdf_url, timeout=30)
+
+
+    reader = PdfReader(BytesIO(pdf_bytes))
 
     text_chunks = []
     for page in reader.pages:
@@ -504,6 +528,19 @@ def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
         r"(?P<Injury>.*)$"
     )
 
+    # Some NBA injury PDFs list Team as a column in the same line (not as a header).
+    # This regex attempts to parse: Team + Player + Pos + Status + Injury on one line.
+    team_names_for_regex = NBA_TEAM_NAMES + ["LA Clippers", "LA Lakers"]
+    team_alt = "|".join(sorted((re.escape(t) for t in team_names_for_regex), key=len, reverse=True))
+    team_line_re = re.compile(
+        rf"^(?P<Team>{team_alt})\s+"
+        rf"(?P<Player>[A-Za-z\.\'\- ]+?)\s+"
+        rf"(?P<Pos>PG|SG|SF|PF|C|G|F)\s+"
+        rf"(?P<Status>Out|Doubtful|Questionable|Probable)\s*"
+        rf"(?P<Injury>.*)$"
+    )
+
+
     rows = []
     current_team = None
     last_row_idx = None
@@ -511,6 +548,25 @@ def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
     for ln in raw_lines:
         ln_clean = normalize_spaces(ln)
         ln_norm = normalize_team_name(ln_clean)
+        # Column-style line (Team appears on the same line as the player)
+        m2 = team_line_re.search(ln_clean)
+        if m2:
+            team = normalize_spaces(m2.group("Team"))
+            if team == "LA Clippers":
+                team = "Los Angeles Clippers"
+            elif team == "LA Lakers":
+                team = "Los Angeles Lakers"
+            rows.append({
+                "Team": team,
+                "Player": normalize_spaces(m2.group("Player")),
+                "Pos": m2.group("Pos").strip(),
+                "Status": m2.group("Status").strip(),
+                "Injury": normalize_spaces(m2.group("Injury")),
+            })
+            last_row_idx = len(rows) - 1
+            current_team = team  # helps continuation lines
+            continue
+
 
         # Team header detection (exact match vs NBA team names)
         if ln_norm in NBA_TEAM_NAMES_NORM:
