@@ -410,8 +410,8 @@ def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
 # Injuries (Official NBA PDF)
 # -----------------------------
 
-INJURY_WEIGHTS = {"star": 3.0, "starter": 1.5, "rotation": 1.0, "bench": 0.5}
-INJURY_STATUS_MULTIPLIER = {"out": 1.0, "doubtful": 0.75, "questionable": 0.5, "probable": 0.25}
+_WEIGHTS = {"star": 3.0, "starter": 1.5, "rotation": 1.0, "bench": 0.5}
+_STATUS_MULTIPLIER = {"out": 1.0, "doubtful": 0.75, "questionable": 0.5, "probable": 0.25}
 
 TEAM_ALIASES = {
     "la clippers": "los angeles clippers",
@@ -449,7 +449,22 @@ def status_to_mult(status):
 def estimate_player_impact_simple(pos):
     pos = (pos or "").upper()
     return 2.0 if pos in ["PG", "SG", "SF", "PF", "C", "G", "F"] else 1.0
+    
+NBA_TEAM_NAMES = [
+    "Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "Charlotte Hornets", "Chicago Bulls",
+    "Cleveland Cavaliers", "Dallas Mavericks", "Denver Nuggets", "Detroit Pistons",
+    "Golden State Warriors", "Houston Rockets", "Indiana Pacers", "Los Angeles Clippers",
+    "Los Angeles Lakers", "Memphis Grizzlies", "Miami Heat", "Milwaukee Bucks",
+    "Minnesota Timberwolves", "New Orleans Pelicans", "New York Knicks",
+    "Oklahoma City Thunder", "Orlando Magic", "Philadelphia 76ers", "Phoenix Suns",
+    "Portland Trail Blazers", "Sacramento Kings", "San Antonio Spurs", "Toronto Raptors",
+    "Utah Jazz", "Washington Wizards",
+]
 
+NBA_TEAM_NAMES_NORM = {t.lower(): t for t in NBA_TEAM_NAMES}
+
+def normalize_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
 
 def nba_injury_report_page_url(season_label: str) -> str:
     return f"https://official.nba.com/nba-injury-report-{season_label}-season/"
@@ -504,58 +519,109 @@ def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
     r.raise_for_status()
 
     reader = PdfReader(BytesIO(r.content))
-    text = "\n".join((page.extract_text() or "") for page in reader.pages)
 
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    rows = []
-    current_team = None
+    # Try multiple extraction modes (some PDFs only work with layout)
+    all_text_chunks = []
+    for page in reader.pages:
+        txt = ""
+        try:
+            txt = page.extract_text(extraction_mode="layout") or ""
+        except TypeError:
+            # older pypdf versions don't support extraction_mode
+            txt = page.extract_text() or ""
+        except Exception:
+            txt = page.extract_text() or ""
+        all_text_chunks.append(txt)
 
-    # Player line pattern (best-effort):
-    # "Trae Young PG Out Knee soreness" (PDF formats vary; this is tolerant)
-    player_re = re.compile(
-        r"^(?P<Player>[A-Za-z\.\'\- ]+?)\s+(?P<Pos>PG|SG|SF|PF|C|G|F)\s+(?P<Status>Out|Doubtful|Questionable|Probable)\s+(?P<Injury>.+)$"
+    text = "\n".join(all_text_chunks)
+    text = normalize_spaces(text.replace("\xa0", " "))
+
+    # If pypdf extracted nothing, it's probably an image-based PDF (rare but possible)
+    if not text.strip():
+        print("[inj-parse] WARNING: PDF text extraction returned empty text.")
+        return pd.DataFrame(columns=["Team", "Player", "Pos", "Status", "Injury"])
+
+    # Keep line structure for parsing (don’t normalize newlines away)
+    raw_lines = []
+    for chunk in all_text_chunks:
+        for ln in (chunk or "").splitlines():
+            ln = ln.replace("\xa0", " ").strip()
+            if ln:
+                raw_lines.append(ln)
+
+    # Status & position detection
+    statuses = ["Out", "Doubtful", "Questionable", "Probable"]
+    pos_tokens = ["PG", "SG", "SF", "PF", "C", "G", "F"]
+
+    # This pattern is tolerant: find POS then STATUS anywhere later in the line
+    # and treat everything after STATUS as injury text.
+    player_line_re = re.compile(
+        r"(?P<Player>[A-Za-z\.\'\- ]+?)\s+"
+        r"(?P<Pos>PG|SG|SF|PF|C|G|F)\s+"
+        r"(?P<Status>Out|Doubtful|Questionable|Probable)\s*"
+        r"(?P<Injury>.*)$"
     )
 
-    for ln in lines:
-        # team header heuristic: usually all caps team name
-        if ln.isupper() and 6 <= len(ln) <= 40 and "INJURY" not in ln and "REPORT" not in ln and "NBA" not in ln:
-            current_team = ln.title()
+    rows = []
+    current_team = None
+    last_row_idx = None
+
+    for ln in raw_lines:
+        ln_clean = normalize_spaces(ln)
+
+        # Detect team headers by exact match against known team names
+        ln_lower = ln_clean.lower()
+        if ln_lower in NBA_TEAM_NAMES_NORM:
+            current_team = NBA_TEAM_NAMES_NORM[ln_lower]
+            last_row_idx = None
             continue
 
-        if not current_team:
+        # Ignore obvious header/footer noise
+        if any(k in ln_lower for k in ["injury report", "referee", "page", "game date", "report time", "player", "status"]):
             continue
 
-        m = player_re.match(re.sub(r"\s+", " ", ln))
-        if not m:
+        if current_team is None:
             continue
 
-        rows.append(
-            {
-                "Team": current_team,
-                "Player": m.group("Player").strip(),
-                "Pos": m.group("Pos").strip(),
-                "Status": m.group("Status").strip(),
-                "Injury": m.group("Injury").strip(),
-            }
-        )
+        # Try to find a player row
+        m = player_line_re.search(ln_clean)
+        if m:
+            player = normalize_spaces(m.group("Player"))
+            pos = m.group("Pos").strip()
+            status = m.group("Status").strip()
+            injury = normalize_spaces(m.group("Injury"))
 
-    return pd.DataFrame(rows, columns=["Team", "Player", "Pos", "Status", "Injury"])
+            # Guard against false positives: player should be at least two chars
+            if len(player) < 2 or pos not in pos_tokens or status not in statuses:
+                continue
 
+            rows.append(
+                {
+                    "Team": current_team,
+                    "Player": player,
+                    "Pos": pos,
+                    "Status": status,
+                    "Injury": injury,
+                }
+            )
+            last_row_idx = len(rows) - 1
+            continue
 
-def fetch_injury_report_official_nba(game_date_obj: date) -> pd.DataFrame:
-    season_label = infer_season_label(game_date_obj)
-    page_url = nba_injury_report_page_url(season_label)
-    print(f"[inj-fetch] NBA injury report page: {page_url}")
+        # Handle wrapped injury descriptions (continuation lines)
+        if last_row_idx is not None:
+            # If the next line looks like it starts a new player, don't append
+            has_status_word = any(st.lower() in ln_lower for st in [s.lower() for s in statuses])
+            has_pos = any(f" {p} " in f" {ln_clean} " for p in pos_tokens)
+            looks_like_new_player = has_status_word and has_pos
 
-    pdf_url = get_latest_nba_injury_pdf_url_for_date(game_date_obj, season_label=season_label)
-    print(f"[inj-fetch] Using NBA official injury PDF: {pdf_url}")
+            if not looks_like_new_player:
+                extra = normalize_spaces(ln_clean)
+                if extra and rows[last_row_idx]["Injury"]:
+                    rows[last_row_idx]["Injury"] = normalize_spaces(rows[last_row_idx]["Injury"] + " " + extra)
+                elif extra:
+                    rows[last_row_idx]["Injury"] = extra
 
-    df = parse_nba_injury_pdf_to_df(pdf_url)
-    print(f"[inj-fetch] Parsed injury rows: {len(df)}")
-
-    if not df.empty:
-        print("[inj-fetch] Sample injuries:\n", df.head())
-
+    df = pd.DataFrame(rows, columns=["Team", "Player", "Pos", "Status", "Injury"])
     return df
 
 
