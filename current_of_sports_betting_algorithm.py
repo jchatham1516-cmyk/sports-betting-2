@@ -6,7 +6,7 @@
 #     - Pace
 #     - Off/Def efficiency
 # - ESPN injuries with a simple player impact model
-# - Schedule fatigue (rest days)
+# - Schedule fatigue (rest days, approximating B2B / 3-in-4 / 4-in-6)
 # - Head-to-head historical matchup adjustment (currently stubbed)
 # - Local odds CSV for moneyline + spreads
 # - Outputs: model_home_prob, edges, model_spread, ML + spread recommendations
@@ -18,11 +18,29 @@ import sys
 import math
 import argparse
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import numpy as np
 import pandas as pd
 import requests
+
+# -----------------------------
+# Global tuning constants
+# -----------------------------
+
+# Scale factor to convert model score -> spread (bigger = more extreme spreads)
+SPREAD_SCALE_FACTOR = 1.35  # ~1.3–1.4 works well
+
+# Recent form vs full-season weighting (for ORtg/DRtg, etc.)
+RECENT_FORM_WEIGHT = 0.35
+SEASON_FORM_WEIGHT = 1.0 - RECENT_FORM_WEIGHT
+RECENT_GAMES_WINDOW = 10  # last N games for "recent form"
+
+# Betting thresholds (to avoid betting everything)
+EDGE_PROB_THRESHOLD = 0.08       # ~8% edge vs market
+STRONG_EDGE_THRESHOLD = 0.12     # >=12% is "strong"
+SPREAD_EDGE_THRESHOLD = 2.5      # need at least 2.5 pts edge to bet spread
+MIN_MODEL_CONFIDENCE = 0.05      # |model_home_prob - 0.5|
 
 # -----------------------------
 # CSV odds loader
@@ -228,12 +246,16 @@ def fetch_team_ratings_bdl(
     - Pace        = (pts_for + pts_against) / GP
     - Off_Eff/Def_Eff ~ points per "possession" style proxy
     - W, L, W_PCT
+
+    NEW: also computes "recent form" (last RECENT_GAMES_WINDOW games)
+         and blends it in via global RECENT_FORM_WEIGHT.
     """
     # 1) Get teams
     teams_json = bdl_get("teams", params={}, api_key=api_key)
     teams_data = teams_json.get("data", [])
 
     agg = {}
+    games_by_team = {}
     for t in teams_data:
         tid = t["id"]
         agg[tid] = {
@@ -244,6 +266,7 @@ def fetch_team_ratings_bdl(
             "wins": 0,
             "losses": 0,
         }
+        games_by_team[tid] = []
 
     # 2) Get all games for this season up to end_date_iso
     params = {
@@ -277,14 +300,37 @@ def fetch_team_ratings_bdl(
             if home_score == 0 and away_score == 0 and g.get("period", 0) == 0:
                 continue
 
+            # Parse game date for recent-form window
+            g_date_str = g.get("date")
+            try:
+                g_date = datetime.fromisoformat(g_date_str.replace("Z", "+00:00")).date()
+            except Exception:
+                g_date = None
+
             if home_id in agg:
                 agg[home_id]["gp"] += 1
                 agg[home_id]["pts_for"] += home_score
                 agg[home_id]["pts_against"] += away_score
+                if g_date:
+                    games_by_team[home_id].append(
+                        {
+                            "date": g_date,
+                            "pts_for": home_score,
+                            "pts_against": away_score,
+                        }
+                    )
             if away_id in agg:
                 agg[away_id]["gp"] += 1
                 agg[away_id]["pts_for"] += away_score
                 agg[away_id]["pts_against"] += home_score
+                if g_date:
+                    games_by_team[away_id].append(
+                        {
+                            "date": g_date,
+                            "pts_for": away_score,
+                            "pts_against": home_score,
+                        }
+                    )
 
             # wins / losses
             if home_score > away_score:
@@ -301,7 +347,7 @@ def fetch_team_ratings_bdl(
         if not cursor:
             break
 
-    # 3) Build DataFrame with pace + efficiency
+    # 3) Build DataFrame with pace + efficiency + recent-form versions
     rows = []
     for tid, rec in agg.items():
         gp = rec["gp"]
@@ -320,6 +366,30 @@ def fetch_team_ratings_bdl(
         off_eff = rec["pts_for"] / poss
         def_eff = rec["pts_against"] / poss
 
+        # --- Recent form (last N games) ---
+        recent_games = sorted(games_by_team[tid], key=lambda x: x["date"])[
+            -RECENT_GAMES_WINDOW:
+        ]
+        gp_recent = len(recent_games)
+        if gp_recent > 0:
+            pts_for_recent = sum(g["pts_for"] for g in recent_games)
+            pts_against_recent = sum(g["pts_against"] for g in recent_games)
+            total_pts_recent = pts_for_recent + pts_against_recent
+
+            or_p_recent = pts_for_recent / gp_recent
+            dr_p_recent = pts_against_recent / gp_recent
+            pace_recent = total_pts_recent / gp_recent
+            poss_recent = max(total_pts_recent, 1)
+            off_eff_recent = pts_for_recent / poss_recent
+            def_eff_recent = pts_against_recent / poss_recent
+        else:
+            # fall back to season numbers
+            or_p_recent = or_p
+            dr_p_recent = dr_p
+            pace_recent = pace
+            off_eff_recent = off_eff
+            def_eff_recent = def_eff
+
         rows.append(
             {
                 "TEAM_ID": tid,
@@ -333,6 +403,12 @@ def fetch_team_ratings_bdl(
                 "PACE": pace,
                 "OFF_EFF": off_eff,
                 "DEF_EFF": def_eff,
+                # recent-form variants
+                "ORtg_RECENT": or_p_recent,
+                "DRtg_RECENT": dr_p_recent,
+                "PACE_RECENT": pace_recent,
+                "OFF_EFF_RECENT": off_eff_recent,
+                "DEF_EFF_RECENT": def_eff_recent,
             }
         )
 
@@ -376,19 +452,44 @@ MATCHUP_WEIGHTS = np.array(
 )
 
 
+def _blend_stat(row, base_col, recent_col):
+    """
+    Blend season and recent values for a given stat, if recent is available.
+    """
+    base_val = float(row[base_col])
+    if recent_col in row.index:
+        recent_val = float(row[recent_col])
+        return SEASON_FORM_WEIGHT * base_val + RECENT_FORM_WEIGHT * recent_val
+    return base_val
+
+
 def build_matchup_features(home_row, away_row):
     """
     Build a feature vector [home_edge, d_ORtg, d_DRtg, d_pace, d_off_eff, d_def_eff]
     for the home team.
+
+    Uses blended season+recent stats for ORtg/DRtg/PACE/OFF_EFF/DEF_EFF.
     """
     h = home_row
     a = away_row
 
-    d_ORtg = h["ORtg"] - a["ORtg"]
-    d_DRtg = a["DRtg"] - h["DRtg"]  # lower DRtg is better
-    d_pace = h["PACE"] - a["PACE"]
-    d_off_eff = h["OFF_EFF"] - a["OFF_EFF"]
-    d_def_eff = a["DEF_EFF"] - h["DEF_EFF"]
+    # Blend season + recent form
+    h_ORtg = _blend_stat(h, "ORtg", "ORtg_RECENT")
+    a_ORtg = _blend_stat(a, "ORtg", "ORtg_RECENT")
+    h_DRtg = _blend_stat(h, "DRtg", "DRtg_RECENT")
+    a_DRtg = _blend_stat(a, "DRtg", "DRtg_RECENT")
+    h_PACE = _blend_stat(h, "PACE", "PACE_RECENT")
+    a_PACE = _blend_stat(a, "PACE", "PACE_RECENT")
+    h_OFF = _blend_stat(h, "OFF_EFF", "OFF_EFF_RECENT")
+    a_OFF = _blend_stat(a, "OFF_EFF", "OFF_EFF_RECENT")
+    h_DEF = _blend_stat(h, "DEF_EFF", "DEF_EFF_RECENT")
+    a_DEF = _blend_stat(a, "DEF_EFF", "DEF_EFF_RECENT")
+
+    d_ORtg = h_ORtg - a_ORtg
+    d_DRtg = a_DRtg - h_DRtg  # lower DRtg is better
+    d_pace = h_PACE - a_PACE
+    d_off_eff = h_OFF - a_OFF
+    d_def_eff = a_DEF - h_DEF
 
     home_edge = 1.0  # this acts like a constant/home-court bias term
 
@@ -416,8 +517,6 @@ def season_matchup_base_score(home_row, away_row):
        - Pace
        - Off/Def efficiency
        - Home-court edge (via constant feature)
-
-    The actual weights are stored in MATCHUP_WEIGHTS and can be retrained.
     """
     x = build_matchup_features(home_row, away_row)
     return float(np.dot(MATCHUP_WEIGHTS, x))
@@ -434,12 +533,14 @@ def score_to_prob(score, lam=0.25):
     return 1.0 / (1.0 + math.exp(-lam * score))
 
 
-def score_to_spread(score, points_per_logit=1.3):
+def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
     """
     Convert model 'score' into a *Vegas-style* point spread for the HOME team.
 
     - Negative number  => home is favored (e.g., -5.5 means home -5.5)
     - Positive number  => home is an underdog (e.g., +3.5 means home +3.5)
+
+    Uses SPREAD_SCALE_FACTOR to scale raw scores into realistic NBA spread sizes.
     """
     # Positive score = home stronger → home should be a minus favorite
     return -score * points_per_logit
@@ -723,11 +824,6 @@ def compute_head_to_head_adjustment(home_team_id, away_team_id, season_year, api
     """
     TEMP STUB: head-to-head adjustment is currently disabled to avoid additional
     BallDontLie calls and rate limits. Returns 0.0 so it won't affect the score.
-
-    You can later replace this with a real implementation that:
-      - fetches historical games between these two teams over the last
-        `max_seasons_back` seasons, and
-      - computes an average margin to convert into a small adjustment.
     """
     return 0.0
 
@@ -785,19 +881,24 @@ def rest_days_to_fatigue_adjustment(days_rest):
     """
     Map rest days to a fatigue adjustment in points (for the team's score).
     Positive = more rested (helps team), negative = tired.
+
+    This is a simple approximation of:
+    - Back-to-back (1 day rest)       -> strong negative
+    - 3-in-4 type situations (~2 d)   -> mild negative
+    - 4+ days rest                    -> small positive
     """
     if days_rest is None:
         return 0.0
     if days_rest <= 1:
-        # back-to-back or 1 day rest
+        # back-to-back or extremely short rest
         return -2.0
     if days_rest == 2:
-        # 3 in 4 type schedule
+        # often corresponds to 3-in-4 or 4-in-6 type stretches
         return -1.0
     if days_rest >= 4:
         # very rested
         return +0.5
-    # 3 days rest → neutral
+    # 3 days rest → roughly neutral
     return 0.0
 
 
@@ -927,10 +1028,11 @@ def run_daily_probs_for_date(
     """
     Run the full model for one NBA date.
 
-    NOTE: This version focuses recommendations on the model's likelihood of being correct,
-    NOT on "value" vs the market. Edges vs the market are still computed for reference,
-    but ml_recommendation / spread_recommendation / primary_recommendation are driven
-    by model probabilities only.
+    Upgraded version:
+    - Uses blended season + recent form for team strength.
+    - Uses ESPN injuries + rest-day fatigue.
+    - Scales spreads by SPREAD_SCALE_FACTOR.
+    - Recommendations are filtered: no bet unless edge/confidence is large enough.
     """
     if api_key is None:
         api_key = get_bdl_api_key()
@@ -968,7 +1070,7 @@ def run_daily_probs_for_date(
         home_id = int(home_row["TEAM_ID"])
         away_id = int(away_row["TEAM_ID"])
 
-        # Base matchup
+        # Base matchup (season + recent form blended)
         base_score = season_matchup_base_score(home_row, away_row)
 
         # Injuries
@@ -981,7 +1083,7 @@ def run_daily_probs_for_date(
             f"{away_name} injuries={len(away_inj)}, inj_adj={inj_adj:.3f}"
         )
 
-        # Schedule fatigue
+        # Schedule fatigue (rest days as B2B / 3-in-4 approximation)
         home_last = get_team_last_game_date(home_id, game_date_obj, season_year, api_key)
         away_last = get_team_last_game_date(away_id, game_date_obj, season_year, api_key)
 
@@ -1004,7 +1106,7 @@ def run_daily_probs_for_date(
         model_spread = score_to_spread(adj_score)  # VEGAS STYLE: negative = home favorite
 
         # -------------------------
-        # Market odds (ML) – still computed, but NOT used for decisions
+        # Market odds (ML)
         # -------------------------
         key = (home_name, away_name)
         odds_info = odds_dict.get(key)
@@ -1034,7 +1136,7 @@ def run_daily_probs_for_date(
         else:
             home_imp = away_imp = 0.5
 
-        # Raw edges vs market (KEPT for reference only)
+        # Raw edges vs market
         edge_home_raw = model_home_prob - home_imp
         edge_away_raw = (1.0 - model_home_prob) - away_imp
 
@@ -1054,38 +1156,54 @@ def run_daily_probs_for_date(
             spread_edge_home = None
 
         # -------------------------
-        # NEW: Recommendation logic focused on correctness
+        # NEW: Recommendation logic with filters
         # -------------------------
 
-        # 1) Moneyline recommendation: based ONLY on model_home_prob
-        #    (ignores market probabilities)
-        if model_home_prob >= 0.60:
-            ml_rec = "Model PICK: HOME (strong)"
-        elif model_home_prob <= 0.40:
-            ml_rec = "Model PICK: AWAY (strong)"
-        elif 0.55 <= model_home_prob < 0.60:
-            ml_rec = "Model lean: HOME"
-        elif 0.40 < model_home_prob <= 0.45:
-            ml_rec = "Model lean: AWAY"
-        else:
-            ml_rec = "Too close to call (coin flip)"
+        value_edge = abs(edge_home)                     # vs market
+        model_confidence = abs(model_home_prob - 0.5)   # vs 0.5 coin flip
 
-        # 2) Spread recommendation: based on model_spread_home vs 0
-        #    (which side the model thinks is stronger in spread terms),
-        #    not on "value" vs current line.
-        if model_spread <= -5:
-            spread_rec = "Model PICK ATS: HOME (clear favorite)"
-        elif model_spread >= 5:
-            spread_rec = "Model PICK ATS: AWAY (clear underdog)"
-        elif -5 < model_spread <= -2:
-            spread_rec = "Model lean ATS: HOME"
-        elif 2 <= model_spread < 5:
-            spread_rec = "Model lean ATS: AWAY"
+        # 1) Moneyline recommendation
+        if (value_edge < EDGE_PROB_THRESHOLD) or (model_confidence < MIN_MODEL_CONFIDENCE):
+            ml_rec = "No ML bet (edge/conf too small)"
         else:
-            spread_rec = "Too close to call ATS"
+            if model_home_prob > 0.5:
+                ml_rec = (
+                    "Model PICK: HOME (strong)"
+                    if value_edge >= STRONG_EDGE_THRESHOLD
+                    else "Model lean: HOME"
+                )
+            else:
+                ml_rec = (
+                    "Model PICK: AWAY (strong)"
+                    if value_edge >= STRONG_EDGE_THRESHOLD
+                    else "Model lean: AWAY"
+                )
 
-        # 3) Primary recommendation: just mirror the ML call
-        primary_rec = ml_rec
+        # 2) Spread recommendation (requires a line + edge)
+        if (home_spread is None) or (spread_edge_home is None):
+            spread_rec = "No spread bet (no line)"
+        else:
+            if abs(spread_edge_home) < SPREAD_EDGE_THRESHOLD:
+                spread_rec = "Too close to call ATS (edge too small)"
+            else:
+                # If market spread is bigger than our spread, we like the dog
+                if spread_edge_home > 0:
+                    spread_rec = "Model lean ATS: AWAY"
+                else:
+                    spread_rec = "Model lean ATS: HOME"
+
+        # 3) Primary recommendation – only bet when at least one side passes filters
+        if ("No ML bet" in ml_rec) and (
+            "Too close" in spread_rec or "No spread" in spread_rec
+        ):
+            primary_rec = "NO BET – edges too small"
+        elif "No spread bet" in spread_rec or "Too close" in spread_rec:
+            primary_rec = ml_rec
+        elif "No ML bet" in ml_rec:
+            primary_rec = spread_rec
+        else:
+            # When both exist, prefer spread
+            primary_rec = spread_rec
 
         rows.append(
             {
@@ -1110,12 +1228,11 @@ def run_daily_probs_for_date(
     df = pd.DataFrame(rows)
 
     # ------------------------------------
-    # CONFIDENCE metric (instead of "pure value")
-    # abs_edge_home is now |model_home_prob - 0.5|
+    # Confidence metric (model vs 0.5)
     # ------------------------------------
     df["abs_edge_home"] = (df["model_home_prob"] - 0.5).abs()
 
-    def classify_confidence(conf):
+    def classify_conf(conf):
         if conf >= 0.20:
             return "HIGH CONFIDENCE"
         elif conf >= 0.10:
@@ -1123,7 +1240,7 @@ def run_daily_probs_for_date(
         else:
             return "LOW CONFIDENCE"
 
-    df["value_tier"] = df["abs_edge_home"].apply(classify_confidence)
+    df["value_tier"] = df["abs_edge_home"].apply(classify_conf)
 
     # ------------------------------------
     # Sort by strongest model-confidence
