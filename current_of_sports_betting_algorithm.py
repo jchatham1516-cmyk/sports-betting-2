@@ -779,10 +779,9 @@ def play_pass_rule(
     row: pd.Series,
     *,
     require_pick: bool = True,
-    if require_value_tier and (value_tier != require_value_tier):
-    return "PASS"
-    min_confidence: str = "MEDIUM",  # MEDIUM or HIGH
-    max_abs_moneyline: Optional[int] = 400,  # skip extreme prices in ML
+    require_value_tier: str = "HIGH VALUE",
+    min_confidence: str = "MEDIUM",  # LOW / MEDIUM / HIGH
+    max_abs_moneyline: Optional[int] = 400,  # skip extreme prices in ML (set None to disable)
 ) -> str:
     primary = str(row.get("primary_recommendation", ""))
     value_tier = str(row.get("value_tier", ""))
@@ -790,6 +789,7 @@ def play_pass_rule(
 
     if require_pick and ("PICK" not in primary):
         return "PASS"
+
     if require_value_tier and (value_tier != require_value_tier):
         return "PASS"
 
