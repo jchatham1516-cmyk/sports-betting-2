@@ -530,6 +530,51 @@ def status_to_mult(status):
             return mult
     return 1.0
 
+
+
+def estimate_player_impact_from_reason(reason: str) -> float:
+    """Heuristic impact score (no positions/roster needed).
+
+    Returns a rough 'points' value used by injury_adjustment. Status probability is handled
+    separately via status_to_mult().
+    """
+    r = (reason or "").lower()
+
+    # Ignore non-rotation designations here; filtering happens earlier.
+    base = 2.0
+
+    # Lower-impact reasons
+    if "illness" in r or "sick" in r:
+        base = 1.0
+    if "personal" in r:
+        base = 1.0
+
+    # Higher-impact / longer-term injuries
+    if "surgery" in r or "recovery" in r or "stress reaction" in r or "fracture" in r:
+        base = max(base, 2.6)
+
+    # Common high-impact body parts
+    if "achilles" in r:
+        base = max(base, 3.2)
+    if "knee" in r:
+        base = max(base, 2.8)
+    if "hamstring" in r:
+        base = max(base, 2.4)
+    if "ankle" in r:
+        base = max(base, 2.2)
+    if "foot" in r:
+        base = max(base, 2.3)
+    if "shoulder" in r:
+        base = max(base, 2.1)
+    if "concussion" in r or "protocol" in r:
+        base = max(base, 1.8)
+
+    # Small stuff
+    if "thumb" in r or "hand" in r or "finger" in r or "toe" in r:
+        base = min(base, 1.6) if base <= 2.0 else base
+
+    return float(base)
+
 def estimate_player_impact_simple(pos):
     pos = (pos or "").upper()
     if pos in ["PG", "SG", "SF", "PF", "C"]:
@@ -623,6 +668,7 @@ def fetch_injury_report_official_nba(game_date_obj: date) -> pd.DataFrame:
     return df
 
 def build_injury_list_for_team_official(team_name: str, injury_df: pd.DataFrame):
+    """Return list of (player_name, role, status_multiplier, impact_points) for a team."""
     if injury_df is None or injury_df.empty or "Team" not in injury_df.columns:
         return []
 
@@ -642,12 +688,27 @@ def build_injury_list_for_team_official(team_name: str, injury_df: pd.DataFrame)
 
     injuries = []
     for _, row in df_team.iterrows():
-        name = row.get("Player", "")
-        pos = row.get("Pos", "")
-        status = row.get("Status", "")
-        role = guess_role(name, pos)
+        name = str(row.get("Player", "") or "").strip()
+        status = str(row.get("Status", "") or "").strip()
+
+        # Reason column name depends on parser; support both.
+        reason = str(row.get("Reason", "") or row.get("Injury", "") or "").strip()
+        reason_l = reason.lower()
+
+        # ✅ Filter out non-rotation / G-League / two-way noise (these were inflating counts)
+        if ("g league" in reason_l) or ("two-way" in reason_l) or ("two way" in reason_l) or ("on assignment" in reason_l):
+            continue
+
+        # If no player name or status, skip
+        if not name or not status:
+            continue
+
+        # Role guess is weak without positions; treat as rotation by default.
+        role = "rotation"
+
         mult = status_to_mult(status)
-        impact_points = estimate_player_impact_simple(pos)
+        impact_points = estimate_player_impact_from_reason(reason)
+
         injuries.append((name, role, mult, impact_points))
 
     return injuries
@@ -1006,3 +1067,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+
