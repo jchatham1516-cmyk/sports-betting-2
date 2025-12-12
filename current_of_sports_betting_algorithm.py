@@ -779,7 +779,8 @@ def play_pass_rule(
     row: pd.Series,
     *,
     require_pick: bool = True,
-    require_value_tier: str = "HIGH VALUE",
+    if require_value_tier and (value_tier != require_value_tier):
+    return "PASS"
     min_confidence: str = "MEDIUM",  # MEDIUM or HIGH
     max_abs_moneyline: Optional[int] = 400,  # skip extreme prices in ML
 ) -> str:
