@@ -412,6 +412,107 @@ NBA_TEAM_NAMES = [
 ]
 NBA_TEAM_NAMES_NORM = {normalize_team_name(t): t for t in NBA_TEAM_NAMES}
 
+
+STATUS_WORDS = {"Out", "Doubtful", "Questionable", "Probable", "Available"}
+
+def parse_tokens_to_injuries(tokens: list[str]) -> pd.DataFrame:
+    """Parse NBA injury PDF when extracted text is one-word-per-line."""
+    team_tokens_map: list[tuple[int, list[str], str]] = []
+    for t in NBA_TEAM_NAMES:
+        tt = t.split()
+        team_tokens_map.append((len(tt), tt, t))
+    team_tokens_map.sort(reverse=True)
+
+    def match_team(i: int):
+        for L, tt, full in team_tokens_map:
+            if i + L <= len(tokens) and tokens[i:i+L] == tt:
+                return full, L
+        return None, 0
+
+    def is_header(tok: str) -> bool:
+        return tok in {
+            "Injury", "Report:", "Page", "of", "Game", "Date", "Time", "Matchup",
+            "Team", "Player", "Name", "Current", "Status", "Reason", "(ET)"
+        }
+
+    rows: list[dict] = []
+    current_team: str | None = None
+    i = 0
+
+    while i < len(tokens):
+        tok = tokens[i]
+
+        if tok in {"NOT", "YET", "SUBMITTED"}:
+            i += 1
+            continue
+        if is_header(tok) or tok.startswith("12/") or tok.endswith("(ET)"):
+            i += 1
+            continue
+
+        if "@" in tok and len(tok) <= 10:
+            i += 1
+            team, L = match_team(i)
+            if team:
+                current_team = team
+                i += L
+            continue
+
+        team, L = match_team(i)
+        if team:
+            current_team = team
+            i += L
+            continue
+
+        if "," in tok:
+            player_parts = [tok]
+            j = i + 1
+            while j < len(tokens) and tokens[j] not in STATUS_WORDS:
+                if "@" in tokens[j] and len(tokens[j]) <= 10:
+                    break
+                t2, L2 = match_team(j)
+                if t2:
+                    break
+                if is_header(tokens[j]) or tokens[j].startswith("12/"):
+                    break
+                player_parts.append(tokens[j])
+                j += 1
+
+            if j >= len(tokens) or tokens[j] not in STATUS_WORDS:
+                i += 1
+                continue
+
+            status = tokens[j]
+            player = normalize_spaces(" ".join(player_parts))
+
+            reason_parts = []
+            k = j + 1
+            while k < len(tokens):
+                if tokens[k] in STATUS_WORDS:
+                    break
+                if "," in tokens[k]:
+                    break
+                if "@" in tokens[k] and len(tokens[k]) <= 10:
+                    break
+                t3, L3 = match_team(k)
+                if t3:
+                    break
+                if is_header(tokens[k]) or tokens[k].startswith("12/"):
+                    break
+                reason_parts.append(tokens[k])
+                k += 1
+
+            reason = normalize_spaces(" ".join(reason_parts))
+            if current_team:
+                rows.append({"Team": current_team, "Player": player, "Status": status, "Reason": reason})
+
+            i = k
+            continue
+
+        i += 1
+
+    return pd.DataFrame(rows, columns=["Team", "Player", "Status", "Reason"])
+
+
 def guess_role(player_name, pos):
     pos = (pos or "").upper()
     if pos in ["PG", "SG", "SF", "PF"]:
@@ -470,6 +571,7 @@ def get_latest_nba_injury_pdf_url_for_date(game_date_obj: date, season_label: st
 
     return pdfs[-1]
 
+
 def download_pdf_bytes(url: str, timeout: int = 30) -> bytes:
     headers = {
         "User-Agent": USER_AGENT,
@@ -485,125 +587,28 @@ def download_pdf_bytes(url: str, timeout: int = 30) -> bytes:
     return data
 
 
-STATUS_SET = {"Out", "Doubtful", "Questionable", "Probable", "Available"}
-
-
-def parse_lines_to_injuries(raw_lines: list[str]) -> pd.DataFrame:
-    def _norm(s: str) -> str:
-        return normalize_spaces(s)
-
-    def split_cols(line: str):
-        return [c.strip() for c in re.split(r"\s{2,}", line) if c.strip()]
-
-    def looks_like_team_header(line: str):
-        if "," in line:
-            return False
-        if any(st in line.split() for st in STATUS_SET):
-            return False
-        if any(k in line for k in ["Injury Report", "Game Date", "Matchup", "Page"]):
-            return False
-        if "NOT YET SUBMITTED" in line:
-            return False
-        return len(line.split()) >= 2 and len(line) <= 40
-
-    rows: list[dict] = []
-    current_team: str | None = None
-    pending_idx: int | None = None  # index of last row to append wrapped reason
-
-    for raw in raw_lines:
-        line = _norm(raw)
-        if not line:
-            continue
-
-        # Skip obvious noise
-        if (line.startswith("Page ") or "Injury Report" in line or "Game Date" in line
-            or "NOT YET SUBMITTED" in line):
-            continue
-
-        # Append wrapped reason lines (e.g., "Sprain" / "Fracture" on next line)
-        if pending_idx is not None:
-            if ("," not in line) and not any(st in line.split() for st in STATUS_SET) and len(line.split()) <= 8:
-                rows[pending_idx]["Reason"] = _norm(rows[pending_idx]["Reason"] + " " + line)
-                pending_idx = None
-                continue
-            pending_idx = None
-
-        # Team header format (e.g., "Detroit Pistons")
-        if looks_like_team_header(line):
-            # Prefer canonical NBA team names when possible
-            norm = normalize_team_name(line)
-            current_team = NBA_TEAM_NAMES_NORM.get(norm, line)
-            continue
-
-        cols = split_cols(line)
-
-        # Find status token anywhere on the line
-        status = next((st for st in STATUS_SET if re.search(rf"\b{st}\b", line)), None)
-        if not status:
-            continue
-
-        team = None
-        player = None
-        reason = ""
-
-        # Matchup line format: "CHI@CHA  Chicago Bulls  Collins, Zach  Probable  Injury/Illness-..."
-        if cols and "@" in cols[0]:
-            parts0 = cols[0].split()
-            if parts0 and "@" in parts0[0] and len(parts0) >= 2:
-                team = " ".join(parts0[1:])
-            if len(cols) >= 2 and "," in cols[1]:
-                player = cols[1]
-            if len(cols) >= 4:
-                reason = cols[3]
-            elif len(cols) == 3:
-                reason = ""
-
-        # Team header + player row: "Dosunmu, Ayo  Out  Injury/Illness-..."
-        elif current_team and cols and "," in cols[0]:
-            team = current_team
-            player = cols[0]
-            if len(cols) >= 3:
-                reason = cols[2]
-            else:
-                reason = ""
-
-        if team and player:
-            rows.append({
-                "Team": _norm(team),
-                "Player": _norm(player),
-                "Status": status,
-                "Reason": _norm(reason),
-            })
-            # If reason is empty/short, likely wrapped to the next line
-            if rows[-1]["Reason"] == "" or len(rows[-1]["Reason"].split()) <= 2:
-                pending_idx = len(rows) - 1
-
-    return pd.DataFrame(rows, columns=["Team", "Player", "Status", "Reason"])
-
-
 def parse_nba_injury_pdf_to_df(pdf_bytes: bytes) -> pd.DataFrame:
     reader = PdfReader(BytesIO(pdf_bytes))
-    raw_lines: list[str] = []
 
+    all_text = []
     for page in reader.pages:
-        text = page.extract_text() or ""
-        for ln in text.splitlines():
-            ln = ln.strip()
-            if ln:
-                raw_lines.append(ln)
+        t = page.extract_text() or ""
+        if t:
+            all_text.append(t)
 
-    injury_df = parse_lines_to_injuries(raw_lines)
+    raw = "\n".join(all_text)
+    tokens = raw.replace("\xa0", " ").split()
+
+    injury_df = parse_tokens_to_injuries(tokens)
     print(f"[inj-fetch] Parsed injury rows: {len(injury_df)}")
 
     if injury_df.empty:
         os.makedirs("results", exist_ok=True)
         with open("results/injury_debug.txt", "w", encoding="utf-8") as f:
-            for ln in raw_lines[:250]:
-                f.write(ln + "\n")
-        print("[inj-parse] Wrote debug extract sample to results/injury_debug.txt")
+            f.write(raw[:20000])
+        print("[inj-parse] Wrote debug raw text to results/injury_debug.txt")
 
     return injury_df
-
 
 def fetch_injury_report_official_nba(game_date_obj: date) -> pd.DataFrame:
     season_label = "2025-26"
