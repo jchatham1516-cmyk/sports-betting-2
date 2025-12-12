@@ -9,7 +9,7 @@
 #     - Off/Def efficiency
 # - Recent form weighting (season + last N games)
 # - Official NBA injury report (PDF) with a simple player impact model
-# - Schedule fatigue (rest days → B2B / 3-in-4 approximation)
+# - Schedule fatigue (rest days â†’ B2B / 3-in-4 approximation)
 # - Local odds CSV for moneyline + spreads
 # - Outputs: model_home_prob, edges, model_spread, ML + spread recommendations
 
@@ -33,8 +33,7 @@ from pypdf import PdfReader
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
-SPREAD_SCALE_FACTOR = 1.35
-
+SPREAD_SCALE_FACTOR = 4.0
 RECENT_FORM_WEIGHT = 0.35
 SEASON_FORM_WEIGHT = 1.0 - RECENT_FORM_WEIGHT
 RECENT_GAMES_WINDOW = 10
@@ -384,36 +383,14 @@ def score_to_prob(score, lam=0.25):
     return 1.0 / (1.0 + math.exp(-lam * score))
 
 def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
-    return -score * points_per_logit
+    """Map the model score to an estimated home spread.
 
-
-# -----------------------------
-# Injuries (Official NBA PDF)
-# -----------------------------
-
-INJURY_WEIGHTS = {"star": 3.0, "starter": 1.5, "rotation": 1.0, "bench": 0.5}
-
-INJURY_STATUS_MULTIPLIER = {
-    "out": 1.0,
-    "doubtful": 0.75,
-    "questionable": 0.5,
-    "probable": 0.25,
-}
-
-NBA_TEAM_NAMES = [
-    "Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "Charlotte Hornets", "Chicago Bulls",
-    "Cleveland Cavaliers", "Dallas Mavericks", "Denver Nuggets", "Detroit Pistons",
-    "Golden State Warriors", "Houston Rockets", "Indiana Pacers", "Los Angeles Clippers",
-    "Los Angeles Lakers", "Memphis Grizzlies", "Miami Heat", "Milwaukee Bucks",
-    "Minnesota Timberwolves", "New Orleans Pelicans", "New York Knicks",
-    "Oklahoma City Thunder", "Orlando Magic", "Philadelphia 76ers", "Phoenix Suns",
-    "Portland Trail Blazers", "Sacramento Kings", "San Antonio Spurs", "Toronto Raptors",
-    "Utah Jazz", "Washington Wizards",
-]
-NBA_TEAM_NAMES_NORM = {normalize_team_name(t): t for t in NBA_TEAM_NAMES}
-
-
-STATUS_WORDS = {"Out", "Doubtful", "Questionable", "Probable", "Available"}
+    We intentionally use a slightly nonlinear mapping to avoid overly-compressed spreads
+    when the underlying score is tuned primarily for win-prob classification.
+    Negative spread = home favored.
+    """
+    s = float(score)
+    return -(s * points_per_logit + (s ** 2) * 1.5)
 
 def parse_tokens_to_injuries(tokens: list[str]) -> pd.DataFrame:
     """Parse NBA injury PDF when extracted text is one-word-per-line."""
@@ -695,7 +672,7 @@ def build_injury_list_for_team_official(team_name: str, injury_df: pd.DataFrame)
         reason = str(row.get("Reason", "") or row.get("Injury", "") or "").strip()
         reason_l = reason.lower()
 
-        # ✅ Filter out non-rotation / G-League / two-way noise (these were inflating counts)
+        # âœ… Filter out non-rotation / G-League / two-way noise (these were inflating counts)
         if ("g league" in reason_l) or ("two-way" in reason_l) or ("two way" in reason_l) or ("on assignment" in reason_l):
             continue
 
@@ -960,13 +937,13 @@ def run_daily_probs_for_date(
                 spread_rec = "Model lean ATS: AWAY" if spread_edge_home > 0 else "Model lean ATS: HOME"
 
         if ("No ML bet" in ml_rec) and ("Too close" in spread_rec or "No spread" in spread_rec):
-            primary_rec = "NO BET – edges too small"
+            primary_rec = "NO BET â€“ edges too small"
         elif "No spread bet" in spread_rec or "Too close" in spread_rec:
             primary_rec = ml_rec
-        elif "No ML bet" in ml_rec:
+        elif ("No ML bet" in ml_rec) and ("Model lean ATS" in spread_rec):
             primary_rec = spread_rec
         else:
-            primary_rec = spread_rec
+            primary_rec = "NO BET â€“ edges too small"
 
         rows.append({
             "date": game_date,
@@ -1067,4 +1044,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
-
