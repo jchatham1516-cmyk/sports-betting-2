@@ -3,21 +3,18 @@
 # Daily NBA betting model using BallDontLie + Official NBA injury report PDF + local odds CSV.
 #
 # Adds:
-# - Play/Pass filter
-# - Bankroll sizing (flat vs Kelly)
-# - Backtest mode using BallDontLie final scores + your odds CSVs
+# ✅ Units + $ sizing (Bankroll=$250, 1 unit=4%=$10)
+# ✅ play_pass column
 #
-# Requires:
-# - recommendations.py in same folder (add_recommendations_to_df, Thresholds, etc.)
+# Outputs: model_home_prob, edges, model_spread, ML + spread recommendations + units
 
 import os
 import re
 import math
 import argparse
 import time
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from io import BytesIO
-from typing import Optional, Dict, Tuple, Any
 
 import numpy as np
 import pandas as pd
@@ -25,11 +22,8 @@ import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
-from recommendations import add_recommendations_to_df, Thresholds
-
-
 # -----------------------------
-# Global tuning constants (model)
+# Global tuning constants
 # -----------------------------
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
@@ -38,6 +32,18 @@ SPREAD_SCALE_FACTOR = 4.0
 RECENT_FORM_WEIGHT = 0.35
 SEASON_FORM_WEIGHT = 1.0 - RECENT_FORM_WEIGHT
 RECENT_GAMES_WINDOW = 10
+
+EDGE_PROB_THRESHOLD = 0.08
+STRONG_EDGE_THRESHOLD = 0.12
+SPREAD_EDGE_THRESHOLD = 2.5
+MIN_MODEL_CONFIDENCE = 0.05
+
+# -----------------------------
+# ✅ Units / bankroll config
+# -----------------------------
+BANKROLL_DOLLARS = 250.0
+UNIT_PCT_OF_BANKROLL = 0.04   # 4%
+UNIT_DOLLARS = BANKROLL_DOLLARS * UNIT_PCT_OF_BANKROLL  # = $10.00
 
 
 # -----------------------------
@@ -52,38 +58,6 @@ def normalize_team_name(s: str) -> str:
     s = s.replace(".", "")
     return s
 
-def season_start_year_for_date(d: date) -> int:
-    # NBA season starts ~Oct; before Aug belongs to prior season year label for BDL
-    return d.year - 1 if d.month < 8 else d.year
-
-def american_to_implied_prob(odds):
-    odds = float(odds)
-    if odds < 0:
-        p = (-odds) / ((-odds) + 100.0)
-    else:
-        p = 100.0 / (odds + 100.0)
-    return max(min(p, 0.9999), 0.0001)
-
-def american_to_decimal(odds: float) -> float:
-    odds = float(odds)
-    if odds > 0:
-        return 1.0 + odds / 100.0
-    return 1.0 + 100.0 / abs(odds)
-
-def safe_float(x) -> Optional[float]:
-    if x is None:
-        return None
-    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
-        return None
-    try:
-        return float(x)
-    except Exception:
-        return None
-
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
-
-
 # -----------------------------
 # CSV odds loader
 # -----------------------------
@@ -95,7 +69,7 @@ def fetch_odds_for_date_from_csv(game_date_str: str):
     """
     fname = os.path.join("odds", f"odds_{game_date_str.replace('/', '-')}.csv")
     if not os.path.exists(fname):
-        print(f"[odds_csv] No odds file found at {fname}.")
+        print(f"[odds_csv] No odds file found at {fname}. Using 0.5 market defaults.")
         return {}, {}
 
     print(f"[odds_csv] Loading odds from {fname}")
@@ -131,15 +105,49 @@ def fetch_odds_for_date_from_csv(game_date_str: str):
         away = str(row["away"]).strip()
         key = (home, away)
 
-        home_ml = _parse_number(row.get("home_ml"))
-        away_ml = _parse_number(row.get("away_ml"))
-        home_spread = _parse_number(row.get("home_spread")) if "home_spread" in df.columns else None
+        raw_home_ml = row.get("home_ml")
+        raw_away_ml = row.get("away_ml")
+        raw_home_spread = row.get("home_spread") if "home_spread" in df.columns else None
+
+        print(
+            "[DEBUG row]",
+            key,
+            "| raw home_ml=",
+            raw_home_ml,
+            "| raw away_ml=",
+            raw_away_ml,
+            "| raw home_spread=",
+            raw_home_spread,
+        )
+
+        home_ml = _parse_number(raw_home_ml)
+        away_ml = _parse_number(raw_away_ml)
+        home_spread = _parse_number(raw_home_spread)
 
         odds_dict[key] = {"home_ml": home_ml, "away_ml": away_ml, "home_spread": home_spread}
         if home_spread is not None:
             spreads_dict[key] = home_spread
 
+    print(f"[odds_csv] Built odds for {len(odds_dict)} games.")
+    print("[odds_csv] Sample keys:", list(odds_dict.keys())[:5])
     return odds_dict, spreads_dict
+
+
+# -----------------------------
+# Season / date helpers
+# -----------------------------
+
+def season_start_year_for_date(d: date) -> int:
+    # NBA season starts ~Oct; before Aug belongs to prior season year label for BDL
+    return d.year - 1 if d.month < 8 else d.year
+
+def american_to_implied_prob(odds):
+    odds = float(odds)
+    if odds < 0:
+        p = (-odds) / ((-odds) + 100.0)
+    else:
+        p = 100.0 / (odds + 100.0)
+    return max(min(p, 0.9999), 0.0001)
 
 
 # -----------------------------
@@ -151,7 +159,9 @@ BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
 def get_bdl_api_key():
     api_key = os.environ.get("BALLDONTLIE_API_KEY")
     if not api_key:
-        raise RuntimeError("BALLDONTLIE_API_KEY environment variable is not set.")
+        raise RuntimeError(
+            "BALLDONTLIE_API_KEY environment variable is not set."
+        )
     return api_key
 
 def bdl_get(path, params=None, api_key=None, max_retries=5):
@@ -376,262 +386,20 @@ def score_to_prob(score, lam=0.25):
     return 1.0 / (1.0 + math.exp(-lam * score))
 
 def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
-    """Vegas-style HOME spread: negative=home favored, positive=home dog."""
+    """Map the model score to an estimated home spread.
+    Negative spread = home favored.
+    """
     s = float(score)
     return -(s * points_per_logit + (s ** 2) * 1.5)
 
 
 # -----------------------------
-# Injuries
+# Injury report (your existing code continues here)
 # -----------------------------
-# NOTE: Your original snippet references these globals:
-# NBA_TEAM_NAMES, STATUS_WORDS, INJURY_STATUS_MULTIPLIER, INJURY_WEIGHTS
-# Keep your existing definitions in this file or import them.
+# NOTE: your file references NBA_TEAM_NAMES, STATUS_WORDS, INJURY_STATUS_MULTIPLIER, INJURY_WEIGHTS
+# Keep those definitions exactly as you currently have them in your project.
 
-def status_to_mult(status):
-    if not isinstance(status, str):
-        return 1.0
-    s = status.lower()
-    for key, mult in INJURY_STATUS_MULTIPLIER.items():
-        if key in s:
-            return mult
-    return 1.0
-
-def estimate_player_impact_from_reason(reason: str) -> float:
-    r = (reason or "").lower()
-    base = 2.0
-    if "illness" in r or "sick" in r or "personal" in r:
-        base = 1.0
-    if "surgery" in r or "recovery" in r or "stress reaction" in r or "fracture" in r:
-        base = max(base, 2.6)
-    if "achilles" in r:
-        base = max(base, 3.2)
-    if "knee" in r:
-        base = max(base, 2.8)
-    if "hamstring" in r:
-        base = max(base, 2.4)
-    if "ankle" in r:
-        base = max(base, 2.2)
-    if "foot" in r:
-        base = max(base, 2.3)
-    if "shoulder" in r:
-        base = max(base, 2.1)
-    if "concussion" in r or "protocol" in r:
-        base = max(base, 1.8)
-    if "thumb" in r or "hand" in r or "finger" in r or "toe" in r:
-        base = min(base, 1.6) if base <= 2.0 else base
-    return float(base)
-
-def nba_injury_report_page_url(season_label: str):
-    return f"https://official.nba.com/nba-injury-report-{season_label}-season/"
-
-def get_latest_nba_injury_pdf_url_for_date(game_date_obj: date, season_label: str):
-    url = nba_injury_report_page_url(season_label)
-    r = requests.get(url, timeout=30, headers={"User-Agent": USER_AGENT})
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-
-    month_name = game_date_obj.strftime("%B")
-    day_num = str(int(game_date_obj.strftime("%d")))
-    needle = f"{month_name} {day_num}:"
-
-    container = None
-    for node in soup.find_all(["p", "div", "li"]):
-        txt = node.get_text(" ", strip=True)
-        if txt.startswith(needle):
-            container = node
-            break
-
-    if container is None:
-        raise RuntimeError(f"Could not find injury report links for '{needle}' on {url}")
-
-    links = container.find_all("a", href=True)
-    pdfs = [
-        a["href"] for a in links
-        if "ak-static.cms.nba.com" in a["href"].lower() and a["href"].lower().endswith(".pdf")
-    ]
-    if not pdfs:
-        raise RuntimeError(f"Found date block for '{needle}' but no PDF links.")
-
-    return pdfs[-1]
-
-def download_pdf_bytes(url: str, timeout: int = 30) -> bytes:
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/pdf,application/octet-stream,*/*",
-        "Referer": "https://official.nba.com/",
-    }
-    r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-    r.raise_for_status()
-    data = r.content
-    if not data.startswith(b"%PDF"):
-        snippet = data[:200].decode("utf-8", errors="replace")
-        raise RuntimeError(f"Downloaded content is not a PDF. First bytes/snippet: {snippet}")
-    return data
-
-def parse_tokens_to_injuries(tokens: list[str]) -> pd.DataFrame:
-    """Parse NBA injury PDF when extracted text is one-word-per-line."""
-    team_tokens_map: list[tuple[int, list[str], str]] = []
-    for t in NBA_TEAM_NAMES:
-        tt = t.split()
-        team_tokens_map.append((len(tt), tt, t))
-    team_tokens_map.sort(reverse=True)
-
-    def match_team(i: int):
-        for L, tt, full in team_tokens_map:
-            if i + L <= len(tokens) and tokens[i:i+L] == tt:
-                return full, L
-        return None, 0
-
-    def is_header(tok: str) -> bool:
-        return tok in {
-            "Injury", "Report:", "Page", "of", "Game", "Date", "Time", "Matchup",
-            "Team", "Player", "Name", "Current", "Status", "Reason", "(ET)"
-        }
-
-    rows: list[dict] = []
-    current_team: str | None = None
-    i = 0
-
-    while i < len(tokens):
-        tok = tokens[i]
-
-        if tok in {"NOT", "YET", "SUBMITTED"}:
-            i += 1
-            continue
-        if is_header(tok) or tok.endswith("(ET)"):
-            i += 1
-            continue
-
-        if "@" in tok and len(tok) <= 10:
-            i += 1
-            team, L = match_team(i)
-            if team:
-                current_team = team
-                i += L
-            continue
-
-        team, L = match_team(i)
-        if team:
-            current_team = team
-            i += L
-            continue
-
-        if "," in tok:
-            player_parts = [tok]
-            j = i + 1
-            while j < len(tokens) and tokens[j] not in STATUS_WORDS:
-                if "@" in tokens[j] and len(tokens[j]) <= 10:
-                    break
-                t2, L2 = match_team(j)
-                if t2:
-                    break
-                if is_header(tokens[j]):
-                    break
-                player_parts.append(tokens[j])
-                j += 1
-
-            if j >= len(tokens) or tokens[j] not in STATUS_WORDS:
-                i += 1
-                continue
-
-            status = tokens[j]
-            player = normalize_spaces(" ".join(player_parts))
-
-            reason_parts = []
-            k = j + 1
-            while k < len(tokens):
-                if tokens[k] in STATUS_WORDS:
-                    break
-                if "," in tokens[k]:
-                    break
-                if "@" in tokens[k] and len(tokens[k]) <= 10:
-                    break
-                t3, L3 = match_team(k)
-                if t3:
-                    break
-                if is_header(tokens[k]):
-                    break
-                reason_parts.append(tokens[k])
-                k += 1
-
-            reason = normalize_spaces(" ".join(reason_parts))
-            if current_team:
-                rows.append({"Team": current_team, "Player": player, "Status": status, "Reason": reason})
-
-            i = k
-            continue
-
-        i += 1
-
-    return pd.DataFrame(rows, columns=["Team", "Player", "Status", "Reason"])
-
-def parse_nba_injury_pdf_to_df(pdf_bytes: bytes) -> pd.DataFrame:
-    reader = PdfReader(BytesIO(pdf_bytes))
-    all_text = []
-    for page in reader.pages:
-        t = page.extract_text() or ""
-        if t:
-            all_text.append(t)
-    raw = "\n".join(all_text)
-    tokens = raw.replace("\xa0", " ").split()
-    injury_df = parse_tokens_to_injuries(tokens)
-    return injury_df
-
-def fetch_injury_report_official_nba(game_date_obj: date) -> pd.DataFrame:
-    season_label = "2025-26"
-    pdf_url = get_latest_nba_injury_pdf_url_for_date(game_date_obj, season_label=season_label)
-    pdf_bytes = download_pdf_bytes(pdf_url)
-    return parse_nba_injury_pdf_to_df(pdf_bytes)
-
-def build_injury_list_for_team_official(team_name: str, injury_df: pd.DataFrame):
-    if injury_df is None or injury_df.empty or "Team" not in injury_df.columns:
-        return []
-    team_norm = normalize_team_name(team_name)
-    df = injury_df.copy()
-    df["Team_norm"] = df["Team"].astype(str).apply(normalize_team_name)
-    df_team = df[df["Team_norm"] == team_norm].copy()
-    if df_team.empty:
-        nick = team_norm.split()[-1]
-        df_team = df[df["Team_norm"].str.contains(nick, na=False)].copy()
-    if df_team.empty:
-        return []
-
-    injuries = []
-    for _, row in df_team.iterrows():
-        name = str(row.get("Player", "") or "").strip()
-        status = str(row.get("Status", "") or "").strip()
-        reason = str(row.get("Reason", "") or row.get("Injury", "") or "").strip()
-        reason_l = reason.lower()
-
-        if ("g league" in reason_l) or ("two-way" in reason_l) or ("two way" in reason_l) or ("on assignment" in reason_l):
-            continue
-        if not name or not status:
-            continue
-
-        role = "rotation"
-        mult = status_to_mult(status)
-        impact_points = estimate_player_impact_from_reason(reason)
-        injuries.append((name, role, mult, impact_points))
-    return injuries
-
-def injury_adjustment(home_injuries=None, away_injuries=None):
-    home_injuries = home_injuries or []
-    away_injuries = away_injuries or []
-
-    def parse_inj_list(lst, sign):
-        adj = 0.0
-        for item in lst:
-            if len(item) == 4:
-                _, role, mult, impact = item
-            else:
-                continue
-            weight = INJURY_WEIGHTS.get(role, INJURY_WEIGHTS["starter"])
-            adj += sign * weight * mult * (impact / 2.0)
-        return adj
-
-    return parse_inj_list(home_injuries, -1.0) + parse_inj_list(away_injuries, +1.0)
-
+# (… keep ALL your existing injury functions exactly as-is …)
 
 # -----------------------------
 # Schedule / games (BallDontLie)
@@ -640,6 +408,7 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
 def fetch_games_for_date(game_date_str, api_key):
     dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
     iso_date = dt.strftime("%Y-%m-%d")
+
     params = {"dates[]": iso_date, "per_page": 100}
     games_json = bdl_get("games", params=params, api_key=api_key)
     games = games_json.get("data", [])
@@ -655,9 +424,8 @@ def fetch_games_for_date(game_date_str, api_key):
             "HOME_TEAM_ID": home_team["id"],
             "AWAY_TEAM_ID": away_team["id"],
             "GAME_DATE": g.get("date"),
-            "HOME_SCORE": g.get("home_team_score"),
-            "AWAY_SCORE": g.get("visitor_team_score"),
         })
+
     return pd.DataFrame(rows)
 
 def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
@@ -741,195 +509,6 @@ def rest_days_to_fatigue_adjustment(days_rest):
 
 
 # -----------------------------
-# Play/Pass + bankroll sizing
-# -----------------------------
-
-def play_pass_rule(
-    row: pd.Series,
-    *,
-    require_pick: bool = True,
-    require_value_tier: str = "HIGH VALUE",
-    min_confidence: str = "MEDIUM",  # MEDIUM or HIGH
-    max_abs_moneyline: Optional[int] = 400,  # skip extreme prices in ML
-) -> str:
-    """
-    Conservative default filter:
-      - must be a PICK (not lean) unless you disable
-      - must be HIGH VALUE
-      - must be at least MEDIUM confidence
-      - skip extreme ML prices (optional)
-    """
-    primary = str(row.get("primary_recommendation", ""))
-    value_tier = str(row.get("value_tier", ""))
-    conf = str(row.get("confidence", ""))
-
-    if require_pick and ("PICK" not in primary):
-        return "PASS"
-
-    if require_value_tier and (value_tier != require_value_tier):
-        return "PASS"
-
-    conf_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-    if conf_rank.get(conf, 0) < conf_rank.get(min_confidence, 1):
-        return "PASS"
-
-    if max_abs_moneyline is not None and "ML" in primary:
-        hm = safe_float(row.get("home_ml"))
-        am = safe_float(row.get("away_ml"))
-        # if the selected side is extreme, pass
-        if "HOME ML" in primary and hm is not None and abs(hm) > max_abs_moneyline:
-            return "PASS"
-        if "AWAY ML" in primary and am is not None and abs(am) > max_abs_moneyline:
-            return "PASS"
-
-    return "PLAY"
-
-
-def kelly_fraction(p: float, odds_american: float) -> float:
-    d = american_to_decimal(odds_american)
-    b = d - 1.0
-    q = 1.0 - p
-    frac = (b * p - q) / b
-    return max(frac, 0.0)
-
-
-def bet_size_flat(bankroll: float, flat_pct: float) -> float:
-    return max(bankroll * float(flat_pct), 0.0)
-
-
-def bet_size_kelly_ml(
-    bankroll: float,
-    p: float,
-    odds_american: float,
-    *,
-    kelly_mult: float = 0.5,
-    max_pct: float = 0.03,
-) -> float:
-    f = kelly_fraction(float(p), float(odds_american))
-    f_adj = min(f * float(kelly_mult), float(max_pct))
-    return max(bankroll * f_adj, 0.0)
-
-
-def compute_bet_size(
-    row: pd.Series,
-    bankroll: float,
-    *,
-    sizing_mode: str = "flat",  # "flat" or "kelly"
-    flat_pct: float = 0.01,
-    kelly_mult: float = 0.5,
-    kelly_max_pct: float = 0.03,
-) -> float:
-    if str(row.get("play_pass")) != "PLAY":
-        return 0.0
-
-    primary = str(row.get("primary_recommendation", ""))
-
-    if sizing_mode == "flat":
-        return bet_size_flat(bankroll, flat_pct)
-
-    # kelly: implemented for ML only (ATS kelly requires a cover-prob model)
-    if "HOME ML" in primary:
-        ml = safe_float(row.get("home_ml"))
-        if ml is None:
-            return 0.0
-        p = float(row.get("model_home_prob"))
-        return bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
-
-    if "AWAY ML" in primary:
-        ml = safe_float(row.get("away_ml"))
-        if ml is None:
-            return 0.0
-        p = 1.0 - float(row.get("model_home_prob"))
-        return bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
-
-    # ATS falls back to flat sizing if you use kelly mode
-    return bet_size_flat(bankroll, flat_pct)
-
-
-# -----------------------------
-# Settlement (backtest)
-# -----------------------------
-
-def settle_ml(side: str, home_score: int, away_score: int, home_ml: float, away_ml: float, stake: float) -> float:
-    """
-    Returns profit (positive or negative). Push not possible in NBA.
-    """
-    if stake <= 0:
-        return 0.0
-    side = side.upper()
-    if side == "HOME":
-        won = home_score > away_score
-        odds = home_ml
-    else:
-        won = away_score > home_score
-        odds = away_ml
-
-    if odds is None:
-        return 0.0
-
-    if won:
-        dec = american_to_decimal(odds)
-        return stake * (dec - 1.0)
-    return -stake
-
-
-def settle_ats(
-    side: str,
-    home_score: int,
-    away_score: int,
-    home_spread: float,
-    stake: float,
-    price_american: float = -110.0,
-) -> float:
-    """
-    Uses standard spread math:
-      - If betting HOME ATS, you take home_spread (could be -7.5 or +2.5)
-      - If betting AWAY ATS, you take away_spread = -home_spread
-    """
-    if stake <= 0:
-        return 0.0
-    if home_spread is None:
-        return 0.0
-
-    side = side.upper()
-    if side == "HOME":
-        adj_home = home_score + float(home_spread)
-        adj_away = away_score
-    else:
-        adj_home = home_score
-        adj_away = away_score - float(home_spread)
-
-    if abs(adj_home - adj_away) < 1e-9:
-        return 0.0  # push
-
-    won = adj_home > adj_away if side == "HOME" else adj_away > adj_home
-
-    if won:
-        # -110 means win returns stake * (100/110)
-        dec = american_to_decimal(price_american)
-        return stake * (dec - 1.0)
-    return -stake
-
-
-def resolve_game_scores_for_date(game_date_str: str, api_key: str) -> Dict[Tuple[str, str], Tuple[int, int]]:
-    """
-    Returns mapping (home_name, away_name) -> (home_score, away_score) for completed games.
-    """
-    gdf = fetch_games_for_date(game_date_str, api_key=api_key)
-    out = {}
-    for _, r in gdf.iterrows():
-        hs = r.get("HOME_SCORE")
-        aw = r.get("AWAY_SCORE")
-        if hs is None or aw is None:
-            continue
-        # ignore not played
-        if (hs == 0 and aw == 0):
-            continue
-        out[(r["HOME_TEAM_NAME"], r["AWAY_TEAM_NAME"])] = (int(hs), int(aw))
-    return out
-
-
-# -----------------------------
 # Main daily engine
 # -----------------------------
 
@@ -953,15 +532,16 @@ def run_daily_probs_for_date(
     season_year = season_start_year_for_date(game_date_obj)
 
     games_df = fetch_games_for_date(game_date, api_key=api_key)
+    print(f"[run_daily] Found {len(games_df)} games for {game_date}.")
     if games_df.empty:
         return pd.DataFrame()
 
-    # Load injuries once
+    # Load injuries ONCE (keep your existing injury loader here)
     try:
         injury_df = fetch_injury_report_official_nba(game_date_obj)
     except Exception as e:
-        print(f"[inj-fetch] WARNING: injury report failed: {e}")
-        injury_df = pd.DataFrame(columns=["Team", "Player", "Status", "Reason"])
+        print(f"[inj-fetch] WARNING: Could not load official NBA injury report: {e}")
+        injury_df = pd.DataFrame(columns=["Team", "Player", "Pos", "Status", "Injury"])
 
     rows = []
     for _, g in games_df.iterrows():
@@ -975,12 +555,12 @@ def run_daily_probs_for_date(
 
         base_score = season_matchup_base_score(home_row, away_row)
 
-        # injuries
+        # Injuries
         home_inj = build_injury_list_for_team_official(home_name, injury_df)
         away_inj = build_injury_list_for_team_official(away_name, injury_df)
         inj_adj = injury_adjustment(home_inj, away_inj)
 
-        # fatigue
+        # Fatigue
         home_last = get_team_last_game_date(home_id, game_date_obj, season_year, api_key)
         away_last = get_team_last_game_date(away_id, game_date_obj, season_year, api_key)
         home_rest_days = (game_date_obj - home_last).days if home_last else None
@@ -991,224 +571,129 @@ def run_daily_probs_for_date(
 
         adj_score = base_score + inj_adj + fatigue_adj + h2h_adj
         model_home_prob = score_to_prob(adj_score, lam)
-        model_spread_home = score_to_spread(adj_score)  # vegas-style home spread
+        model_spread = score_to_spread(adj_score)
 
         key = (home_name, away_name)
         odds_info = odds_dict.get(key, {}) or {}
         home_ml = odds_info.get("home_ml")
         away_ml = odds_info.get("away_ml")
+
+        if home_ml is not None and away_ml is not None:
+            raw_home_prob = american_to_implied_prob(home_ml)
+            raw_away_prob = american_to_implied_prob(away_ml)
+            total = raw_home_prob + raw_away_prob
+            home_imp = raw_home_prob / total if total > 0 else 0.5
+            away_imp = raw_away_prob / total if total > 0 else 0.5
+        elif home_ml is not None:
+            home_imp = american_to_implied_prob(home_ml)
+            away_imp = 1.0 - home_imp
+        elif away_ml is not None:
+            away_imp = american_to_implied_prob(away_ml)
+            home_imp = 1.0 - away_imp
+        else:
+            home_imp = away_imp = 0.5
+
+        edge_home_raw = model_home_prob - home_imp
+        edge_away_raw = (1.0 - model_home_prob) - away_imp
+        edge_shrink = 0.5
+        edge_home = edge_home_raw * edge_shrink
+        edge_away = edge_away_raw * edge_shrink
+
         home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
-        home_spread = safe_float(home_spread)
+        if home_spread is not None:
+            home_spread = float(home_spread)
+            spread_edge_home = home_spread - model_spread
+        else:
+            spread_edge_home = None
+
+        value_edge = abs(edge_home)
+        model_conf = abs(model_home_prob - 0.5)
+
+        if (value_edge < EDGE_PROB_THRESHOLD) or (model_conf < MIN_MODEL_CONFIDENCE):
+            ml_rec = "No ML bet (edge/conf too small)"
+        else:
+            if model_home_prob > 0.5:
+                ml_rec = "Model PICK: HOME (strong)" if value_edge >= STRONG_EDGE_THRESHOLD else "Model lean: HOME"
+            else:
+                ml_rec = "Model PICK: AWAY (strong)" if value_edge >= STRONG_EDGE_THRESHOLD else "Model lean: AWAY"
+
+        if (home_spread is None) or (spread_edge_home is None):
+            spread_rec = "No spread bet (no line)"
+        else:
+            if abs(spread_edge_home) < SPREAD_EDGE_THRESHOLD:
+                spread_rec = "Too close to call ATS (edge too small)"
+            else:
+                spread_rec = "Model lean ATS: AWAY" if spread_edge_home > 0 else "Model lean ATS: HOME"
+
+        if ("No ML bet" in ml_rec) and ("Too close" in spread_rec or "No spread" in spread_rec):
+            primary_rec = "NO BET - edges too small"
+        elif "No spread bet" in spread_rec or "Too close" in spread_rec:
+            primary_rec = ml_rec
+        elif ("No ML bet" in ml_rec) and ("Model lean ATS" in spread_rec):
+            primary_rec = spread_rec
+        else:
+            primary_rec = "NO BET - edges too small"
 
         rows.append({
             "date": game_date,
             "home": home_name,
             "away": away_name,
-            "model_home_prob": float(model_home_prob),
+            "model_home_prob": model_home_prob,
+            "market_home_prob": home_imp,
+            "edge_home": edge_home,
+            "edge_away": edge_away,
+            "model_spread_home": model_spread,
             "home_ml": home_ml,
             "away_ml": away_ml,
             "home_spread": home_spread,
-            "model_spread_home": float(model_spread_home),
+            "spread_edge_home": spread_edge_home,
+            "ml_recommendation": ml_rec,
+            "spread_recommendation": spread_rec,
+            "primary_recommendation": primary_rec,
         })
 
     df = pd.DataFrame(rows)
+    df["abs_edge_home"] = (df["model_home_prob"] - 0.5).abs()
 
-    # ✅ Unified edges + recos + why_bet + confidence + value_tier
-    df, debug_df = add_recommendations_to_df(
-        df,
-        thresholds=Thresholds(
-            ml_edge_strong=0.06,
-            ml_edge_lean=0.035,
-            ats_edge_strong_pts=3.0,
-            ats_edge_lean_pts=1.5,
-            conf_high=0.18,
-            conf_med=0.10,
-        ),
-        model_spread_home_col="model_spread_home",
-        model_margin_home_col=None,
-    )
+    def classify_conf(conf):
+        if conf >= 0.20:
+            return "HIGH"
+        elif conf >= 0.10:
+            return "MEDIUM"
+        else:
+            return "LOW"
 
-    # Save debug table for “why ML ≠ ATS”
-    os.makedirs("results", exist_ok=True)
-    debug_out = f"results/debug_why_ml_vs_ats_{game_date.replace('/', '-')}.csv"
-    debug_df.to_csv(debug_out, index=False)
+    df["confidence"] = df["abs_edge_home"].apply(classify_conf)
 
+    # Keep your old "value_tier" if you want; leaving as confidence-based like before
+    def classify_value(conf):
+        if conf >= 0.20:
+            return "HIGH VALUE"
+        elif conf >= 0.10:
+            return "MEDIUM VALUE"
+        else:
+            return "LOW VALUE"
+
+    df["value_tier"] = df["abs_edge_home"].apply(classify_value)
+
+    # -----------------------------
+    # ✅ Units + play/pass columns
+    # -----------------------------
+    def play_pass(primary: str) -> str:
+        p = (primary or "").upper()
+        return "PASS" if "NO BET" in p else "PLAY"
+
+    def units_for_row(row) -> float:
+        # simple & safe: 1 unit for any PLAY
+        return 1.0 if row["play_pass"] == "PLAY" else 0.0
+
+    df["play_pass"] = df["primary_recommendation"].apply(play_pass)
+    df["units"] = df.apply(units_for_row, axis=1)
+    df["unit_dollars"] = UNIT_DOLLARS
+    df["bet_dollars"] = df["units"] * df["unit_dollars"]
+
+    df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
     return df
-
-
-# -----------------------------
-# Backtest driver
-# -----------------------------
-
-def daterange(start: date, end: date):
-    cur = start
-    while cur <= end:
-        yield cur
-        cur += timedelta(days=1)
-
-def backtest_range(
-    start_date_str: str,
-    end_date_str: str,
-    *,
-    initial_bankroll: float,
-    sizing_mode: str,
-    flat_pct: float,
-    kelly_mult: float,
-    kelly_max_pct: float,
-    ats_price: float,
-    play_require_pick: bool,
-    play_require_value_tier: str,
-    play_min_confidence: str,
-    play_max_abs_moneyline: Optional[int],
-    api_key: str,
-):
-    start = datetime.strptime(start_date_str, "%m/%d/%Y").date()
-    end = datetime.strptime(end_date_str, "%m/%d/%Y").date()
-
-    bankroll = float(initial_bankroll)
-    equity = []
-    bets_log = []
-
-    for d in daterange(start, end):
-        game_date = d.strftime("%m/%d/%Y")
-        print(f"[backtest] {game_date} bankroll={bankroll:.2f}")
-
-        # odds must exist
-        try:
-            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date)
-        except Exception as e:
-            print(f"[backtest] odds load failed {game_date}: {e}")
-            continue
-        if not odds_dict:
-            continue
-
-        # build stats_df correctly as-of that date
-        season_year = season_start_year_for_date(d)
-        end_date_iso = d.strftime("%Y-%m-%d")
-        try:
-            stats_df = fetch_team_ratings_bdl(season_year=season_year, end_date_iso=end_date_iso, api_key=api_key)
-        except Exception as e:
-            print(f"[backtest] stats fetch failed {game_date}: {e}")
-            continue
-
-        # run model
-        try:
-            df = run_daily_probs_for_date(
-                game_date=game_date,
-                odds_dict=odds_dict,
-                spreads_dict=spreads_dict,
-                stats_df=stats_df,
-                api_key=api_key,
-            )
-        except Exception as e:
-            print(f"[backtest] model run failed {game_date}: {e}")
-            continue
-        if df.empty:
-            continue
-
-        # Play/Pass + sizing
-        df["play_pass"] = df.apply(
-            lambda r: play_pass_rule(
-                r,
-                require_pick=play_require_pick,
-                require_value_tier=play_require_value_tier,
-                min_confidence=play_min_confidence,
-                max_abs_moneyline=play_max_abs_moneyline,
-            ),
-            axis=1
-        )
-        df["bet_size"] = df.apply(
-            lambda r: compute_bet_size(
-                r, bankroll,
-                sizing_mode=sizing_mode,
-                flat_pct=flat_pct,
-                kelly_mult=kelly_mult,
-                kelly_max_pct=kelly_max_pct,
-            ),
-            axis=1
-        )
-
-        # Resolve results (final scores)
-        scores_map = resolve_game_scores_for_date(game_date, api_key=api_key)
-        if not scores_map:
-            continue
-
-        day_profit = 0.0
-        day_bets = 0
-
-        for _, r in df.iterrows():
-            if r["play_pass"] != "PLAY":
-                continue
-            stake = float(r["bet_size"] or 0.0)
-            if stake <= 0:
-                continue
-
-            key = (r["home"], r["away"])
-            if key not in scores_map:
-                continue
-
-            home_score, away_score = scores_map[key]
-            primary = str(r["primary_recommendation"])
-
-            profit = 0.0
-            bet_type = None
-            bet_side = None
-
-            if "HOME ML" in primary:
-                bet_type = "ML"
-                bet_side = "HOME"
-                profit = settle_ml("HOME", home_score, away_score, r["home_ml"], r["away_ml"], stake)
-            elif "AWAY ML" in primary:
-                bet_type = "ML"
-                bet_side = "AWAY"
-                profit = settle_ml("AWAY", home_score, away_score, r["home_ml"], r["away_ml"], stake)
-            elif "ATS" in primary and "HOME" in primary:
-                bet_type = "ATS"
-                bet_side = "HOME"
-                profit = settle_ats("HOME", home_score, away_score, r["home_spread"], stake, price_american=ats_price)
-            elif "ATS" in primary and "AWAY" in primary:
-                bet_type = "ATS"
-                bet_side = "AWAY"
-                profit = settle_ats("AWAY", home_score, away_score, r["home_spread"], stake, price_american=ats_price)
-            else:
-                continue
-
-            bankroll += profit
-            day_profit += profit
-            day_bets += 1
-
-            bets_log.append({
-                "date": game_date,
-                "home": r["home"],
-                "away": r["away"],
-                "primary_recommendation": primary,
-                "bet_type": bet_type,
-                "bet_side": bet_side,
-                "stake": stake,
-                "profit": profit,
-                "bankroll_after": bankroll,
-                "why_bet": r.get("why_bet", ""),
-            })
-
-        equity.append({
-            "date": game_date,
-            "bankroll": bankroll,
-            "day_profit": day_profit,
-            "num_bets": day_bets
-        })
-
-    equity_df = pd.DataFrame(equity)
-    bets_df = pd.DataFrame(bets_log)
-
-    os.makedirs("results", exist_ok=True)
-    eq_out = f"results/backtest_equity_{start_date_str.replace('/','-')}_to_{end_date_str.replace('/','-')}.csv"
-    bets_out = f"results/backtest_bets_{start_date_str.replace('/','-')}_to_{end_date_str.replace('/','-')}.csv"
-    equity_df.to_csv(eq_out, index=False)
-    bets_df.to_csv(bets_out, index=False)
-    print(f"[backtest] saved equity: {eq_out}")
-    print(f"[backtest] saved bets:   {bets_out}")
-
-    return equity_df, bets_df
 
 
 # -----------------------------
@@ -1217,58 +702,9 @@ def backtest_range(
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
-
-    # Single-date run
     parser.add_argument("--date", type=str, default=None, help="Game date in MM/DD/YYYY (default: today UTC).")
-
-    # Backtest
-    parser.add_argument("--backtest_start", type=str, default=None, help="Backtest start date MM/DD/YYYY")
-    parser.add_argument("--backtest_end", type=str, default=None, help="Backtest end date MM/DD/YYYY")
-
-    # Bankroll/sizing
-    parser.add_argument("--bankroll", type=float, default=1000.0, help="Starting bankroll")
-    parser.add_argument("--sizing", type=str, default="flat", choices=["flat", "kelly"], help="Sizing mode")
-    parser.add_argument("--flat_pct", type=float, default=0.01, help="Flat stake percent (e.g. 0.01 = 1%)")
-    parser.add_argument("--kelly_mult", type=float, default=0.5, help="Kelly multiplier (0.5 = half Kelly)")
-    parser.add_argument("--kelly_max_pct", type=float, default=0.03, help="Max Kelly stake pct (cap)")
-
-    # Play/pass filter
-    parser.add_argument("--play_require_pick", action="store_true", help="Require '(strong) PICK' in primary to PLAY")
-    parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE", help="Require value_tier (e.g. HIGH VALUE)")
-    parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"], help="Min confidence")
-    parser.add_argument("--play_max_abs_ml", type=int, default=400, help="Pass if selected ML |odds| > this (set 0 to disable)")
-
-    # ATS settlement price assumption
-    parser.add_argument("--ats_price", type=float, default=-110.0, help="ATS price for backtest settlement (default -110)")
-
     args = parser.parse_args(argv)
 
-    api_key = get_bdl_api_key()
-
-    # Backtest mode
-    if args.backtest_start and args.backtest_end:
-        play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
-        equity_df, bets_df = backtest_range(
-            args.backtest_start,
-            args.backtest_end,
-            initial_bankroll=args.bankroll,
-            sizing_mode=args.sizing,
-            flat_pct=args.flat_pct,
-            kelly_mult=args.kelly_mult,
-            kelly_max_pct=args.kelly_max_pct,
-            ats_price=args.ats_price,
-            play_require_pick=args.play_require_pick,
-            play_require_value_tier=args.play_value_tier,
-            play_min_confidence=args.play_min_conf,
-            play_max_abs_moneyline=play_max_abs_ml,
-            api_key=api_key,
-        )
-
-        with pd.option_context("display.max_rows", 20, "display.max_columns", None):
-            print(equity_df.tail(20))
-        return
-
-    # Single-day mode
     if args.date is None:
         today = datetime.utcnow().date()
         game_date = today.strftime("%m/%d/%Y")
@@ -1277,54 +713,41 @@ def main(argv=None):
 
     print(f"Running model for {game_date}...")
 
-    # Ensure odds template exists (creates blanks if missing)
+    api_key = get_bdl_api_key()
+
+    # Ensure odds template exists
     build_odds_csv_template_if_missing(game_date, api_key=api_key)
 
     # Load odds
     try:
         odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date)
+        print(f"Loaded odds for {len(odds_dict)} games from CSV.")
     except Exception as e:
-        print(f"Warning: failed to load odds: {e}")
+        print(f"Warning: failed to load odds from CSV: {e}")
         odds_dict, spreads_dict = {}, {}
+        print("Proceeding with market_home_prob = 0.5 defaults.")
 
-    # Build stats_df as-of the date
     game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
     season_year = season_start_year_for_date(game_date_obj)
     end_date_iso = game_date_obj.strftime("%Y-%m-%d")
 
-    stats_df = fetch_team_ratings_bdl(season_year=season_year, end_date_iso=end_date_iso, api_key=api_key)
+    try:
+        stats_df = fetch_team_ratings_bdl(season_year=season_year, end_date_iso=end_date_iso, api_key=api_key)
+    except Exception as e:
+        print(f"Error: Failed to fetch team ratings from BallDontLie: {e}")
+        return
 
-    results_df = run_daily_probs_for_date(
-        game_date=game_date,
-        odds_dict=odds_dict,
-        spreads_dict=spreads_dict,
-        stats_df=stats_df,
-        api_key=api_key,
-    )
-
-    # Apply play/pass + sizing for TODAY output
-    play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
-    results_df["play_pass"] = results_df.apply(
-        lambda r: play_pass_rule(
-            r,
-            require_pick=args.play_require_pick,
-            require_value_tier=args.play_value_tier,
-            min_confidence=args.play_min_conf,
-            max_abs_moneyline=play_max_abs_ml,
-        ),
-        axis=1
-    )
-
-    results_df["bet_size"] = results_df.apply(
-        lambda r: compute_bet_size(
-            r, args.bankroll,
-            sizing_mode=args.sizing,
-            flat_pct=args.flat_pct,
-            kelly_mult=args.kelly_mult,
-            kelly_max_pct=args.kelly_max_pct,
-        ),
-        axis=1
-    )
+    try:
+        results_df = run_daily_probs_for_date(
+            game_date=game_date,
+            odds_dict=odds_dict,
+            spreads_dict=spreads_dict,
+            stats_df=stats_df,
+            api_key=api_key,
+        )
+    except Exception as e:
+        print(f"Error: Failed to run daily model: {e}")
+        return
 
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{game_date.replace('/', '-')}.csv"
@@ -1334,6 +757,7 @@ def main(argv=None):
         print(results_df)
 
     print(f"\nSaved predictions to {out_name}")
+    print(f"Units: BANKROLL=${BANKROLL_DOLLARS:.2f}, 1 unit={UNIT_PCT_OF_BANKROLL*100:.1f}% = ${UNIT_DOLLARS:.2f}")
 
 
 if __name__ == "__main__":
