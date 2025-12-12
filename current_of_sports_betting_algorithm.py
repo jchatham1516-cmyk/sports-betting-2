@@ -471,175 +471,224 @@ def get_latest_nba_injury_pdf_url_for_date(game_date_obj: date, season_label: st
     return pdfs[-1]
 
 def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
+    """Download + parse NBA official injury report PDF into a dataframe.
+
+    This parser is intentionally defensive because the NBA PDF layout shifts often.
+    It supports two common formats:
+      A) Team name appears as a header line, followed by player lines.
+      B) Team is a column on the same line as Player/Pos/Status.
+
+    Returns columns: Team, Player, Pos, Status, Injury
     """
-    Parse the NBA official injury report PDF into a DataFrame.
 
-    The NBA PDF layout frequently behaves like a table where Team is a column
-    (not a section header). The original parser only worked when Team appeared
-    as a standalone header line, which can yield 0 rows.
+    def download_pdf_bytes(url: str) -> bytes:
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/pdf,application/octet-stream,*/*",
+            "Referer": "https://official.nba.com/",
+        }
+        resp = requests.get(url, timeout=30, headers=headers, allow_redirects=True)
+        resp.raise_for_status()
+        data = resp.content
+        # Verify we really got a PDF
+        if not data.startswith(b"%PDF"):
+            snippet = data[:200].decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Injury report download is not a PDF (Content-Type={resp.headers.get('Content-Type')}). "
+                f"First bytes/snippet: {snippet}"
+            )
+        return data
 
-    This version:
-      1) downloads with stronger headers and validates the bytes are a PDF
-      2) extracts text with pypdf
-      3) tries two parsing strategies:
-         A) team-header mode (legacy)
-         B) team-in-line mode (table-like PDFs)
-      4) if still empty, writes a small debug text sample to results/injury_debug.txt
-    """
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/pdf,application/octet-stream,*/*",
-        "Referer": "https://official.nba.com/",
-    }
-    r = requests.get(pdf_url, timeout=30, headers=headers, allow_redirects=True)
-    r.raise_for_status()
-
-    pdf_bytes = r.content or b""
-    # Validate we actually received a PDF
-    if not pdf_bytes.startswith(b"%PDF"):
-        snippet = pdf_bytes[:200].decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"[inj-parse] Downloaded content is not a PDF. "
-            f"Content-Type={r.headers.get('Content-Type')} Snippet={snippet}"
-        )
-
-    reader = PdfReader(BytesIO(pdf_bytes))
-
-    text_chunks = []
-    for page in reader.pages:
+    def extract_text_lines(pdf_bytes: bytes) -> list[str]:
+        # 1) pypdf extraction (layout then plain)
+        all_text = []
         try:
-            txt = page.extract_text(extraction_mode="layout") or ""
-        except TypeError:
-            txt = page.extract_text() or ""
+            reader = PdfReader(BytesIO(pdf_bytes))
+            for page in reader.pages:
+                txt = ""
+                try:
+                    txt = page.extract_text(extraction_mode="layout") or ""
+                except TypeError:
+                    txt = page.extract_text() or ""
+                except Exception:
+                    try:
+                        txt = page.extract_text() or ""
+                    except Exception:
+                        txt = ""
+                if txt:
+                    all_text.append(txt)
         except Exception:
-            txt = page.extract_text() or ""
-        text_chunks.append(txt)
+            pass
 
-    if not any((c or "").strip() for c in text_chunks):
-        print("[inj-parse] WARNING: PDF text extraction returned empty text.")
-        return pd.DataFrame(columns=["Team", "Player", "Pos", "Status", "Injury"])
+        # If pypdf produced almost nothing, try a plain pass
+        if sum(len(t) for t in all_text) < 500:
+            all_text = []
+            try:
+                reader = PdfReader(BytesIO(pdf_bytes))
+                for page in reader.pages:
+                    try:
+                        txt = page.extract_text() or ""
+                    except Exception:
+                        txt = ""
+                    if txt:
+                        all_text.append(txt)
+            except Exception:
+                pass
 
-    raw_lines = []
-    for chunk in text_chunks:
-        for ln in (chunk or "").splitlines():
-            ln = ln.replace("\xa0", " ").strip()
-            if ln:
-                raw_lines.append(ln)
+        # 2) Optional PyMuPDF fallback (often best for table PDFs)
+        if sum(len(t) for t in all_text) < 500:
+            try:
+                import fitz  # PyMuPDF
+                all_text = []
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                for p in doc:
+                    txt = p.get_text("text") or ""
+                    if txt:
+                        all_text.append(txt)
+                doc.close()
+            except Exception:
+                # If PyMuPDF isn't installed, we simply proceed with what we have.
+                pass
 
-    # Common helpers
-    player_line_re = re.compile(
-        r"(?P<Player>[A-Za-z\.\'\- ]+?)\s+"
-        r"(?P<Pos>PG|SG|SF|PF|C|G|F)\s+"
-        r"(?P<Status>Out|Doubtful|Questionable|Probable)\s*"
-        r"(?P<Injury>.*)$"
-    )
+        raw = "\n".join(all_text)
+        raw_lines = [ln.strip() for ln in raw.splitlines()]
+        # Keep non-empty and normalize whitespace a bit later
+        return [ln for ln in raw_lines if ln and ln.strip()]
 
-    # -------- Strategy B: table-like (Team + Player + Pos + Status on same line)
-    # Build a team alternation regex that matches any official team name.
-    team_alt = "|".join(sorted([re.escape(t) for t in NBA_TEAM_NAMES], key=len, reverse=True))
-    team_in_line_re = re.compile(
-        rf"^(?P<Team>(?:{team_alt}))\s+"
-        rf"(?P<Player>[A-Za-z\.\'\- ]+?)\s+"
-        rf"(?P<Pos>PG|SG|SF|PF|C|G|F)\s+"
-        rf"(?P<Status>Out|Doubtful|Questionable|Probable)\s*"
-        rf"(?P<Injury>.*)$"
-    )
+    pdf_bytes = download_pdf_bytes(pdf_url)
+    raw_lines = extract_text_lines(pdf_bytes)
 
-    rows = []
-    last_row_idx = None
+    # Always write a debug sample if parsing yields 0 rows, so you can paste it back here.
+    def write_debug(lines: list[str], path_out: str = "results/injury_debug.txt") -> None:
+        try:
+            os.makedirs(os.path.dirname(path_out), exist_ok=True)
+            with open(path_out, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines[:250]))
+            print(f"[inj-parse] Wrote debug extract sample to {path_out}")
+        except Exception:
+            pass
 
-    for ln in raw_lines:
-        ln_clean = normalize_spaces(ln)
+    # Team mappings
+    team_names = set(NBA_TEAMS_FULL)
+    team_abbrev = {v: k for k, v in NBA_TEAMS_ABBREV_TO_FULL.items()}  # full->abbr? (invert)
+    # Some PDFs use 3-letter abbreviations; keep both directions
+    abbrev_to_full = NBA_TEAMS_ABBREV_TO_FULL.copy()
+    full_to_abbrev = {full: ab for ab, full in abbrev_to_full.items()}
 
-        # Skip obvious non-data lines
-        ln_lower = ln_clean.lower()
-        if any(k in ln_lower for k in ["injury report", "referee", "page", "report time", "game date", "report updated"]):
-            continue
+    status_set = {"out", "doubtful", "questionable", "probable"}
+    pos_set = {"pg", "sg", "sf", "pf", "c", "g", "f"}
 
-        m2 = team_in_line_re.search(ln_clean)
-        if m2:
-            rows.append({
-                "Team": normalize_spaces(m2.group("Team")),
-                "Player": normalize_spaces(m2.group("Player")),
-                "Pos": m2.group("Pos").strip(),
-                "Status": m2.group("Status").strip(),
-                "Injury": normalize_spaces(m2.group("Injury")),
-            })
-            last_row_idx = len(rows) - 1
-            continue
+    def clean_line(s: str) -> str:
+        s = s.replace("\u00a0", " ")
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
 
-        # Continuation lines for injury text (table-like)
-        if last_row_idx is not None:
-            # If it doesn't look like a new player row, append
-            if not team_in_line_re.search(ln_clean) and not player_line_re.search(ln_clean):
-                extra = normalize_spaces(ln_clean)
-                if extra:
-                    prev = rows[last_row_idx]["Injury"]
-                    rows[last_row_idx]["Injury"] = normalize_spaces((prev + " " + extra).strip())
-
-    if rows:
-        return pd.DataFrame(rows, columns=["Team", "Player", "Pos", "Status", "Injury"])
-
-    # -------- Strategy A: legacy team-header mode (Team on its own line)
+    # Strategy B: Team + Player + Pos + Status on same line (table-like)
     rows = []
     current_team = None
-    last_row_idx = None
 
     for ln in raw_lines:
-        ln_clean = normalize_spaces(ln)
-        ln_norm = normalize_team_name(ln_clean)
+        ln = clean_line(ln)
+        low = ln.lower()
 
-        # If line matches a team name exactly, switch current team
-        if ln_norm in NBA_TEAM_NAMES_NORM:
-            current_team = NBA_TEAM_NAMES_NORM[ln_norm]
-            last_row_idx = None
+        # skip obvious headers/footers
+        if any(k in low for k in ["injury report", "referee", "page", "report time", "game date", "as of", "updated"]):
             continue
 
-        if current_team is None:
+        # If the entire line is a team name (Strategy A header)
+        if ln in team_names:
+            current_team = ln
             continue
 
-        ln_lower = ln_clean.lower()
-        if any(k in ln_lower for k in ["injury report", "referee", "page", "report time", "game date", "report updated"]):
-            continue
+        # Split on multi-spaces is ideal, but many extractors collapse whitespace.
+        # So we try both: a) 2+ spaces, b) single-space tokens with heuristics.
+        parts = re.split(r"\s{2,}", ln)
+        if len(parts) == 1:
+            parts = ln.split(" ")
 
-        m = player_line_re.search(ln_clean)
-        if m:
-            rows.append({
-                "Team": current_team,
-                "Player": normalize_spaces(m.group("Player")),
-                "Pos": m.group("Pos").strip(),
-                "Status": m.group("Status").strip(),
-                "Injury": normalize_spaces(m.group("Injury")),
-            })
-            last_row_idx = len(rows) - 1
-            continue
+        # Try to detect team token (abbrev or full) at start
+        team = None
+        first = parts[0].strip()
+        if first in abbrev_to_full:
+            team = abbrev_to_full[first]
+        elif first in team_names:
+            team = first
+        else:
+            # Try prefix match for multi-word teams when split got weird
+            # Check any full team name that is a prefix of the line.
+            for tn in team_names:
+                if ln.startswith(tn + " ") or ln == tn:
+                    team = tn
+                    break
 
-        # Continuation lines
-        if last_row_idx is not None:
-            if not player_line_re.search(ln_clean):
-                extra = normalize_spaces(ln_clean)
-                if extra:
-                    prev = rows[last_row_idx]["Injury"]
-                    rows[last_row_idx]["Injury"] = normalize_spaces((prev + " " + extra).strip())
+        # Now attempt to parse a row if it looks like: team player pos status ...
+        # Find first occurrence of a POS token and a STATUS token after it.
+        tokens = ln.split(" ")
+        pos_i = next((i for i,t in enumerate(tokens) if t.lower() in pos_set), None)
+        if pos_i is not None and pos_i + 1 < len(tokens) and tokens[pos_i+1].lower() in status_set:
+            status = tokens[pos_i+1]
+            pos = tokens[pos_i]
+            # team is either detected above or from header mode
+            if team is None:
+                # If we couldn't detect team, use header-team if available
+                team = current_team
+
+            if team:
+                # player is everything between team and pos token
+                # If line starts with team name, strip it first.
+                remaining = ln
+                if remaining.startswith(team + " "):
+                    remaining = remaining[len(team):].strip()
+                    remaining_tokens = remaining.split(" ")
+                    # recompute pos index in remaining
+                    pos_i2 = next((i for i,t in enumerate(remaining_tokens) if t.lower() in pos_set), None)
+                    if pos_i2 is None or pos_i2 + 1 >= len(remaining_tokens):
+                        pass
+                    else:
+                        player = " ".join(remaining_tokens[:pos_i2]).strip()
+                        pos = remaining_tokens[pos_i2]
+                        status = remaining_tokens[pos_i2+1]
+                        injury = " ".join(remaining_tokens[pos_i2+2:]).strip()
+                        if player:
+                            rows.append({"Team": team, "Player": player, "Pos": pos, "Status": status, "Injury": injury})
+                else:
+                    # Fallback: best-effort player slice
+                    player = " ".join(tokens[1:pos_i]).strip() if team else " ".join(tokens[:pos_i]).strip()
+                    injury = " ".join(tokens[pos_i+2:]).strip()
+                    if player and team:
+                        rows.append({"Team": team, "Player": player, "Pos": pos, "Status": status, "Injury": injury})
+                continue
+
+        # If not a row, but we have a current team header, try your original regex approach
+        if current_team:
+            m = player_line_re.search(ln)
+            if m:
+                rows.append({
+                    "Team": current_team,
+                    "Player": normalize_spaces(m.group("Player")),
+                    "Pos": m.group("Pos").strip(),
+                    "Status": m.group("Status").strip(),
+                    "Injury": normalize_spaces(m.group("Injury"))
+                })
+                continue
+
+        # Continuation lines: append to last injury if it looks like a continuation
+        if rows and current_team and len(ln.split(" ")) > 3 and not any(t.lower() in status_set for t in ln.split(" ")):
+            # very conservative: only append if line is shortish and doesn't look like a new header
+            if len(ln) <= 120 and ln not in team_names:
+                rows[-1]["Injury"] = normalize_spaces((rows[-1].get("Injury", "") + " " + ln).strip())
+
+    if not rows:
+        write_debug(raw_lines)
+        return pd.DataFrame(columns=["Team", "Player", "Pos", "Status", "Injury"])
 
     df = pd.DataFrame(rows, columns=["Team", "Player", "Pos", "Status", "Injury"])
-
-    # If still empty, write a debug sample so you can tune the regex quickly.
-    if df.empty:
-        try:
-            os.makedirs("results", exist_ok=True)
-            sample_path = os.path.join("results", "injury_debug.txt")
-            with open(sample_path, "w", encoding="utf-8") as f:
-                f.write(f"PDF URL: {pdf_url}\n\n")
-                f.write("---- First 200 lines extracted ----\n")
-                for ln in raw_lines[:200]:
-                    f.write(ln + "\n")
-            print(f"[inj-parse] Wrote debug extract sample to {sample_path}")
-        except Exception as e:
-            print(f"[inj-parse] Could not write debug sample: {e}")
-
-    return df
-
+    # Basic cleanup
+    df["Team"] = df["Team"].astype(str).apply(normalize_spaces)
+    df["Player"] = df["Player"].astype(str).apply(normalize_spaces)
+    df["Injury"] = df["Injury"].astype(str).apply(normalize_spaces)
+    df = df.drop_duplicates()
+    return df.reset_index(drop=True)
 
 def fetch_injury_report_official_nba(game_date_obj: date) -> pd.DataFrame:
     # If you want to compute season_label automatically, you can. Hardcoding is fine.
