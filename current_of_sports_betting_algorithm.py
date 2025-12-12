@@ -5,7 +5,7 @@
 #     - ORtg/DRtg proxies
 #     - Pace
 #     - Off/Def efficiency
-# - ESPN injuries with a simple player impact model
+# - ESPN per-team injuries with a simple player impact model
 # - Schedule fatigue (rest days, approximating B2B / 3-in-4 / 4-in-6)
 # - Head-to-head historical matchup adjustment (currently stubbed)
 # - Local odds CSV for moneyline + spreads
@@ -439,11 +439,10 @@ def find_team_row(team_name_input, stats_df):
 
 
 # Global weights for the base matchup model.
-# Updated to reduce home bias and increase team-strength impact.
 MATCHUP_WEIGHTS = np.array(
     [
         0.2,   # home_edge baseline (smaller)
-        0.12,  # d_ORtg  (bigger impact)
+        0.12,  # d_ORtg
         0.12,  # d_DRtg
         0.03,  # d_pace
         4.0,   # d_off_eff
@@ -491,7 +490,7 @@ def build_matchup_features(home_row, away_row):
     d_off_eff = h_OFF - a_OFF
     d_def_eff = a_DEF - h_DEF
 
-    home_edge = 1.0  # this acts like a constant/home-court bias term
+    home_edge = 1.0  # constant/home-court bias term
 
     return np.array(
         [
@@ -511,12 +510,6 @@ def season_matchup_base_score(home_row, away_row):
     Base linear scoring model without injuries/fatigue/H2H.
 
     Positive score => home team stronger.
-
-    Uses:
-       - ORtg / DRtg
-       - Pace
-       - Off/Def efficiency
-       - Home-court edge (via constant feature)
     """
     x = build_matchup_features(home_row, away_row)
     return float(np.dot(MATCHUP_WEIGHTS, x))
@@ -525,10 +518,6 @@ def season_matchup_base_score(home_row, away_row):
 def score_to_prob(score, lam=0.25):
     """
     Convert matchup score into win probability via logistic function.
-
-    lam controls steepness:
-    - Larger lam  -> probabilities move toward 0 or 1 faster (more extreme).
-    - Smaller lam -> probabilities stay closer to 0.5 (more conservative).
     """
     return 1.0 / (1.0 + math.exp(-lam * score))
 
@@ -537,17 +526,14 @@ def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
     """
     Convert model 'score' into a *Vegas-style* point spread for the HOME team.
 
-    - Negative number  => home is favored (e.g., -5.5 means home -5.5)
-    - Positive number  => home is an underdog (e.g., +3.5 means home +3.5)
-
-    Uses SPREAD_SCALE_FACTOR to scale raw scores into realistic NBA spread sizes.
+    - Negative number  => home favorite (e.g., -5.5 means home -5.5)
+    - Positive number  => home underdog (e.g., +3.5 means home +3.5)
     """
-    # Positive score = home stronger → home should be a minus favorite
     return -score * points_per_logit
 
 
 # -----------------------------
-# Injuries (ESPN scraping)
+# Injuries (ESPN per-team)
 # -----------------------------
 
 INJURY_WEIGHTS = {
@@ -597,6 +583,41 @@ ESPN_TEAM_ABBR = {
     "Utah Jazz": "UTAH",
     "Washington Wizards": "WSH",
 }
+
+
+def guess_role(player_name, pos):
+    """
+    Very rough heuristic to map a player to a role category.
+    """
+    pos = (pos or "").upper()
+    if pos in ["PG", "SG", "SF", "PF"]:
+        return "starter"
+    if pos in ["C", "F", "G"]:
+        return "rotation"
+    return "rotation"
+
+
+def status_to_mult(status):
+    if not isinstance(status, str):
+        return 1.0
+    s = status.lower()
+    for key, mult in INJURY_STATUS_MULTIPLIER.items():
+        if key in s:
+            return mult
+    return 1.0
+
+
+def estimate_player_impact_simple(pos):
+    """
+    Very simple position-based impact proxy.
+    You can replace this later with per-player stats from BDL.
+    """
+    pos = (pos or "").upper()
+    if pos in ["PG", "SG", "SF", "PF", "C"]:
+        return 2.0
+    return 1.0
+
+
 def fetch_injury_report_espn_for_teams(team_names):
     """
     Fetch injuries from ESPN *per team* (team injury pages),
@@ -616,8 +637,9 @@ def fetch_injury_report_espn_for_teams(team_names):
             print(f"[inj-fetch] No ESPN_TEAM_ABBR mapping for '{full_name_str}', skipping.")
             continue
 
-        slug = abbr.lower()  # e.g. "GS" -> "gs", "MIL" -> "mil"
+        slug = abbr.lower()  # "GS" -> "gs", "PHI" -> "phi"
         url = f"https://www.espn.com/nba/team/injuries/_/name/{slug}"
+        print(f"[inj-fetch] Fetching injuries for {full_name_str} from {url}")
 
         try:
             tables = pd.read_html(url)
@@ -655,6 +677,7 @@ def fetch_injury_report_espn_for_teams(team_names):
         # Tag with the full team name so we can filter later
         df_team["Team"] = full_name_str
 
+        print(f"[inj-fetch] {full_name_str}: {len(df_team)} injury rows scraped.")
         frames.append(df_team)
 
     if not frames:
@@ -663,163 +686,29 @@ def fetch_injury_report_espn_for_teams(team_names):
 
     injury_df = pd.concat(frames, ignore_index=True)
     print(f"[inj-fetch] Combined injury rows: {len(injury_df)}")
-    print("[inj-fetch] Sample:\n", injury_df.head())
+    print("[inj-fetch] Injury sample:\n", injury_df.head())
     return injury_df
-
-def fetch_injury_report_espn():
-    """
-    Scrape ESPN NBA injuries page into a DataFrame with columns:
-    Player, Team, Pos, Status, Injury
-    """
-    url = "https://www.espn.com/nba/injuries"
-    tables = pd.read_html(url)
-    if not tables:
-        raise ValueError("ESPN injuries page: no tables found.")
-
-    injury_tables = []
-    for t in tables:
-        cols_norm = [str(c).strip().lower() for c in t.columns]
-        if any("player" in c or "name" in c for c in cols_norm):
-            injury_tables.append(t)
-
-    if not injury_tables:
-        raise ValueError("No matching injury tables found on ESPN injuries page.")
-
-    df = pd.concat(injury_tables, ignore_index=True)
-
-    rename_map = {}
-    for c in df.columns:
-        lc = str(c).strip().lower()
-        if "player" in lc or "name" in lc:
-            rename_map[c] = "Player"
-        elif "team" in lc:
-            rename_map[c] = "Team"
-        elif "pos" in lc:
-            rename_map[c] = "Pos"
-        elif "status" in lc:
-            rename_map[c] = "Status"
-        elif "injury" in lc or "reason" in lc:
-            rename_map[c] = "Injury"
-
-    df = df.rename(columns=rename_map)
-    keep = [c for c in ["Player", "Team", "Pos", "Status", "Injury"] if c in df.columns]
-    df = df[keep].copy()
-
-    return df
-
-
-def guess_role(player_name, pos):
-    """
-    Very rough heuristic to map a player to a role category.
-    """
-    pos = (pos or "").upper()
-    if pos in ["PG", "SG", "SF", "PF"]:
-        return "starter"
-    if pos in ["C", "F", "G"]:
-        return "rotation"
-    return "rotation"
-
-
-def status_to_mult(status):
-    if not isinstance(status, str):
-        return 1.0
-    s = status.lower()
-    for key, mult in INJURY_STATUS_MULTIPLIER.items():
-        if key in s:
-            return mult
-    return 1.0
-
-
-def estimate_player_impact_simple(pos):
-    """
-    Very simple position-based impact proxy.
-    You can replace this later with per-player stats from BDL.
-    """
-    pos = (pos or "").upper()
-    # Starters / main positions get a bit more weight
-    if pos in ["PG", "SG", "SF", "PF", "C"]:
-        return 2.0
-    return 1.0
 
 
 def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
     """
-    Build a list of injuries for a given team from ESPN injuries DataFrame.
+    Build a list of injuries for a given team from our per-team ESPN injuries DataFrame.
     Returns list of tuples: (player_name, role, multiplier, impact_points).
-
-    This version is more robust:
-    - Uses full team name, city, nickname, ESPN abbreviation, and a 3-letter code.
-    - Matches if ANY of those tokens appears in the ESPN 'Team' cell.
     """
-    if "Team" not in injury_df.columns:
+    if injury_df is None or injury_df.empty:
         return []
 
-    # Full name from BDL (e.g. "Milwaukee Bucks")
     full_name = str(team_name_or_abbrev).strip()
-    full_lower = full_name.lower()
 
-    # Split into city + nickname (e.g. "Milwaukee", "Bucks")
-    parts = full_lower.split()
-    if len(parts) > 1:
-        city = " ".join(parts[:-1])
-        nickname = parts[-1]
-    else:
-        city = full_lower
-        nickname = full_lower
+    if "Team" not in injury_df.columns:
+        print(f"[inj-match] No 'Team' column in injury_df when looking for {full_name}.")
+        return []
 
-    # ESPN abbreviation mapping (if present)
-    mapped_abbr = ESPN_TEAM_ABBR.get(full_name, full_name).lower()
+    df_team = injury_df[injury_df["Team"].astype(str) == full_name].copy()
 
-    # Simple 3-letter code (common NBA-style abbr)
-    # e.g. "Milwaukee Bucks" -> "mil" (city first 3 letters)
-    fallback_abbr = city.replace(".", "").replace(",", "").replace("-", "")
-    fallback_abbr = fallback_abbr[:3].lower() if len(fallback_abbr) >= 3 else fallback_abbr
-
-    # Add a few special-case alternates for known weird ones
-    special_tokens = set()
-    if "golden state" in full_lower:
-        special_tokens.update(["gs", "gsw"])
-    if "new orleans" in full_lower:
-        special_tokens.update(["no", "nop"])
-    if "san antonio" in full_lower:
-        special_tokens.update(["sa", "sas"])
-    if "new york" in full_lower:
-        special_tokens.update(["ny", "nyk"])
-    if "los angeles clippers" in full_lower:
-        special_tokens.update(["lac", "la clippers"])
-    if "los angeles lakers" in full_lower:
-        special_tokens.update(["lal", "la lakers"])
-    if "utah jazz" in full_lower:
-        special_tokens.update(["uta", "utah"])
-
-    # Build candidate tokens to look for in ESPN 'Team' column
-    candidate_tokens = {
-        full_lower,
-        city,
-        nickname,
-        mapped_abbr,
-        fallback_abbr,
-    }
-    candidate_tokens |= {t for t in special_tokens if t}
-
-    # Clean out empty strings
-    candidate_tokens = {t for t in candidate_tokens if t}
-
-    team_col = injury_df["Team"].astype(str).str.lower()
-
-    def match_row(team_str: str) -> bool:
-        return any(tok in team_str for tok in candidate_tokens)
-
-    mask = team_col.apply(match_row)
-    df_team = injury_df[mask].copy()
-
-    # Optional: debug when nothing matched, to help tuning
     if df_team.empty:
-        sample = injury_df["Team"].dropna().astype(str).unique()[:10]
-        print(
-            f"[inj-match] WARNING: no ESPN injury rows matched for '{full_name}'. "
-            f"Tokens={sorted(candidate_tokens)}. Sample Team values={sample}"
-        )
+        print(f"[inj-match] No injuries found in DataFrame for '{full_name}'.")
+        return []
 
     injuries = []
     for _, row in df_team.iterrows():
@@ -833,7 +722,9 @@ def build_injury_list_for_team_espn(team_name_or_abbrev, injury_df):
 
         injuries.append((name, role, mult, impact_points))
 
+    print(f"[inj-match] {full_name}: matched {len(injuries)} injuries.")
     return injuries
+
 
 def injury_adjustment(home_injuries=None, away_injuries=None):
     """
@@ -953,8 +844,7 @@ def build_odds_csv_template_if_missing(game_date_str, api_key, odds_dir="odds"):
 
 def compute_head_to_head_adjustment(home_team_id, away_team_id, season_year, api_key, max_seasons_back=3):
     """
-    TEMP STUB: head-to-head adjustment is currently disabled to avoid additional
-    BallDontLie calls and rate limits. Returns 0.0 so it won't affect the score.
+    TEMP STUB: head-to-head adjustment is currently disabled.
     """
     return 0.0
 
@@ -1012,134 +902,20 @@ def rest_days_to_fatigue_adjustment(days_rest):
     """
     Map rest days to a fatigue adjustment in points (for the team's score).
     Positive = more rested (helps team), negative = tired.
-
-    This is a simple approximation of:
-    - Back-to-back (1 day rest)       -> strong negative
-    - 3-in-4 type situations (~2 d)   -> mild negative
-    - 4+ days rest                    -> small positive
     """
     if days_rest is None:
         return 0.0
     if days_rest <= 1:
-        # back-to-back or extremely short rest
+        # back-to-back or very short rest
         return -2.0
     if days_rest == 2:
-        # often corresponds to 3-in-4 or 4-in-6 type stretches
+        # likely 3-in-4 / 4-in-6 situations
         return -1.0
     if days_rest >= 4:
         # very rested
         return +0.5
     # 3 days rest → roughly neutral
     return 0.0
-
-
-def build_training_dataset_for_season(season_year: int, api_key: str):
-    """
-    Build a training dataset (X, y) for a full NBA season.
-
-    X: feature vectors from build_matchup_features(home_row, away_row)
-    y: 1 if home team won, 0 if home lost
-    """
-    # Use all games up to the end of the season
-    end_date_iso = f"{season_year + 1}-07-31"
-
-    # Team ratings over full season (for feature values)
-    stats_df = fetch_team_ratings_bdl(
-        season_year=season_year,
-        end_date_iso=end_date_iso,
-        api_key=api_key,
-    )
-
-    X = []
-    y = []
-
-    params = {
-        "seasons[]": season_year,
-        "per_page": 100,
-    }
-    cursor = None
-
-    while True:
-        if cursor is not None:
-            params["cursor"] = cursor
-        else:
-            params.pop("cursor", None)
-
-        games_json = bdl_get("games", params=params, api_key=api_key)
-        games = games_json.get("data", [])
-        meta = games_json.get("meta", {}) or {}
-        cursor = meta.get("next_cursor")
-
-        for g in games:
-            home_team = g["home_team"]
-            away_team = g["visitor_team"]
-
-            home_name = home_team["full_name"]
-            away_name = away_team["full_name"]
-
-            home_score = g.get("home_team_score", 0) or 0
-            away_score = g.get("visitor_team_score", 0) or 0
-
-            # skip unfinished games
-            if home_score == 0 and away_score == 0 and g.get("period", 0) == 0:
-                continue
-
-            try:
-                home_row = find_team_row(home_name, stats_df)
-                away_row = find_team_row(away_name, stats_df)
-            except ValueError:
-                # If a team name doesn't match for some reason, skip this game
-                continue
-
-            feats = build_matchup_features(home_row, away_row)
-            X.append(feats)
-
-            y.append(1 if home_score > away_score else 0)
-
-        if not cursor:
-            break
-
-    X = np.vstack(X)
-    y = np.array(y, dtype=int)
-
-    print(f"[TRAIN] Built training dataset for season {season_year}: X shape={X.shape}, y shape={y.shape}")
-    return X, y
-
-
-def train_matchup_weights(season_year: int, api_key: str):
-    """
-    Train MATCHUP_WEIGHTS using logistic regression on a full season of games.
-    This implicitly learns both the per-feature weights AND the overall scale
-    (so you no longer need to manually tune lam separately).
-    """
-    from sklearn.linear_model import LogisticRegression
-
-    X, y = build_training_dataset_for_season(season_year, api_key)
-
-    # Fit logistic regression with no additional intercept
-    model = LogisticRegression(
-        fit_intercept=False,
-        max_iter=1000,
-        solver="lbfgs",
-    )
-    model.fit(X, y)
-
-    new_weights = model.coef_[0]
-    print("\n[TRAIN] New MATCHUP_WEIGHTS learned from data:")
-    for i, w in enumerate(new_weights):
-        print(f"  w[{i}] = {w:.6f}")
-    print("\n[TRAIN] Paste these into MATCHUP_WEIGHTS in your code to update the model.\n")
-
-    # Evaluate simple accuracy & Brier score
-    from sklearn.metrics import accuracy_score, brier_score_loss
-
-    probs = model.predict_proba(X)[:, 1]
-    acc = accuracy_score(y, (probs >= 0.5).astype(int))
-    brier = brier_score_loss(y, probs)
-    print(f"[TRAIN] Training accuracy: {acc:.4f}")
-    print(f"[TRAIN] Training Brier score: {brier:.4f}")
-
-    return new_weights, acc, brier
 
 
 # -----------------------------
@@ -1159,7 +935,6 @@ def run_daily_probs_for_date(
     """
     Run the full model for one NBA date.
 
-    Upgraded version:
     - Uses blended season + recent form for team strength.
     - Uses ESPN injuries + rest-day fatigue.
     - Scales spreads by SPREAD_SCALE_FACTOR.
@@ -1182,13 +957,19 @@ def run_daily_probs_for_date(
 
     # Schedule from BallDontLie
     games_df = fetch_games_for_date(game_date, stats_df, api_key)
+    print(f"[run_daily] Found {len(games_df)} games for {game_date}.")
 
-    # Injuries
+    # Injuries: fetch ONLY for teams playing today
+    team_names_today = set(games_df["HOME_TEAM_NAME"].tolist() + games_df["AWAY_TEAM_NAME"].tolist())
+    print("[run_daily] Teams today for injuries:", team_names_today)
+
     try:
-        injury_df = fetch_injury_report_espn()
+        injury_df = fetch_injury_report_espn_for_teams(team_names_today)
     except Exception as e:
         print(f"Warning: failed to fetch ESPN injuries: {e}")
-        injury_df = pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
+        injury_df = pd.DataFrame(columns=["Player", "Pos", "Status", "Injury", "Team"])
+
+    print(f"[run_daily] injury_df rows = {len(injury_df)}")
 
     rows = []
 
@@ -1287,9 +1068,8 @@ def run_daily_probs_for_date(
             spread_edge_home = None
 
         # -------------------------
-        # NEW: Recommendation logic with filters
+        # Recommendation logic with filters
         # -------------------------
-
         value_edge = abs(edge_home)                     # vs market
         model_confidence = abs(model_home_prob - 0.5)   # vs 0.5 coin flip
 
@@ -1317,13 +1097,12 @@ def run_daily_probs_for_date(
             if abs(spread_edge_home) < SPREAD_EDGE_THRESHOLD:
                 spread_rec = "Too close to call ATS (edge too small)"
             else:
-                # If market spread is bigger than our spread, we like the dog
                 if spread_edge_home > 0:
                     spread_rec = "Model lean ATS: AWAY"
                 else:
                     spread_rec = "Model lean ATS: HOME"
 
-        # 3) Primary recommendation – only bet when at least one side passes filters
+        # 3) Primary recommendation
         if ("No ML bet" in ml_rec) and (
             "Too close" in spread_rec or "No spread" in spread_rec
         ):
@@ -1333,8 +1112,7 @@ def run_daily_probs_for_date(
         elif "No ML bet" in ml_rec:
             primary_rec = spread_rec
         else:
-            # When both exist, prefer spread
-            primary_rec = spread_rec
+            primary_rec = spread_rec  # usually prefer spread
 
         rows.append(
             {
@@ -1345,7 +1123,7 @@ def run_daily_probs_for_date(
                 "market_home_prob": home_imp,
                 "edge_home": edge_home,
                 "edge_away": edge_away,
-                "model_spread_home": model_spread,  # vegas-style (negative = fav)
+                "model_spread_home": model_spread,
                 "home_ml": home_ml,
                 "away_ml": away_ml,
                 "home_spread": home_spread,
@@ -1373,9 +1151,6 @@ def run_daily_probs_for_date(
 
     df["value_tier"] = df["abs_edge_home"].apply(classify_conf)
 
-    # ------------------------------------
-    # Sort by strongest model-confidence
-    # ------------------------------------
     df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
 
     return df
@@ -1406,7 +1181,7 @@ def main(argv=None):
 
     api_key = get_bdl_api_key()
 
-    # 1) Ensure odds template exists (optional, you can comment this out if you prefer)
+    # 1) Ensure odds template exists (optional)
     build_odds_csv_template_if_missing(game_date, api_key=api_key)
 
     # 2) Load odds from local CSV
