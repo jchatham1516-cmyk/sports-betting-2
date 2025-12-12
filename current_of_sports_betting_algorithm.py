@@ -24,11 +24,6 @@ import numpy as np
 import pandas as pd
 import requests
 
-- name: Install dependencies
-  run: |
-    python -m pip install --upgrade pip
-    pip install -r requirements.txt
-
 # -----------------------------
 # Global tuning constants
 # -----------------------------
