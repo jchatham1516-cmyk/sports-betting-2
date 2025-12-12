@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 import requests
 
+pip install -r requirements.txt
+python current_of_sports_betting_algorithm.py --date 12/12/2025
 # -----------------------------
 # Global tuning constants
 # -----------------------------
