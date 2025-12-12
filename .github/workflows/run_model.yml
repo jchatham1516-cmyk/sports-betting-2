@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dependencies      # ← PUT IT HERE
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -27,7 +27,7 @@ jobs:
         env:
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
         run: |
-          python "current_of_sports_betting_algorithm.py"
+          python current_of_sports_betting_algorithm.py
 
       - name: Upload predictions
         uses: actions/upload-artifact@v4
