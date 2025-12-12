@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from io import BytesIO
+from pypdf import PdfReader
 
 # -----------------------------
 # Global tuning constants
@@ -619,143 +621,135 @@ def estimate_player_impact_simple(pos):
     return 1.0
 from io import StringIO  # add this near your imports at the top
 
-def fetch_injury_report_espn():
+def nba_injury_report_page_url(season_label="2025-26"):
+    # This is the official NBA page listing report PDFs for the season
+    return f"https://official.nba.com/nba-injury-report-{season_label}-season/"
+
+def get_latest_nba_injury_pdf_url_for_date(game_date_obj, season_label="2025-26"):
     """
-    Scrape ESPN league-wide NBA injuries page into a DataFrame with columns:
-        Player, Team, Pos, Status, Injury
-
-    Strategy:
-    - Use requests + BeautifulSoup to fetch the HTML.
-    - For each injuries table on the page, find the nearest preceding heading
-      (team name), parse the table with pandas.read_html, and attach a 'Team'
-      column.
-    - Concatenate all team tables into one DataFrame.
+    Scrape the official NBA injury report page and pick the *latest* PDF link
+    for the given date.
     """
-    url = "https://www.espn.com/nba/injuries"
-    print(f"[inj-fetch] Fetching league-wide injuries from {url}")
+    url = nba_injury_report_page_url(season_label)
+    r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
 
-    try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"[inj-fetch] Failed to fetch ESPN injuries page: {e}")
-        return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    # Example page lines look like:
+    # "December 12: 12:30 a.m ET report | 1:30 a.m ET report | ... "
+    # We’ll match the date header and grab all PDF links that follow it in that block.
+    month_name = game_date_obj.strftime("%B")          # "December"
+    day_num = str(int(game_date_obj.strftime("%d")))   # "12" (no leading zero)
+    needle = f"{month_name} {day_num}:"
 
-    all_team_frames = []
+    # Find the text node containing "December 12:"
+    container = None
+    for p in soup.find_all(["p", "div", "li"]):
+        txt = p.get_text(" ", strip=True)
+        if txt.startswith(needle):
+            container = p
+            break
 
-    # ESPN usually has one table per team, with a heading just before it.
-    # We'll grab every <table> and try to find the closest previous heading
-    # (h1/h2/h3/h4) to use as the team name.
-    tables = soup.find_all("table")
-    if not tables:
-        print("[inj-fetch] No <table> elements found on ESPN injuries page.")
-        return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
+    if container is None:
+        raise RuntimeError(f"Could not find injury report links for '{needle}' on {url}")
 
-    for tbl in tables:
-        # Find nearest previous heading with the team name
-        heading = tbl.find_previous(["h1", "h2", "h3", "h4"])
-        team_name = heading.get_text(strip=True) if heading else ""
+    links = container.find_all("a", href=True)
+    pdfs = [a["href"] for a in links if "ak-static.cms.nba.com" in a["href"] and a["href"].lower().endswith(".pdf")]
+    if not pdfs:
+        raise RuntimeError(f"Found date block for '{needle}' but no PDF links.")
 
-        if not team_name:
-            # If we can't confidently get a team name, skip this table
+    # They’re listed chronologically; last one is latest
+    return pdfs[-1]
+
+def parse_nba_injury_pdf_to_df(pdf_url):
+    """
+    Download the PDF, extract text, parse into a DataFrame:
+    columns: Team, Player, Status, Pos, Injury
+    """
+    r = requests.get(pdf_url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+
+    reader = PdfReader(BytesIO(r.content))
+    text = "\n".join((page.extract_text() or "") for page in reader.pages)
+
+    # The PDF is a table, but extracted as lines.
+    # We’ll parse by detecting team headers and then rows.
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    rows = []
+    current_team = None
+
+    # Heuristic: team lines are ALL CAPS team names (often like "ATLANTA HAWKS")
+    # Player rows usually contain a name + position + status.
+    for ln in lines:
+        # team header heuristic
+        if ln.isupper() and len(ln) >= 6 and "REPORT" not in ln and "INJURY" not in ln and "NBA" not in ln:
+            current_team = ln.title()
             continue
 
-        # Parse this single table HTML via pandas
+        if current_team is None:
+            continue
+
+        # Try to parse a player row:
+        # This is intentionally tolerant; PDFs vary slightly.
+        # Common statuses: Out, Doubtful, Questionable, Probable
+        statuses = ["Out", "Doubtful", "Questionable", "Probable"]
+        found_status = None
+        for st in statuses:
+            if f" {st} " in f" {ln} ":
+                found_status = st
+                break
+        if not found_status:
+            continue
+
+        # Very rough split: assume "Player ... POS ... Status ... Injury..."
+        # We’ll just capture player as leading chunk up to first position token.
+        pos_tokens = ["PG", "SG", "SF", "PF", "C", "G", "F"]
+        parts = ln.split()
+
+        # find first pos token index
+        pos_i = None
+        for i, tok in enumerate(parts):
+            if tok in pos_tokens:
+                pos_i = i
+                break
+        if pos_i is None or pos_i < 1:
+            continue
+
+        player = " ".join(parts[:pos_i])
+        pos = parts[pos_i]
+
+        # everything after status = injury description (best-effort)
+        # locate status word index
         try:
-            html_str = str(tbl)
-            tdfs = pd.read_html(StringIO(html_str))
-        except Exception as e:
-            print(f"[inj-fetch] Failed to parse table for '{team_name}': {e}")
+            st_i = parts.index(found_status)
+        except ValueError:
             continue
+        injury = " ".join(parts[st_i + 1:]).strip()
 
-        if not tdfs:
-            continue
+        rows.append(
+            {"Team": current_team, "Player": player, "Pos": pos, "Status": found_status, "Injury": injury}
+        )
 
-        tdf = tdfs[0].copy()
-        tdf["Team"] = team_name
-        all_team_frames.append(tdf)
+    return pd.DataFrame(rows)
 
-    if not all_team_frames:
-        print("[inj-fetch] No valid team tables could be parsed.")
-        return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
+def fetch_injury_report_official_nba(game_date_obj):
+    # Adjust season label if you want to compute from date; hardcoding is fine for now
+    pdf_url = get_latest_nba_injury_pdf_url_for_date(game_date_obj, season_label="2025-26")
+    print(f"[inj-fetch] Using NBA official injury PDF: {pdf_url}")
+    df = parse_nba_injury_pdf_to_df(pdf_url)
+    print(f"[inj-fetch] Parsed injury rows: {len(df)}")
+    return df
 
-    df_all = pd.concat(all_team_frames, ignore_index=True)
-    print(f"[inj-fetch] Raw tables combined rows: {len(df_all)}")
-    print("[inj-fetch] Raw columns:", list(df_all.columns))
-
-    # Normalize column names heuristically
-    rename_map = {}
-    for c in df_all.columns:
-        lc = str(c).strip().lower()
-        if "player" in lc or "name" in lc:
-            rename_map[c] = "Player"
-        elif "team" in lc:
-            rename_map[c] = "Team"
-        elif "pos" in lc:
-            rename_map[c] = "Pos"
-        elif "status" in lc:
-            rename_map[c] = "Status"
-        elif "injury" in lc or "reason" in lc or "comment" in lc or "return" in lc:
-            rename_map[c] = "Injury"
-
-    df_all = df_all.rename(columns=rename_map)
-
-    keep_cols = [c for c in ["Player", "Team", "Pos", "Status", "Injury"] if c in df_all.columns]
-    if not keep_cols:
-        print("[inj-fetch] Could not find expected injury columns after renaming.")
-        return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
-
-    df_all = df_all[keep_cols].copy()
-
-    # Drop junk rows without a player
-    if "Player" in df_all.columns:
-        df_all = df_all[
-            df_all["Player"].notna()
-            & (df_all["Player"].astype(str).str.strip() != "")
-        ]
-
-    print(f"[inj-fetch] League-wide injuries rows after cleaning: {len(df_all)}")
-    if not df_all.empty:
-        print("[inj-fetch] Sample injuries:\n", df_all.head())
-
-    return df_all
-
-def build_injury_list_for_team_espn(team_name, injury_df):
-    """
-    Build a list of injuries for a given team from league-wide ESPN injuries DataFrame.
-    Returns list of tuples: (player_name, role, multiplier, impact_points).
-    """
+def build_injury_list_for_team_official(team_name, injury_df):
     if injury_df is None or injury_df.empty:
         return []
 
-    full_name = str(team_name).strip()
-    full_name_l = full_name.lower()
-
-    if "Team" not in injury_df.columns:
-        print(f"[inj-match] No 'Team' column in injury_df when looking for {full_name}.")
-        return []
-
-    team_col = injury_df["Team"].astype(str)
-    team_col_l = team_col.str.lower()
-
-    abbr = ESPN_TEAM_ABBR.get(full_name, "").lower()
-    # Basic heuristics: exact match, contains abbr, contains city, contains nickname
-    parts = full_name_l.split()
-    city = parts[0] if parts else ""
-    nickname = parts[-1] if len(parts) > 1 else ""
-
-    mask_exact = team_col_l == full_name_l
-    mask_abbr = team_col_l.str.contains(abbr) if abbr else False
-    mask_city = team_col_l.str.contains(city) if city else False
-    mask_nick = team_col_l.str.contains(nickname) if nickname else False
-
-    mask = mask_exact | mask_abbr | mask_city | mask_nick
-    df_team = injury_df[mask].copy()
-
+    # Match by contains — PDF team names are usually full names
+    t = team_name.strip().lower()
+    df_team = injury_df[injury_df["Team"].astype(str).str.lower().str.contains(t.split()[-1])].copy()
     if df_team.empty:
-        print(f"[inj-match] No injuries matched for '{full_name}'.")
         return []
 
     injuries = []
@@ -763,16 +757,11 @@ def build_injury_list_for_team_espn(team_name, injury_df):
         name = row.get("Player", "")
         pos = row.get("Pos", "")
         status = row.get("Status", "")
-
         role = guess_role(name, pos)
         mult = status_to_mult(status)
         impact_points = estimate_player_impact_simple(pos)
-
         injuries.append((name, role, mult, impact_points))
-
-    print(f"[inj-match] {full_name}: matched {len(injuries)} injuries.")
     return injuries
-
 
 def injury_adjustment(home_injuries=None, away_injuries=None):
     """
@@ -1010,7 +999,9 @@ def run_daily_probs_for_date(
         return pd.DataFrame()
 
     # Injuries: league-wide, once
-    injury_df = fetch_injury_report_espn()
+   injury_df = fetch_injury_report_official_nba(game_date_obj)
+home_inj = build_injury_list_for_team_official(home_name, injury_df)
+away_inj = build_injury_list_for_team_official(away_name, injury_df)
     print(f"[run_daily] injury_df rows = {len(injury_df)}")
 
     rows = []
