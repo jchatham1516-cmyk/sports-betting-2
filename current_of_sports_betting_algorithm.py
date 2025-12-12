@@ -597,7 +597,74 @@ ESPN_TEAM_ABBR = {
     "Utah Jazz": "UTAH",
     "Washington Wizards": "WSH",
 }
+def fetch_injury_report_espn_for_teams(team_names):
+    """
+    Fetch injuries from ESPN *per team* (team injury pages),
+    and return a single DataFrame with columns:
+        Player, Pos, Status, Injury, Team
 
+    team_names: iterable of full team names from BallDontLie
+                (e.g. "Golden State Warriors", "Chicago Bulls").
+    """
+    frames = []
+
+    for full_name in sorted(set(team_names)):
+        full_name_str = str(full_name).strip()
+        abbr = ESPN_TEAM_ABBR.get(full_name_str)
+
+        if not abbr:
+            print(f"[inj-fetch] No ESPN_TEAM_ABBR mapping for '{full_name_str}', skipping.")
+            continue
+
+        slug = abbr.lower()  # e.g. "GS" -> "gs", "MIL" -> "mil"
+        url = f"https://www.espn.com/nba/team/injuries/_/name/{slug}"
+
+        try:
+            tables = pd.read_html(url)
+        except Exception as e:
+            print(f"[inj-fetch] Failed to read HTML for {full_name_str} ({url}): {e}")
+            continue
+
+        if not tables:
+            print(f"[inj-fetch] No tables found on {url} for {full_name_str}")
+            continue
+
+        df_team_raw = tables[0].copy()
+        if df_team_raw.empty:
+            print(f"[inj-fetch] Empty injury table for {full_name_str} at {url}")
+            continue
+
+        # Normalize column names
+        rename_map = {}
+        for c in df_team_raw.columns:
+            lc = str(c).strip().lower()
+            if "name" in lc or "player" in lc:
+                rename_map[c] = "Player"
+            elif "pos" in lc:
+                rename_map[c] = "Pos"
+            elif "status" in lc:
+                rename_map[c] = "Status"
+            elif "injury" in lc or "reason" in lc or "comment" in lc:
+                rename_map[c] = "Injury"
+
+        df_team = df_team_raw.rename(columns=rename_map)
+
+        keep_cols = [c for c in ["Player", "Pos", "Status", "Injury"] if c in df_team.columns]
+        df_team = df_team[keep_cols].copy()
+
+        # Tag with the full team name so we can filter later
+        df_team["Team"] = full_name_str
+
+        frames.append(df_team)
+
+    if not frames:
+        print("[inj-fetch] WARNING: No injuries found for any team. Returning empty DataFrame.")
+        return pd.DataFrame(columns=["Player", "Pos", "Status", "Injury", "Team"])
+
+    injury_df = pd.concat(frames, ignore_index=True)
+    print(f"[inj-fetch] Combined injury rows: {len(injury_df)}")
+    print("[inj-fetch] Sample:\n", injury_df.head())
+    return injury_df
 
 def fetch_injury_report_espn():
     """
