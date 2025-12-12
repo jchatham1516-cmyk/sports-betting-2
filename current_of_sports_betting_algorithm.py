@@ -470,34 +470,34 @@ def get_latest_nba_injury_pdf_url_for_date(game_date_obj: date, season_label: st
 
     return pdfs[-1]
 
-def parse_nba_injury_pdf_to_df(pdf_url: str) -> pd.DataFrame:
-    """Download + parse NBA official injury report PDF into a dataframe.
+def parse_nba_injury_pdf_to_df(pdf_bytes):
+    import re
+    import io
+    import pandas as pd
+    from pypdf import PdfReader
 
-    This parser is intentionally defensive because the NBA PDF layout shifts often.
-    It supports two common formats:
-      A) Team name appears as a header line, followed by player lines.
-      B) Team is a column on the same line as Player/Pos/Status.
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    raw_lines = []
 
-    Returns columns: Team, Player, Pos, Status, Injury
-    """
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        for ln in text.splitlines():
+            ln = ln.strip()
+            if ln:
+                raw_lines.append(ln)
 
-    def download_pdf_bytes(url: str) -> bytes:
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Accept": "application/pdf,application/octet-stream,*/*",
-            "Referer": "https://official.nba.com/",
-        }
-        resp = requests.get(url, timeout=30, headers=headers, allow_redirects=True)
-        resp.raise_for_status()
-        data = resp.content
-        # Verify we really got a PDF
-        if not data.startswith(b"%PDF"):
-            snippet = data[:200].decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"Injury report download is not a PDF (Content-Type={resp.headers.get('Content-Type')}). "
-                f"First bytes/snippet: {snippet}"
-            )
-        return data
+    # 👇 THIS is the parser I gave you
+    injury_df = parse_lines_to_injuries(raw_lines)
+
+    print(f"[inj-fetch] Parsed injury rows: {len(injury_df)}")
+
+    # Optional debug dump
+    if injury_df.empty:
+        with open("results/injury_debug.txt", "w", encoding="utf-8") as f:
+            for ln in raw_lines[:200]:
+                f.write(ln + "\n")
+
+    return injury_df
 
     def extract_text_lines(pdf_bytes: bytes) -> list[str]:
         # 1) pypdf extraction (layout then plain)
