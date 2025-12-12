@@ -617,62 +617,39 @@ def estimate_player_impact_simple(pos):
     if pos in ["PG", "SG", "SF", "PF", "C"]:
         return 2.0
     return 1.0
-
-
 def fetch_injury_report_espn():
     """
     Scrape ESPN league-wide NBA injuries page into a DataFrame with columns:
         Player, Team, Pos, Status, Injury
 
-    This uses requests + BeautifulSoup + pandas.read_html on each <table>.
+    Uses pandas.read_html directly on the URL (simpler and more robust).
     If anything fails, returns an empty DataFrame and the model falls back
     to 'no injuries'.
     """
     url = "https://www.espn.com/nba/injuries"
     print(f"[inj-fetch] Fetching league-wide injuries from {url}")
     try:
-        resp = requests.get(
+        # Let pandas handle the fetching + table parsing
+        tables = pd.read_html(
             url,
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=20,
+            displayed_only=False,  # be more permissive if supported
         )
-        resp.raise_for_status()
     except Exception as e:
-        print(f"[inj-fetch] Failed HTTP fetch for ESPN injuries: {e}")
+        print(f"[inj-fetch] Failed to parse ESPN injuries tables: {e}")
         return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
 
-    html = resp.text
-    soup = BeautifulSoup(html, "html.parser")
-    tables = soup.find_all("table")
-    frames = []
-
-    for tbl in tables:
-        try:
-            # read_html expects string of HTML
-            tbl_html = str(tbl)
-            tdf_list = pd.read_html(tbl_html)
-            if not tdf_list:
-                continue
-            tdf = tdf_list[0]
-
-            cols_low = [str(c).lower() for c in tdf.columns]
-            if (
-                any("player" in c or "name" in c for c in cols_low)
-                and any("team" in c for c in cols_low)
-            ):
-                frames.append(tdf)
-        except Exception:
-            continue
-
-    if not frames:
-        print("[inj-fetch] No valid injury tables could be parsed.")
+    if not tables:
+        print("[inj-fetch] No tables returned by pandas.read_html.")
         return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
 
-    df = pd.concat(frames, ignore_index=True)
+    # Concatenate all tables; we'll normalize columns after
+    df_all = pd.concat(tables, ignore_index=True)
+    print(f"[inj-fetch] Raw tables combined rows: {len(df_all)}")
+    print("[inj-fetch] Raw columns:", list(df_all.columns))
 
-    # Normalize column names
+    # Normalize column names heuristically
     rename_map = {}
-    for c in df.columns:
+    for c in df_all.columns:
         lc = str(c).strip().lower()
         if "player" in lc or "name" in lc:
             rename_map[c] = "Player"
@@ -685,16 +662,24 @@ def fetch_injury_report_espn():
         elif "injury" in lc or "reason" in lc or "comment" in lc:
             rename_map[c] = "Injury"
 
-    df = df.rename(columns=rename_map)
+    df_all = df_all.rename(columns=rename_map)
 
-    keep_cols = [c for c in ["Player", "Team", "Pos", "Status", "Injury"] if c in df.columns]
-    df = df[keep_cols].copy()
+    keep_cols = [c for c in ["Player", "Team", "Pos", "Status", "Injury"] if c in df_all.columns]
+    if not keep_cols:
+        print("[inj-fetch] Could not find expected injury columns after renaming.")
+        return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
 
-    print(f"[inj-fetch] League-wide injuries rows: {len(df)}")
-    if not df.empty:
-        print("[inj-fetch] Sample injuries:\n", df.head())
+    df_all = df_all[keep_cols].copy()
 
-    return df
+    # Drop rows that don't have a player name (junk header rows)
+    if "Player" in df_all.columns:
+        df_all = df_all[df_all["Player"].notna() & (df_all["Player"].astype(str).str.strip() != "")]
+
+    print(f"[inj-fetch] League-wide injuries rows after cleaning: {len(df_all)}")
+    if not df_all.empty:
+        print("[inj-fetch] Sample injuries:\n", df_all.head())
+
+    return df_all
 
 
 def build_injury_list_for_team_espn(team_name, injury_df):
