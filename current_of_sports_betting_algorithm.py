@@ -617,33 +617,71 @@ def estimate_player_impact_simple(pos):
     if pos in ["PG", "SG", "SF", "PF", "C"]:
         return 2.0
     return 1.0
+from io import StringIO  # add this near your imports at the top
+
 def fetch_injury_report_espn():
     """
     Scrape ESPN league-wide NBA injuries page into a DataFrame with columns:
         Player, Team, Pos, Status, Injury
 
-    Uses pandas.read_html directly on the URL (simpler and more robust).
-    If anything fails, returns an empty DataFrame and the model falls back
-    to 'no injuries'.
+    Strategy:
+    - Use requests + BeautifulSoup to fetch the HTML.
+    - For each injuries table on the page, find the nearest preceding heading
+      (team name), parse the table with pandas.read_html, and attach a 'Team'
+      column.
+    - Concatenate all team tables into one DataFrame.
     """
     url = "https://www.espn.com/nba/injuries"
     print(f"[inj-fetch] Fetching league-wide injuries from {url}")
+
     try:
-        # Let pandas handle the fetching + table parsing
-        tables = pd.read_html(
-            url,
-            displayed_only=False,  # be more permissive if supported
-        )
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
     except Exception as e:
-        print(f"[inj-fetch] Failed to parse ESPN injuries tables: {e}")
+        print(f"[inj-fetch] Failed to fetch ESPN injuries page: {e}")
         return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
 
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    all_team_frames = []
+
+    # ESPN usually has one table per team, with a heading just before it.
+    # We'll grab every <table> and try to find the closest previous heading
+    # (h1/h2/h3/h4) to use as the team name.
+    tables = soup.find_all("table")
     if not tables:
-        print("[inj-fetch] No tables returned by pandas.read_html.")
+        print("[inj-fetch] No <table> elements found on ESPN injuries page.")
         return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
 
-    # Concatenate all tables; we'll normalize columns after
-    df_all = pd.concat(tables, ignore_index=True)
+    for tbl in tables:
+        # Find nearest previous heading with the team name
+        heading = tbl.find_previous(["h1", "h2", "h3", "h4"])
+        team_name = heading.get_text(strip=True) if heading else ""
+
+        if not team_name:
+            # If we can't confidently get a team name, skip this table
+            continue
+
+        # Parse this single table HTML via pandas
+        try:
+            html_str = str(tbl)
+            tdfs = pd.read_html(StringIO(html_str))
+        except Exception as e:
+            print(f"[inj-fetch] Failed to parse table for '{team_name}': {e}")
+            continue
+
+        if not tdfs:
+            continue
+
+        tdf = tdfs[0].copy()
+        tdf["Team"] = team_name
+        all_team_frames.append(tdf)
+
+    if not all_team_frames:
+        print("[inj-fetch] No valid team tables could be parsed.")
+        return pd.DataFrame(columns=["Player", "Team", "Pos", "Status", "Injury"])
+
+    df_all = pd.concat(all_team_frames, ignore_index=True)
     print(f"[inj-fetch] Raw tables combined rows: {len(df_all)}")
     print("[inj-fetch] Raw columns:", list(df_all.columns))
 
@@ -659,7 +697,7 @@ def fetch_injury_report_espn():
             rename_map[c] = "Pos"
         elif "status" in lc:
             rename_map[c] = "Status"
-        elif "injury" in lc or "reason" in lc or "comment" in lc:
+        elif "injury" in lc or "reason" in lc or "comment" in lc or "return" in lc:
             rename_map[c] = "Injury"
 
     df_all = df_all.rename(columns=rename_map)
@@ -671,16 +709,18 @@ def fetch_injury_report_espn():
 
     df_all = df_all[keep_cols].copy()
 
-    # Drop rows that don't have a player name (junk header rows)
+    # Drop junk rows without a player
     if "Player" in df_all.columns:
-        df_all = df_all[df_all["Player"].notna() & (df_all["Player"].astype(str).str.strip() != "")]
+        df_all = df_all[
+            df_all["Player"].notna()
+            & (df_all["Player"].astype(str).str.strip() != "")
+        ]
 
     print(f"[inj-fetch] League-wide injuries rows after cleaning: {len(df_all)}")
     if not df_all.empty:
         print("[inj-fetch] Sample injuries:\n", df_all.head())
 
     return df_all
-
 
 def build_injury_list_for_team_espn(team_name, injury_df):
     """
