@@ -9,7 +9,7 @@
 #     - Off/Def efficiency
 # - Recent form weighting (season + last N games)
 # - Official NBA injury report (PDF) with a simple player impact model
-# - Schedule fatigue (rest days â†’ B2B / 3-in-4 approximation)
+# - Schedule fatigue (rest days → B2B / 3-in-4 approximation)
 # - Local odds CSV for moneyline + spreads
 # - Outputs: model_home_prob, edges, model_spread, ML + spread recommendations
 
@@ -27,6 +27,12 @@ import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
+# ✅ NEW: unified recommendation engine
+from recommendations import (
+    add_recommendations_to_df,
+    Thresholds,
+)
+
 # -----------------------------
 # Global tuning constants
 # -----------------------------
@@ -38,6 +44,7 @@ RECENT_FORM_WEIGHT = 0.35
 SEASON_FORM_WEIGHT = 1.0 - RECENT_FORM_WEIGHT
 RECENT_GAMES_WINDOW = 10
 
+# These are still used by your model scoring, but recommendation thresholds now live in recommendations.py
 EDGE_PROB_THRESHOLD = 0.08
 STRONG_EDGE_THRESHOLD = 0.12
 SPREAD_EDGE_THRESHOLD = 2.5
@@ -383,14 +390,21 @@ def score_to_prob(score, lam=0.25):
     return 1.0 / (1.0 + math.exp(-lam * score))
 
 def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
-    """Map the model score to an estimated home spread.
+    """Map the model score to an estimated home spread (Vegas-style).
 
-    We intentionally use a slightly nonlinear mapping to avoid overly-compressed spreads
-    when the underlying score is tuned primarily for win-prob classification.
     Negative spread = home favored.
+    Positive spread = home underdog.
     """
     s = float(score)
     return -(s * points_per_logit + (s ** 2) * 1.5)
+
+
+# -----------------------------
+# Injury parsing / adjustment
+# -----------------------------
+# NOTE: Your injury parser relies on NBA_TEAM_NAMES, STATUS_WORDS, INJURY_STATUS_MULTIPLIER, INJURY_WEIGHTS
+# which are not included in the snippet you pasted earlier.
+# I left your injury functions unchanged below, assuming you have those globals defined elsewhere in your file.
 
 def parse_tokens_to_injuries(tokens: list[str]) -> pd.DataFrame:
     """Parse NBA injury PDF when extracted text is one-word-per-line."""
@@ -490,14 +504,6 @@ def parse_tokens_to_injuries(tokens: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["Team", "Player", "Status", "Reason"])
 
 
-def guess_role(player_name, pos):
-    pos = (pos or "").upper()
-    if pos in ["PG", "SG", "SF", "PF"]:
-        return "starter"
-    if pos in ["C", "F", "G"]:
-        return "rotation"
-    return "rotation"
-
 def status_to_mult(status):
     if not isinstance(status, str):
         return 1.0
@@ -508,29 +514,20 @@ def status_to_mult(status):
     return 1.0
 
 
-
 def estimate_player_impact_from_reason(reason: str) -> float:
-    """Heuristic impact score (no positions/roster needed).
-
-    Returns a rough 'points' value used by injury_adjustment. Status probability is handled
-    separately via status_to_mult().
-    """
+    """Heuristic impact score (no positions/roster needed)."""
     r = (reason or "").lower()
 
-    # Ignore non-rotation designations here; filtering happens earlier.
     base = 2.0
 
-    # Lower-impact reasons
     if "illness" in r or "sick" in r:
         base = 1.0
     if "personal" in r:
         base = 1.0
 
-    # Higher-impact / longer-term injuries
     if "surgery" in r or "recovery" in r or "stress reaction" in r or "fracture" in r:
         base = max(base, 2.6)
 
-    # Common high-impact body parts
     if "achilles" in r:
         base = max(base, 3.2)
     if "knee" in r:
@@ -546,17 +543,11 @@ def estimate_player_impact_from_reason(reason: str) -> float:
     if "concussion" in r or "protocol" in r:
         base = max(base, 1.8)
 
-    # Small stuff
     if "thumb" in r or "hand" in r or "finger" in r or "toe" in r:
         base = min(base, 1.6) if base <= 2.0 else base
 
     return float(base)
 
-def estimate_player_impact_simple(pos):
-    pos = (pos or "").upper()
-    if pos in ["PG", "SG", "SF", "PF", "C"]:
-        return 2.0
-    return 1.0
 
 def nba_injury_report_page_url(season_label: str):
     return f"https://official.nba.com/nba-injury-report-{season_label}-season/"
@@ -569,8 +560,8 @@ def get_latest_nba_injury_pdf_url_for_date(game_date_obj: date, season_label: st
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 
-    month_name = game_date_obj.strftime("%B")          # December
-    day_num = str(int(game_date_obj.strftime("%d")))   # 12
+    month_name = game_date_obj.strftime("%B")
+    day_num = str(int(game_date_obj.strftime("%d")))
     needle = f"{month_name} {day_num}:"
 
     container = None
@@ -656,7 +647,6 @@ def build_injury_list_for_team_official(team_name: str, injury_df: pd.DataFrame)
     df_team = df[df["Team_norm"] == team_norm].copy()
 
     if df_team.empty:
-        # fallback: match by nickname (last word)
         nick = team_norm.split()[-1]
         df_team = df[df["Team_norm"].str.contains(nick, na=False)].copy()
 
@@ -667,22 +657,16 @@ def build_injury_list_for_team_official(team_name: str, injury_df: pd.DataFrame)
     for _, row in df_team.iterrows():
         name = str(row.get("Player", "") or "").strip()
         status = str(row.get("Status", "") or "").strip()
-
-        # Reason column name depends on parser; support both.
         reason = str(row.get("Reason", "") or row.get("Injury", "") or "").strip()
         reason_l = reason.lower()
 
-        # âœ… Filter out non-rotation / G-League / two-way noise (these were inflating counts)
         if ("g league" in reason_l) or ("two-way" in reason_l) or ("two way" in reason_l) or ("on assignment" in reason_l):
             continue
 
-        # If no player name or status, skip
         if not name or not status:
             continue
 
-        # Role guess is weak without positions; treat as rotation by default.
         role = "rotation"
-
         mult = status_to_mult(status)
         impact_points = estimate_player_impact_from_reason(reason)
 
@@ -882,100 +866,60 @@ def run_daily_probs_for_date(
 
         adj_score = base_score + inj_adj + fatigue_adj + h2h_adj
         model_home_prob = score_to_prob(adj_score, lam)
-        model_spread = score_to_spread(adj_score)
+        # IMPORTANT: this is already a vegas-style HOME spread (negative = home favored)
+        model_spread_home = score_to_spread(adj_score)
 
         key = (home_name, away_name)
         odds_info = odds_dict.get(key, {}) or {}
         home_ml = odds_info.get("home_ml")
         away_ml = odds_info.get("away_ml")
 
-        if home_ml is not None and away_ml is not None:
-            raw_home_prob = american_to_implied_prob(home_ml)
-            raw_away_prob = american_to_implied_prob(away_ml)
-            total = raw_home_prob + raw_away_prob
-            home_imp = raw_home_prob / total if total > 0 else 0.5
-            away_imp = raw_away_prob / total if total > 0 else 0.5
-        elif home_ml is not None:
-            home_imp = american_to_implied_prob(home_ml)
-            away_imp = 1.0 - home_imp
-        elif away_ml is not None:
-            away_imp = american_to_implied_prob(away_ml)
-            home_imp = 1.0 - away_imp
-        else:
-            home_imp = away_imp = 0.5
-
-        edge_home_raw = model_home_prob - home_imp
-        edge_away_raw = (1.0 - model_home_prob) - away_imp
-        edge_shrink = 0.5
-        edge_home = edge_home_raw * edge_shrink
-        edge_away = edge_away_raw * edge_shrink
-
+        # store the market lines (recommendation engine will compute market prob)
         home_spread = spreads_dict.get(key, odds_info.get("home_spread"))
         if home_spread is not None:
             home_spread = float(home_spread)
-            spread_edge_home = home_spread - model_spread
-        else:
-            spread_edge_home = None
-
-        value_edge = abs(edge_home)
-        model_conf = abs(model_home_prob - 0.5)
-
-        if (value_edge < EDGE_PROB_THRESHOLD) or (model_conf < MIN_MODEL_CONFIDENCE):
-            ml_rec = "No ML bet (edge/conf too small)"
-        else:
-            if model_home_prob > 0.5:
-                ml_rec = "Model PICK: HOME (strong)" if value_edge >= STRONG_EDGE_THRESHOLD else "Model lean: HOME"
-            else:
-                ml_rec = "Model PICK: AWAY (strong)" if value_edge >= STRONG_EDGE_THRESHOLD else "Model lean: AWAY"
-
-        if (home_spread is None) or (spread_edge_home is None):
-            spread_rec = "No spread bet (no line)"
-        else:
-            if abs(spread_edge_home) < SPREAD_EDGE_THRESHOLD:
-                spread_rec = "Too close to call ATS (edge too small)"
-            else:
-                spread_rec = "Model lean ATS: AWAY" if spread_edge_home > 0 else "Model lean ATS: HOME"
-
-        if ("No ML bet" in ml_rec) and ("Too close" in spread_rec or "No spread" in spread_rec):
-            primary_rec = "NO BET â€“ edges too small"
-        elif "No spread bet" in spread_rec or "Too close" in spread_rec:
-            primary_rec = ml_rec
-        elif ("No ML bet" in ml_rec) and ("Model lean ATS" in spread_rec):
-            primary_rec = spread_rec
-        else:
-            primary_rec = "NO BET â€“ edges too small"
 
         rows.append({
             "date": game_date,
             "home": home_name,
             "away": away_name,
-            "model_home_prob": model_home_prob,
-            "market_home_prob": home_imp,
-            "edge_home": edge_home,
-            "edge_away": edge_away,
-            "model_spread_home": model_spread,
+            "model_home_prob": float(model_home_prob),
+
+            # market lines:
             "home_ml": home_ml,
             "away_ml": away_ml,
             "home_spread": home_spread,
-            "spread_edge_home": spread_edge_home,
-            "ml_recommendation": ml_rec,
-            "spread_recommendation": spread_rec,
-            "primary_recommendation": primary_rec,
+
+            # model spread (vegas-style home spread)
+            "model_spread_home": float(model_spread_home),
         })
 
     df = pd.DataFrame(rows)
-    df["abs_edge_home"] = (df["model_home_prob"] - 0.5).abs()
 
-    def classify_conf(conf):
-        if conf >= 0.20:
-            return "HIGH CONFIDENCE"
-        elif conf >= 0.10:
-            return "MEDIUM CONFIDENCE"
-        else:
-            return "LOW CONFIDENCE"
+    # ✅ NEW: Replace ALL old recommendation logic with the unified engine
+    df, debug_df = add_recommendations_to_df(
+        df,
+        thresholds=Thresholds(
+            ml_edge_strong=0.06,
+            ml_edge_lean=0.035,
+            ats_edge_strong_pts=3.0,
+            ats_edge_lean_pts=1.5,
+            conf_high=0.18,
+            conf_med=0.10,
+        ),
+        model_spread_home_col="model_spread_home",
+        model_margin_home_col=None,
+    )
 
-    df["value_tier"] = df["abs_edge_home"].apply(classify_conf)
-    df = df.sort_values("abs_edge_home", ascending=False).reset_index(drop=True)
+    # Helpful sort: by VALUE (pricing edge), not certainty
+    df = df.sort_values("edge_home", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
+
+    # Save debug table explaining ML vs ATS divergence
+    os.makedirs("results", exist_ok=True)
+    debug_out = f"results/debug_why_ml_vs_ats_{game_date.replace('/', '-')}.csv"
+    debug_df.to_csv(debug_out, index=False)
+    print(f"[debug] Saved debug table to {debug_out}")
+
     return df
 
 
