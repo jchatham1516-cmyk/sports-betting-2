@@ -1,6 +1,6 @@
-numpy
 pandas
+numpy
 requests
 beautifulsoup4
-lxml
 pypdf
+lxml
