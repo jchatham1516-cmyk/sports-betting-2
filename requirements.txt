@@ -1,6 +1,7 @@
+numpy
 pandas
 requests
 beautifulsoup4
 lxml
-numpy
+html5lib
 scikit-learn
