@@ -7,6 +7,7 @@
 # - Bankroll sizing (flat vs Kelly)
 # - Units (1 unit = 4% of bankroll; default bankroll=250)
 # - Backtest mode using BallDontLie final scores + your odds CSVs
+# - ✅ NEW: reduced unit size for HIGH VALUE bets with MEDIUM/LOW confidence
 #
 # Requires:
 # - recommendations.py in same folder (add_recommendations_to_df, Thresholds, etc.)
@@ -42,10 +43,10 @@ RECENT_GAMES_WINDOW = 10
 
 
 # -----------------------------
-# ✅ Bankroll / unit settings (ADDED)
+# Bankroll / unit settings
 # -----------------------------
 DEFAULT_BANKROLL = 250.0
-UNIT_PCT = 0.04  # 4% of bankroll per unit (so with bankroll=250 -> 1 unit = $10)
+UNIT_PCT = 0.04  # 4% of bankroll per unit (bankroll=250 -> 1 unit=$10)
 
 
 # -----------------------------
@@ -61,7 +62,6 @@ def normalize_team_name(s: str) -> str:
     return s
 
 def season_start_year_for_date(d: date) -> int:
-    # NBA season starts ~Oct; before Aug belongs to prior season year label for BDL
     return d.year - 1 if d.month < 8 else d.year
 
 def american_to_implied_prob(odds):
@@ -87,9 +87,6 @@ def safe_float(x) -> Optional[float]:
         return float(x)
     except Exception:
         return None
-
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
 
 
 # -----------------------------
@@ -268,11 +265,15 @@ def fetch_team_ratings_bdl(season_year: int, end_date_iso: str, api_key: str):
                     games_by_team[away_id].append({"date": g_date, "pts_for": away_score, "pts_against": home_score})
 
             if home_score > away_score:
-                if home_id in agg: agg[home_id]["wins"] += 1
-                if away_id in agg: agg[away_id]["losses"] += 1
+                if home_id in agg:
+                    agg[home_id]["wins"] += 1
+                if away_id in agg:
+                    agg[away_id]["losses"] += 1
             elif away_score > home_score:
-                if away_id in agg: agg[away_id]["wins"] += 1
-                if home_id in agg: agg[home_id]["losses"] += 1
+                if away_id in agg:
+                    agg[away_id]["wins"] += 1
+                if home_id in agg:
+                    agg[home_id]["losses"] += 1
 
         if not cursor:
             break
@@ -382,21 +383,18 @@ def season_matchup_base_score(home_row, away_row):
 
 def score_to_prob(score, lam=0.25):
     return 1.0 / (1.0 + math.exp(-lam * score))
-def score_to_spread(score, points_per_logit=4.0):
-    """
-    Convert model score to a HOME spread.
-    Negative = home favored
-    """
+
+def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
+    """Vegas-style HOME spread: negative=home favored, positive=home dog."""
     s = float(score)
-    return -(s * points_per_logit)
+    return -(s * points_per_logit + (s ** 2) * 1.5)
+
 
 # -----------------------------
-# Injuries (KEEPING YOUR LOGIC)
+# Injuries (your logic retained)
 # -----------------------------
-# If you already have these defined elsewhere in THIS FILE, remove this block.
-# Otherwise, these defaults prevent NameError but you should replace with your real settings.
 
-NBA_TEAM_NAMES = globals().get("NBA_TEAM_NAMES", [
+NBA_TEAM_NAMES = [
     "Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "Charlotte Hornets",
     "Chicago Bulls", "Cleveland Cavaliers", "Dallas Mavericks", "Denver Nuggets",
     "Detroit Pistons", "Golden State Warriors", "Houston Rockets", "Indiana Pacers",
@@ -405,21 +403,21 @@ NBA_TEAM_NAMES = globals().get("NBA_TEAM_NAMES", [
     "Oklahoma City Thunder", "Orlando Magic", "Philadelphia 76ers", "Phoenix Suns",
     "Portland Trail Blazers", "Sacramento Kings", "San Antonio Spurs", "Toronto Raptors",
     "Utah Jazz", "Washington Wizards"
-])
+]
 
-STATUS_WORDS = globals().get("STATUS_WORDS", {"Out", "Doubtful", "Questionable", "Probable"})
+STATUS_WORDS = {"Out", "Doubtful", "Questionable", "Probable"}
 
-INJURY_STATUS_MULTIPLIER = globals().get("INJURY_STATUS_MULTIPLIER", {
+INJURY_STATUS_MULTIPLIER = {
     "out": 1.0,
     "doubt": 0.75,
     "question": 0.45,
     "prob": 0.20
-})
+}
 
-INJURY_WEIGHTS = globals().get("INJURY_WEIGHTS", {
+INJURY_WEIGHTS = {
     "starter": 1.0,
     "rotation": 0.55
-})
+}
 
 def status_to_mult(status):
     if not isinstance(status, str):
@@ -503,7 +501,6 @@ def download_pdf_bytes(url: str, timeout: int = 30) -> bytes:
     return data
 
 def parse_tokens_to_injuries(tokens: list[str]) -> pd.DataFrame:
-    """Parse NBA injury PDF when extracted text is one-word-per-line."""
     team_tokens_map: list[tuple[int, list[str], str]] = []
     for t in NBA_TEAM_NAMES:
         tt = t.split()
@@ -556,7 +553,7 @@ def parse_tokens_to_injuries(tokens: list[str]) -> pd.DataFrame:
             while j < len(tokens) and tokens[j] not in STATUS_WORDS:
                 if "@" in tokens[j] and len(tokens[j]) <= 10:
                     break
-                t2, L2 = match_team(j)
+                t2, _ = match_team(j)
                 if t2:
                     break
                 if is_header(tokens[j]):
@@ -580,7 +577,7 @@ def parse_tokens_to_injuries(tokens: list[str]) -> pd.DataFrame:
                     break
                 if "@" in tokens[k] and len(tokens[k]) <= 10:
                     break
-                t3, L3 = match_team(k)
+                t3, _ = match_team(k)
                 if t3:
                     break
                 if is_header(tokens[k]):
@@ -770,57 +767,51 @@ def rest_days_to_fatigue_adjustment(days_rest):
     if days_rest >= 4:
         return +0.5
     return 0.0
-# --- NEW: ranks + sizing multiplier ---
-TIER_RANK = {"NO VALUE": 0, "LOW VALUE": 1, "MEDIUM VALUE": 2, "HIGH VALUE": 3}
-CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 
-def size_multiplier(value_tier: str, confidence: str) -> float:
-    vt = (value_tier or "").upper().strip()
-    cf = (confidence or "").upper().strip()
-
-    vt_rank = TIER_RANK.get(vt, 0)
-    cf_rank = CONF_RANK.get(cf, 0)
-
-    # Confidence scaling (reduced units when confidence is lower)
-    conf_mult = {2: 1.00, 1: 0.65, 0: 0.40}.get(cf_rank, 0.40)
-
-    # Value tier scaling
-    tier_mult = {3: 1.15, 2: 1.00, 1: 0.85, 0: 0.00}.get(vt_rank, 0.0)
-
-    return max(0.0, min(conf_mult * tier_mult, 1.0))
 
 # -----------------------------
-# Play/Pass + bankroll sizing
+# Play/Pass + bet sizing
 # -----------------------------
 
-TIER_RANK = {"NO VALUE": 0, "LOW VALUE": 1, "MEDIUM VALUE": 2, "HIGH VALUE": 3}
-CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+def _tier_rank(tier: str) -> int:
+    # must match what recommendations.py outputs
+    t = (tier or "").upper().strip()
+    if "HIGH" in t:
+        return 2
+    if "MEDIUM" in t:
+        return 1
+    return 0  # NO VALUE / unknown
+
+def _conf_rank(conf: str) -> int:
+    c = (conf or "").upper().strip()
+    if c == "HIGH":
+        return 2
+    if c == "MEDIUM":
+        return 1
+    return 0
 
 def play_pass_rule(
     row: pd.Series,
     *,
-    require_pick: bool = False,              # ✅ default False (less filtering)
-    min_value_tier: str = "MEDIUM VALUE",    # ✅ allow MEDIUM+ by default
-    min_confidence: str = "LOW",             # ✅ allow LOW+ by default
-    max_abs_moneyline: Optional[int] = 400,  # skip extreme ML prices
+    require_pick: bool = True,
+    min_value_tier: str = "HIGH VALUE",     # ✅ changed: MIN tier rather than exact match
+    min_confidence: str = "MEDIUM",         # LOW / MEDIUM / HIGH
+    max_abs_moneyline: Optional[int] = 400, # skip extreme prices in ML
 ) -> str:
-    primary = str(row.get("primary_recommendation", "") or "")
-    value_tier = str(row.get("value_tier", "") or "").upper().strip()
-    conf = str(row.get("confidence", "") or "").upper().strip()
+    primary = str(row.get("primary_recommendation", ""))
+    value_tier = str(row.get("value_tier", ""))
+    conf = str(row.get("confidence", ""))
 
     if require_pick and ("PICK" not in primary):
         return "PASS"
 
-    # ranked compare: HIGH passes a MEDIUM minimum, etc.
-    vt_rank = TIER_RANK.get(value_tier, 0)
-    min_vt_rank = TIER_RANK.get(str(min_value_tier).upper().strip(), 0)
-    if vt_rank < min_vt_rank:
+    if min_value_tier:
+        if _tier_rank(value_tier) < _tier_rank(min_value_tier):
+            return "PASS"
+
+    if _conf_rank(conf) < _conf_rank(min_confidence):
         return "PASS"
 
-    conf_rank = CONF_RANK.get(conf, 0)
-    min_conf_rank = CONF_RANK.get(str(min_confidence).upper().strip(), 0)
-    if conf_rank < min_conf_rank:
-        return "PASS"
     if max_abs_moneyline is not None and "ML" in primary:
         hm = safe_float(row.get("home_ml"))
         am = safe_float(row.get("away_ml"))
@@ -830,7 +821,6 @@ def play_pass_rule(
             return "PASS"
 
     return "PLAY"
-
 
 def kelly_fraction(p: float, odds_american: float) -> float:
     d = american_to_decimal(odds_american)
@@ -854,6 +844,34 @@ def bet_size_kelly_ml(
     f_adj = min(f * float(kelly_mult), float(max_pct))
     return max(bankroll * f_adj, 0.0)
 
+def confidence_unit_multiplier(
+    value_tier: str,
+    confidence: str,
+    *,
+    high_value_reduce: bool = True,
+    high_value_low_mult: float = 0.40,
+    high_value_med_mult: float = 0.66,
+    high_value_high_mult: float = 1.00,
+) -> float:
+    """
+    ✅ NEW:
+    If it's HIGH VALUE but confidence is MEDIUM/LOW, reduce unit size instead of skipping.
+    """
+    if not high_value_reduce:
+        return 1.0
+
+    vt = (value_tier or "").upper()
+    conf = (confidence or "").upper().strip()
+
+    if "HIGH" not in vt:
+        return 1.0
+
+    if conf == "HIGH":
+        return float(high_value_high_mult)
+    if conf == "MEDIUM":
+        return float(high_value_med_mult)
+    return float(high_value_low_mult)
+
 def compute_bet_size(
     row: pd.Series,
     bankroll: float,
@@ -862,41 +880,48 @@ def compute_bet_size(
     flat_pct: float = UNIT_PCT,
     kelly_mult: float = 0.5,
     kelly_max_pct: float = 0.03,
+    # ✅ NEW controls
+    reduce_units_for_high_value_lower_conf: bool = True,
+    high_value_low_mult: float = 0.40,
+    high_value_med_mult: float = 0.66,
+    high_value_high_mult: float = 1.00,
 ) -> float:
     if str(row.get("play_pass")) != "PLAY":
         return 0.0
 
     primary = str(row.get("primary_recommendation", ""))
 
-    # ---- base sizing ----
+    # base stake
     if sizing_mode == "flat":
-        base = bet_size_flat(bankroll, flat_pct)
+        stake = bet_size_flat(bankroll, flat_pct)
     else:
-        # Kelly (ML only)
+        # kelly: implemented for ML only
         if "HOME ML" in primary:
             ml = safe_float(row.get("home_ml"))
             if ml is None:
                 return 0.0
             p = float(row.get("model_home_prob"))
-            base = bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
-
+            stake = bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
         elif "AWAY ML" in primary:
             ml = safe_float(row.get("away_ml"))
             if ml is None:
                 return 0.0
             p = 1.0 - float(row.get("model_home_prob"))
-            base = bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
+            stake = bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
         else:
-            # ATS falls back to flat in kelly mode
-            base = bet_size_flat(bankroll, flat_pct)
+            # ATS in kelly mode falls back to flat
+            stake = bet_size_flat(bankroll, flat_pct)
 
-    # ---- NEW: reduced unit sizing based on value+confidence ----
-    mult = size_multiplier(
-        value_tier=str(row.get("value_tier", "")),
-        confidence=str(row.get("confidence", "")),
+    # ✅ apply reduced sizing for HIGH VALUE if confidence lower
+    mult = confidence_unit_multiplier(
+        row.get("value_tier", ""),
+        row.get("confidence", ""),
+        high_value_reduce=reduce_units_for_high_value_lower_conf,
+        high_value_low_mult=high_value_low_mult,
+        high_value_med_mult=high_value_med_mult,
+        high_value_high_mult=high_value_high_mult,
     )
-
-    return float(base) * float(mult)
+    return float(stake) * float(mult)
 
 
 # -----------------------------
@@ -1051,7 +1076,6 @@ def run_daily_probs_for_date(
 
     df = pd.DataFrame(rows)
 
-    # Unified edges + recos + why_bet + confidence + value_tier
     df, debug_df = add_recommendations_to_df(
         df,
         thresholds=Thresholds(
@@ -1066,7 +1090,6 @@ def run_daily_probs_for_date(
         model_margin_home_col=None,
     )
 
-    # Save debug table for “why ML ≠ ATS”
     os.makedirs("results", exist_ok=True)
     debug_out = f"results/debug_why_ml_vs_ats_{game_date.replace('/', '-')}.csv"
     debug_df.to_csv(debug_out, index=False)
@@ -1095,10 +1118,11 @@ def backtest_range(
     kelly_max_pct: float,
     ats_price: float,
     play_require_pick: bool,
-    play_require_value_tier: str,
+    play_min_value_tier: str,
     play_min_confidence: str,
     play_max_abs_moneyline: Optional[int],
     api_key: str,
+    reduce_units_for_high_value_lower_conf: bool,
 ):
     start = datetime.strptime(start_date_str, "%m/%d/%Y").date()
     end = datetime.strptime(end_date_str, "%m/%d/%Y").date()
@@ -1141,30 +1165,30 @@ def backtest_range(
         if df.empty:
             continue
 
-        # Play/Pass + sizing
         df["play_pass"] = df.apply(
-    lambda r: play_pass_rule(
-        r,
-        require_pick=play_require_pick,
-        min_value_tier=play_require_value_tier,    # ✅ now treated as MINIMUM tier
-        min_confidence=play_min_confidence,
-        max_abs_moneyline=play_max_abs_moneyline,
-    ),
-    axis=1
-)
-
-        df["bet_size"] = df.apply(
-            lambda r: compute_bet_size(
-                r, bankroll,
-                sizing_mode=sizing_mode,
-                flat_pct=flat_pct,
-                kelly_mult=kelly_mult,
-                kelly_max_pct=kelly_max_pct,
+            lambda r: play_pass_rule(
+                r,
+                require_pick=play_require_pick,
+                min_value_tier=play_min_value_tier,
+                min_confidence=play_min_confidence,
+                max_abs_moneyline=play_max_abs_moneyline,
             ),
             axis=1
         )
 
-        # ✅ Units (ADDED)
+        df["bet_size"] = df.apply(
+            lambda r: compute_bet_size(
+                r,
+                bankroll,
+                sizing_mode=sizing_mode,
+                flat_pct=flat_pct,
+                kelly_mult=kelly_mult,
+                kelly_max_pct=kelly_max_pct,
+                reduce_units_for_high_value_lower_conf=reduce_units_for_high_value_lower_conf,
+            ),
+            axis=1
+        )
+
         unit_dollars = bankroll * UNIT_PCT
         df["unit_dollars"] = unit_dollars
         df["units"] = df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
@@ -1230,6 +1254,8 @@ def backtest_range(
                 "profit": profit,
                 "bankroll_after": bankroll,
                 "why_bet": r.get("why_bet", ""),
+                "confidence": r.get("confidence", ""),
+                "value_tier": r.get("value_tier", ""),
             })
 
         equity.append({
@@ -1260,37 +1286,33 @@ def backtest_range(
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
 
-    # Single-date run
     parser.add_argument("--date", type=str, default=None, help="Game date in MM/DD/YYYY (default: today UTC).")
-
-    # Backtest
     parser.add_argument("--backtest_start", type=str, default=None, help="Backtest start date MM/DD/YYYY")
     parser.add_argument("--backtest_end", type=str, default=None, help="Backtest end date MM/DD/YYYY")
 
-    # ✅ Bankroll/sizing defaults updated (ADDED)
     parser.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL, help="Starting bankroll (default 250)")
     parser.add_argument("--sizing", type=str, default="flat", choices=["flat", "kelly"], help="Sizing mode")
     parser.add_argument("--flat_pct", type=float, default=UNIT_PCT, help="Flat stake percent (default 0.04 = 4%)")
     parser.add_argument("--kelly_mult", type=float, default=0.5, help="Kelly multiplier (0.5 = half Kelly)")
     parser.add_argument("--kelly_max_pct", type=float, default=0.03, help="Max Kelly stake pct (cap)")
 
-    # Play/pass filter
-    parser.add_argument("--play_require_pick", action="store_true", help="Require '(strong) PICK' in primary to PLAY")
-    parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE", help="Require value_tier (e.g. HIGH VALUE)")
+    parser.add_argument("--play_require_pick", action="store_true", help="Require 'PICK' in primary to PLAY")
+    parser.add_argument("--play_min_value_tier", type=str, default="HIGH VALUE", help="Min value tier: NO VALUE / MEDIUM VALUE / HIGH VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"], help="Min confidence")
     parser.add_argument("--play_max_abs_ml", type=int, default=400, help="Pass if selected ML |odds| > this (set 0 to disable)")
 
-    # ATS settlement price assumption
+    parser.add_argument("--reduce_units_for_high_value_lower_conf", action="store_true",
+                        help="If set: HIGH VALUE with MEDIUM/LOW confidence gets reduced bet size instead of full unit")
+
     parser.add_argument("--ats_price", type=float, default=-110.0, help="ATS price for backtest settlement (default -110)")
 
     args = parser.parse_args(argv)
-
     api_key = get_bdl_api_key()
 
     # Backtest mode
     if args.backtest_start and args.backtest_end:
         play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
-        equity_df, bets_df = backtest_range(
+        backtest_range(
             args.backtest_start,
             args.backtest_end,
             initial_bankroll=args.bankroll,
@@ -1300,14 +1322,12 @@ def main(argv=None):
             kelly_max_pct=args.kelly_max_pct,
             ats_price=args.ats_price,
             play_require_pick=args.play_require_pick,
-            play_require_value_tier=args.play_value_tier,
+            play_min_value_tier=args.play_min_value_tier,
             play_min_confidence=args.play_min_conf,
             play_max_abs_moneyline=play_max_abs_ml,
             api_key=api_key,
+            reduce_units_for_high_value_lower_conf=args.reduce_units_for_high_value_lower_conf,
         )
-
-        with pd.option_context("display.max_rows", 20, "display.max_columns", None):
-            print(equity_df.tail(20))
         return
 
     # Single-day mode
@@ -1319,17 +1339,14 @@ def main(argv=None):
 
     print(f"Running model for {game_date}...")
 
-    # Ensure odds template exists (creates blanks if missing)
     build_odds_csv_template_if_missing(game_date, api_key=api_key)
 
-    # Load odds
     try:
         odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date)
     except Exception as e:
         print(f"Warning: failed to load odds: {e}")
         odds_dict, spreads_dict = {}, {}
 
-    # Build stats_df as-of the date
     game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
     season_year = season_start_year_for_date(game_date_obj)
     end_date_iso = game_date_obj.strftime("%Y-%m-%d")
@@ -1344,32 +1361,32 @@ def main(argv=None):
         api_key=api_key,
     )
 
-    # Apply play/pass + sizing for TODAY output
     play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
 
-   results_df["play_pass"] = results_df.apply(
-    lambda r: play_pass_rule(
-        r,
-        require_pick=args.play_require_pick,
-        min_value_tier=args.play_value_tier,   # ✅ now treated as MINIMUM tier
-        min_confidence=args.play_min_conf,
-        max_abs_moneyline=play_max_abs_ml,
-    ),
-    axis=1
-)
-
-    results_df["bet_size"] = results_df.apply(
-        lambda r: compute_bet_size(
-            r, args.bankroll,
-            sizing_mode=args.sizing,
-            flat_pct=args.flat_pct,
-            kelly_mult=args.kelly_mult,
-            kelly_max_pct=args.kelly_max_pct,
+    results_df["play_pass"] = results_df.apply(
+        lambda r: play_pass_rule(
+            r,
+            require_pick=args.play_require_pick,
+            min_value_tier=args.play_min_value_tier,
+            min_confidence=args.play_min_conf,
+            max_abs_moneyline=play_max_abs_ml,
         ),
         axis=1
     )
 
-    # ✅ Units for TODAY output (ADDED)
+    results_df["bet_size"] = results_df.apply(
+        lambda r: compute_bet_size(
+            r,
+            args.bankroll,
+            sizing_mode=args.sizing,
+            flat_pct=args.flat_pct,
+            kelly_mult=args.kelly_mult,
+            kelly_max_pct=args.kelly_max_pct,
+            reduce_units_for_high_value_lower_conf=args.reduce_units_for_high_value_lower_conf,
+        ),
+        axis=1
+    )
+
     unit_dollars = float(args.bankroll) * UNIT_PCT
     results_df["unit_dollars"] = unit_dollars
     results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
