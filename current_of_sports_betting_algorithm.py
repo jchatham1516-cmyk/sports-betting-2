@@ -770,7 +770,24 @@ def rest_days_to_fatigue_adjustment(days_rest):
     if days_rest >= 4:
         return +0.5
     return 0.0
+# --- NEW: ranks + sizing multiplier ---
+TIER_RANK = {"NO VALUE": 0, "LOW VALUE": 1, "MEDIUM VALUE": 2, "HIGH VALUE": 3}
+CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 
+def size_multiplier(value_tier: str, confidence: str) -> float:
+    vt = (value_tier or "").upper().strip()
+    cf = (confidence or "").upper().strip()
+
+    vt_rank = TIER_RANK.get(vt, 0)
+    cf_rank = CONF_RANK.get(cf, 0)
+
+    # Confidence scaling (reduced units when confidence is lower)
+    conf_mult = {2: 1.00, 1: 0.65, 0: 0.40}.get(cf_rank, 0.40)
+
+    # Value tier scaling
+    tier_mult = {3: 1.15, 2: 1.00, 1: 0.85, 0: 0.00}.get(vt_rank, 0.0)
+
+    return max(0.0, min(conf_mult * tier_mult, 1.0))
 
 # -----------------------------
 # Play/Pass + bankroll sizing
@@ -782,32 +799,28 @@ CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 def play_pass_rule(
     row: pd.Series,
     *,
-    require_pick: bool = False,            # default False so it doesn't kill plays
-    min_value_tier: str = "MEDIUM VALUE",  # ✅ allow MEDIUM+ by default
-    min_confidence: str = "LOW",           # ✅ allow LOW+ by default (we size down later)
-    max_abs_moneyline: Optional[int] = 400 # pass extreme ML prices
+    require_pick: bool = False,              # ✅ default False (less filtering)
+    min_value_tier: str = "MEDIUM VALUE",    # ✅ allow MEDIUM+ by default
+    min_confidence: str = "LOW",             # ✅ allow LOW+ by default
+    max_abs_moneyline: Optional[int] = 400,  # skip extreme ML prices
 ) -> str:
     primary = str(row.get("primary_recommendation", "") or "")
     value_tier = str(row.get("value_tier", "") or "").upper().strip()
     conf = str(row.get("confidence", "") or "").upper().strip()
 
-    # Require a pick (optional)
     if require_pick and ("PICK" not in primary):
         return "PASS"
 
-    # Minimum value tier (ranked compare, so HIGH satisfies MEDIUM minimum)
+    # ranked compare: HIGH passes a MEDIUM minimum, etc.
     vt_rank = TIER_RANK.get(value_tier, 0)
     min_vt_rank = TIER_RANK.get(str(min_value_tier).upper().strip(), 0)
     if vt_rank < min_vt_rank:
         return "PASS"
 
-    # Minimum confidence (ranked compare)
     conf_rank = CONF_RANK.get(conf, 0)
     min_conf_rank = CONF_RANK.get(str(min_confidence).upper().strip(), 0)
     if conf_rank < min_conf_rank:
         return "PASS"
-
-    # Optional: avoid insane ML prices when the primary bet is ML
     if max_abs_moneyline is not None and "ML" in primary:
         hm = safe_float(row.get("home_ml"))
         am = safe_float(row.get("away_ml"))
@@ -817,6 +830,7 @@ def play_pass_rule(
             return "PASS"
 
     return "PLAY"
+
 
 def kelly_fraction(p: float, odds_american: float) -> float:
     d = american_to_decimal(odds_american)
@@ -854,26 +868,35 @@ def compute_bet_size(
 
     primary = str(row.get("primary_recommendation", ""))
 
+    # ---- base sizing ----
     if sizing_mode == "flat":
-        return bet_size_flat(bankroll, flat_pct)
+        base = bet_size_flat(bankroll, flat_pct)
+    else:
+        # Kelly (ML only)
+        if "HOME ML" in primary:
+            ml = safe_float(row.get("home_ml"))
+            if ml is None:
+                return 0.0
+            p = float(row.get("model_home_prob"))
+            base = bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
 
-    # kelly: implemented for ML only
-    if "HOME ML" in primary:
-        ml = safe_float(row.get("home_ml"))
-        if ml is None:
-            return 0.0
-        p = float(row.get("model_home_prob"))
-        return bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
+        elif "AWAY ML" in primary:
+            ml = safe_float(row.get("away_ml"))
+            if ml is None:
+                return 0.0
+            p = 1.0 - float(row.get("model_home_prob"))
+            base = bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
+        else:
+            # ATS falls back to flat in kelly mode
+            base = bet_size_flat(bankroll, flat_pct)
 
-    if "AWAY ML" in primary:
-        ml = safe_float(row.get("away_ml"))
-        if ml is None:
-            return 0.0
-        p = 1.0 - float(row.get("model_home_prob"))
-        return bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
+    # ---- NEW: reduced unit sizing based on value+confidence ----
+    mult = size_multiplier(
+        value_tier=str(row.get("value_tier", "")),
+        confidence=str(row.get("confidence", "")),
+    )
 
-    # ATS falls back to flat sizing if using kelly mode
-    return bet_size_flat(bankroll, flat_pct)
+    return float(base) * float(mult)
 
 
 # -----------------------------
@@ -1120,15 +1143,15 @@ def backtest_range(
 
         # Play/Pass + sizing
         df["play_pass"] = df.apply(
-            lambda r: play_pass_rule(
-                r,
-                require_pick=play_require_pick,
-                require_value_tier=play_require_value_tier,
-                min_confidence=play_min_confidence,
-                max_abs_moneyline=play_max_abs_moneyline,
-            ),
-            axis=1
-        )
+    lambda r: play_pass_rule(
+        r,
+        require_pick=play_require_pick,
+        min_value_tier=play_require_value_tier,    # ✅ now treated as MINIMUM tier
+        min_confidence=play_min_confidence,
+        max_abs_moneyline=play_max_abs_moneyline,
+    ),
+    axis=1
+)
 
         df["bet_size"] = df.apply(
             lambda r: compute_bet_size(
@@ -1324,16 +1347,16 @@ def main(argv=None):
     # Apply play/pass + sizing for TODAY output
     play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
 
-    results_df["play_pass"] = results_df.apply(
-        lambda r: play_pass_rule(
-            r,
-            require_pick=args.play_require_pick,
-            require_value_tier=args.play_value_tier,
-            min_confidence=args.play_min_conf,
-            max_abs_moneyline=play_max_abs_ml,
-        ),
-        axis=1
-    )
+   results_df["play_pass"] = results_df.apply(
+    lambda r: play_pass_rule(
+        r,
+        require_pick=args.play_require_pick,
+        min_value_tier=args.play_value_tier,   # ✅ now treated as MINIMUM tier
+        min_confidence=args.play_min_conf,
+        max_abs_moneyline=play_max_abs_ml,
+    ),
+    axis=1
+)
 
     results_df["bet_size"] = results_df.apply(
         lambda r: compute_bet_size(
