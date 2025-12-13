@@ -776,28 +776,38 @@ def rest_days_to_fatigue_adjustment(days_rest):
 # Play/Pass + bankroll sizing
 # -----------------------------
 
+TIER_RANK = {"NO VALUE": 0, "LOW VALUE": 1, "MEDIUM VALUE": 2, "HIGH VALUE": 3}
+CONF_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
 def play_pass_rule(
     row: pd.Series,
     *,
-    require_pick: bool = True,
-    require_value_tier: str = "HIGH VALUE",
-    min_confidence: str = "MEDIUM",  # LOW / MEDIUM / HIGH
-    max_abs_moneyline: Optional[int] = 400,  # skip extreme prices in ML (set None to disable)
+    require_pick: bool = False,            # default False so it doesn't kill plays
+    min_value_tier: str = "MEDIUM VALUE",  # ✅ allow MEDIUM+ by default
+    min_confidence: str = "LOW",           # ✅ allow LOW+ by default (we size down later)
+    max_abs_moneyline: Optional[int] = 400 # pass extreme ML prices
 ) -> str:
-    primary = str(row.get("primary_recommendation", ""))
-    value_tier = str(row.get("value_tier", ""))
-    conf = str(row.get("confidence", ""))
+    primary = str(row.get("primary_recommendation", "") or "")
+    value_tier = str(row.get("value_tier", "") or "").upper().strip()
+    conf = str(row.get("confidence", "") or "").upper().strip()
 
+    # Require a pick (optional)
     if require_pick and ("PICK" not in primary):
         return "PASS"
 
-    if require_value_tier and (value_tier != require_value_tier):
+    # Minimum value tier (ranked compare, so HIGH satisfies MEDIUM minimum)
+    vt_rank = TIER_RANK.get(value_tier, 0)
+    min_vt_rank = TIER_RANK.get(str(min_value_tier).upper().strip(), 0)
+    if vt_rank < min_vt_rank:
         return "PASS"
 
-    conf_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-    if conf_rank.get(conf, 0) < conf_rank.get(min_confidence, 1):
+    # Minimum confidence (ranked compare)
+    conf_rank = CONF_RANK.get(conf, 0)
+    min_conf_rank = CONF_RANK.get(str(min_confidence).upper().strip(), 0)
+    if conf_rank < min_conf_rank:
         return "PASS"
 
+    # Optional: avoid insane ML prices when the primary bet is ML
     if max_abs_moneyline is not None and "ML" in primary:
         hm = safe_float(row.get("home_ml"))
         am = safe_float(row.get("away_ml"))
