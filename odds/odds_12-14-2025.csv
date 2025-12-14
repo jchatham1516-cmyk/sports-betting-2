@@ -1,8 +1,9 @@
 date,home,away,home_ml,away_ml,home_spread
-12/14/2025,Indiana Pacers,Washington Wizards,-330,+265,-9
-12/14/2025,Atlanta Hawks,Philadelphia 76ers,-178,+150,-4.5
-12/14/2025,Cleveland Cavaliers,Charlotte Hornets,-450,+350,-10.5
-12/14/2025,Brooklyn Nets,Milwaukee Bucks,+110,-130,+1.5
-12/14/2025,Chicago Bulls,New Orleans Pelicans,-200,+168,-5
-12/14/2025,Minnesota Timberwolves,Sacramento Kings,-559,+420,-11
-12/14/2025,Phoenix Suns,Los Angeles Lakers,+126,-148,+3.5
+12/14/2025,Indiana Pacers,Washington Wizards,-330,265,-9
+12/14/2025,Cleveland Cavaliers,Charlotte Hornets,-450,350,-10.5
+12/14/2025,Milwaukee Bucks,Brooklyn Nets,-130,110,-1.5
+12/14/2025,Atlanta Hawks,Philadelphia 76ers,-178,150,-4.5
+12/14/2025,New Orleans Pelicans,Chicago Bulls,168,-200,+5
+12/14/2025,Sacramento Kings,Minnesota Timberwolves,420,-559,+11
+12/14/2025,Los Angeles Lakers,Phoenix Suns,-148,126,-3.5
+12/14/2025,Golden State Warriors,Portland Trail Blazers,-250,210,-6
