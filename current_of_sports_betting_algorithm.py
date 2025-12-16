@@ -1,34 +1,22 @@
 # current_of_sports_betting_algorithm.py
 #
-# Daily NBA betting model using BallDontLie + Official NBA injury report PDF + odds (The Odds API + optional CSV fallback).
+# Daily betting model:
+# - NBA: BallDontLie + Official NBA injury report PDF + odds (The Odds API + optional CSV fallback)
+# - NFL/NHL: Elo from The Odds API /scores + odds (The Odds API + optional CSV fallback)
 #
 # Adds:
 # - Play/Pass filter
 # - Bankroll sizing (flat vs Kelly)
 # - Units (1 unit = 4% of bankroll; default bankroll=250)
-# - Backtest mode using BallDontLie final scores + your odds CSVs
+# - Backtest mode (NBA-only in this version) using BallDontLie final scores + your odds CSVs
 #
 # Requires:
 # - recommendations.py in same folder (add_recommendations_to_df, Thresholds, etc.)
-parser.add_argument(
-    "--sport",
-    type=str,
-    default="nba",
-    choices=["nba", "nfl", "nhl"],
-    help="Which sport to run",
-)
-SPORT_TO_ODDS_KEY = {
-    "nba": "basketball_nba",
-    "nfl": "americanfootball_nfl",
-    "nhl": "icehockey_nhl",
-}
-odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
-    game_date,
-    sport_key=SPORT_TO_ODDS_KEY[args.sport],
-)
+
 import os
 import re
 import math
+import json
 import argparse
 import time
 from datetime import datetime, date, timedelta
@@ -48,7 +36,10 @@ from recommendations import add_recommendations_to_df, Thresholds
 # Global tuning constants (model)
 # -----------------------------
 
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+)
 
 SPREAD_SCALE_FACTOR = 4.0
 RECENT_FORM_WEIGHT = 0.35
@@ -64,7 +55,7 @@ UNIT_PCT = 0.04  # 4% of bankroll per unit (so with bankroll=250 -> 1 unit = $10
 
 
 # -----------------------------
-# ✅ The Odds API settings (ADDED)
+# ✅ The Odds API settings
 # -----------------------------
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 DEFAULT_ODDS_BOOKMAKERS = ["draftkings", "fanduel", "betmgm", "pointsbetus", "caesars", "betrivers"]
@@ -115,7 +106,7 @@ def clamp(x: float, lo: float, hi: float) -> float:
 
 
 # -----------------------------
-# ✅ The Odds API (ADDED)
+# ✅ The Odds API helpers
 # -----------------------------
 
 def get_odds_api_key() -> str:
@@ -146,6 +137,7 @@ def _extract_market(bookmaker: dict, market_key: str) -> Optional[dict]:
             return m
     return None
 
+
 def fetch_odds_for_date_from_odds_api(
     game_date_str: str,
     *,
@@ -158,10 +150,12 @@ def fetch_odds_for_date_from_odds_api(
 ) -> tuple[dict, dict]:
     """
     Returns (odds_dict, spreads_dict) keyed by (home_team, away_team)
+
+      odds_dict[(home, away)] = {"home_ml": ..., "away_ml": ..., "home_spread": ...}
+      spreads_dict[(home, away)] = home_spread
     """
     api_key = get_odds_api_key()
     preferred_books = preferred_books or DEFAULT_ODDS_BOOKMAKERS
-
     start_iso, end_iso = _iso_day_bounds(game_date_str)
 
     url = f"{ODDS_API_BASE_URL}/sports/{sport_key}/odds"
@@ -171,7 +165,6 @@ def fetch_odds_for_date_from_odds_api(
         "markets": markets,
         "oddsFormat": odds_format,
         "dateFormat": date_format,
-        # better than fetching everything then filtering yourself:
         "commenceTimeFrom": start_iso,
         "commenceTimeTo": end_iso,
     }
@@ -188,12 +181,15 @@ def fetch_odds_for_date_from_odds_api(
         teams = ev.get("teams", []) or []
         if not home or len(teams) != 2:
             continue
-        away = teams[0] if teams[1] == home else teams[1]
+        away = ev.get("away_team")
+        if not away:
+            away = teams[0] if teams[1] == home else teams[1]
 
         bookmaker = _pick_best_bookmaker(ev.get("bookmakers", []) or [], preferred_books)
         if not bookmaker:
             continue
 
+        # Moneyline
         h2h = _extract_market(bookmaker, "h2h")
         home_ml = np.nan
         away_ml = np.nan
@@ -205,6 +201,7 @@ def fetch_odds_for_date_from_odds_api(
             if away in prices and prices[away] is not None:
                 away_ml = float(prices[away])
 
+        # Spreads / puckline
         spreads = _extract_market(bookmaker, "spreads")
         home_spread = np.nan
         if spreads:
@@ -218,6 +215,156 @@ def fetch_odds_for_date_from_odds_api(
         spreads_dict[key] = home_spread
 
     return odds_dict, spreads_dict
+
+
+# -----------------------------
+# ✅ Odds API scores + Elo (NEW)
+# -----------------------------
+
+def fetch_scores_from_odds_api(
+    sport_key: str,
+    *,
+    days_from: int = 3,   # Odds API supports up to 3 days lookback for scores
+    date_format: str = "iso",
+) -> list[dict]:
+    api_key = get_odds_api_key()
+    url = f"{ODDS_API_BASE_URL}/sports/{sport_key}/scores/"
+    params = {
+        "apiKey": api_key,
+        "daysFrom": int(days_from),
+        "dateFormat": date_format,
+    }
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def elo_expected(r_home: float, r_away: float) -> float:
+    return 1.0 / (1.0 + 10 ** ((r_away - r_home) / 400.0))
+
+def elo_mov_multiplier(mov: float, elo_diff: float) -> float:
+    if mov <= 0:
+        return 1.0
+    return math.log(mov + 1.0) * (2.2 / ((elo_diff * 0.001) + 2.2))
+
+def load_elo_state(path: str) -> dict:
+    if not os.path.exists(path):
+        return {"ratings": {}, "processed_event_ids": []}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_elo_state(path: str, state: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+
+def update_elo_from_scores(
+    state: dict,
+    scores_events: list[dict],
+    *,
+    k_factor: float,
+    home_adv: float,
+    base_rating: float = 1500.0,
+    use_mov: bool = True,
+) -> dict:
+    ratings = state.get("ratings", {}) or {}
+    processed = set(state.get("processed_event_ids", []) or [])
+
+    for ev in scores_events:
+        if not ev.get("completed"):
+            continue
+
+        ev_id = ev.get("id")
+        if not ev_id or ev_id in processed:
+            continue
+
+        home = ev.get("home_team")
+        away = ev.get("away_team")
+        scores = ev.get("scores") or []
+        if not home or not away or len(scores) != 2:
+            continue
+
+        score_map = {}
+        for s in scores:
+            try:
+                score_map[s["name"]] = float(s["score"])
+            except Exception:
+                pass
+        if home not in score_map or away not in score_map:
+            continue
+
+        hs = score_map[home]
+        as_ = score_map[away]
+
+        rh = float(ratings.get(home, base_rating))
+        ra = float(ratings.get(away, base_rating))
+
+        eh = elo_expected(rh + home_adv, ra)
+
+        if hs > as_:
+            ah = 1.0
+        elif hs < as_:
+            ah = 0.0
+        else:
+            ah = 0.5
+
+        mov = abs(hs - as_)
+        mult = elo_mov_multiplier(mov, abs(rh - ra)) if use_mov else 1.0
+
+        delta = k_factor * mult * (ah - eh)
+
+        ratings[home] = rh + delta
+        ratings[away] = ra - delta
+
+        processed.add(ev_id)
+
+    state["ratings"] = ratings
+    state["processed_event_ids"] = sorted(processed)
+    return state
+
+def elo_predict_home_prob(
+    ratings: dict,
+    home: str,
+    away: str,
+    *,
+    home_adv: float,
+    base_rating: float = 1500.0,
+) -> float:
+    rh = float(ratings.get(home, base_rating))
+    ra = float(ratings.get(away, base_rating))
+    return clamp(elo_expected(rh + home_adv, ra), 0.0001, 0.9999)
+
+def fetch_games_for_date_from_odds_api(game_date_str: str, *, sport_key: str) -> list[tuple[str, str]]:
+    """
+    Use /odds to identify games scheduled for date.
+    """
+    api_key = get_odds_api_key()
+    start_iso, end_iso = _iso_day_bounds(game_date_str)
+
+    url = f"{ODDS_API_BASE_URL}/sports/{sport_key}/odds"
+    params = {
+        "apiKey": api_key,
+        "regions": "us",
+        "markets": "h2h",
+        "oddsFormat": "american",
+        "dateFormat": "iso",
+        "commenceTimeFrom": start_iso,
+        "commenceTimeTo": end_iso,
+    }
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+
+    games: list[tuple[str, str]] = []
+    for ev in data:
+        home = ev.get("home_team")
+        away = ev.get("away_team")
+        teams = ev.get("teams") or []
+        if not away and home and len(teams) == 2:
+            away = teams[0] if teams[1] == home else teams[1]
+        if home and away:
+            games.append((home, away))
+    return games
+
 
 # -----------------------------
 # CSV odds loader (still used for backtest + fallback)
@@ -277,7 +424,7 @@ def fetch_odds_for_date_from_csv(game_date_str: str):
 
 
 # -----------------------------
-# BallDontLie low-level client
+# BallDontLie low-level client (NBA only)
 # -----------------------------
 
 BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
@@ -326,7 +473,7 @@ def bdl_get(path, params=None, api_key=None, max_retries=5):
 
 
 # -----------------------------
-# Team ratings built from games
+# Team ratings built from games (NBA)
 # -----------------------------
 
 def fetch_team_ratings_bdl(season_year: int, end_date_iso: str, api_key: str):
@@ -464,7 +611,7 @@ def fetch_team_ratings_bdl(season_year: int, end_date_iso: str, api_key: str):
 
 
 # -----------------------------
-# Team lookup + scoring model
+# Team lookup + scoring model (NBA)
 # -----------------------------
 
 def find_team_row(team_name_input, stats_df):
@@ -520,7 +667,7 @@ def score_to_spread(score, points_per_logit=SPREAD_SCALE_FACTOR):
 
 
 # -----------------------------
-# Injuries (KEEPING YOUR LOGIC)
+# Injuries (NBA only)
 # -----------------------------
 
 NBA_TEAM_NAMES = globals().get("NBA_TEAM_NAMES", [
@@ -793,7 +940,7 @@ def injury_adjustment(home_injuries=None, away_injuries=None):
 
 
 # -----------------------------
-# Schedule / games (BallDontLie)
+# Schedule / games (BallDontLie - NBA)
 # -----------------------------
 
 def fetch_games_for_date(game_date_str, api_key):
@@ -966,7 +1113,7 @@ def compute_bet_size(
 
 
 # -----------------------------
-# Settlement (backtest)
+# Settlement (backtest) - NBA ONLY in this version
 # -----------------------------
 
 def settle_ml(side: str, home_score: int, away_score: int, home_ml: float, away_ml: float, stake: float) -> float:
@@ -1034,7 +1181,7 @@ def resolve_game_scores_for_date(game_date_str: str, api_key: str) -> Dict[Tuple
 
 
 # -----------------------------
-# Main daily engine
+# Main daily engine (NBA only)
 # -----------------------------
 
 def run_daily_probs_for_date(
@@ -1103,7 +1250,6 @@ def run_daily_probs_for_date(
         home_ml = odds_info.get("home_ml", np.nan)
         away_ml = odds_info.get("away_ml", np.nan)
 
-        # IMPORTANT: never return None into recommendations.py
         home_spread = spreads_dict.get(key, odds_info.get("home_spread", np.nan))
         home_spread = safe_float(home_spread)
         if home_spread is None:
@@ -1122,7 +1268,6 @@ def run_daily_probs_for_date(
 
     df = pd.DataFrame(rows)
 
-    # Unified edges + recos + why_bet + confidence + value_tier
     df, debug_df = add_recommendations_to_df(
         df,
         thresholds=Thresholds(
@@ -1137,7 +1282,6 @@ def run_daily_probs_for_date(
         model_margin_home_col=None,
     )
 
-    # Save debug table for “why ML ≠ ATS”
     os.makedirs("results", exist_ok=True)
     debug_out = f"results/debug_why_ml_vs_ats_{game_date.replace('/', '-')}.csv"
     debug_df.to_csv(debug_out, index=False)
@@ -1146,7 +1290,7 @@ def run_daily_probs_for_date(
 
 
 # -----------------------------
-# Backtest driver (kept CSV-based)
+# Backtest driver (NBA only)
 # -----------------------------
 
 def daterange(start: date, end: date):
@@ -1327,12 +1471,21 @@ def backtest_range(
 # -----------------------------
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Run daily NBA betting model (BallDontLie).")
+    parser = argparse.ArgumentParser(description="Run daily betting model (NBA/NFL/NHL).")
+
+    # Sport selection
+    parser.add_argument(
+        "--sport",
+        type=str,
+        default="nba",
+        choices=["nba", "nfl", "nhl"],
+        help="Which sport to run",
+    )
 
     # Single-date run
     parser.add_argument("--date", type=str, default=None, help="Game date in MM/DD/YYYY (default: today UTC).")
 
-    # Backtest
+    # Backtest (NBA-only in this version)
     parser.add_argument("--backtest_start", type=str, default=None, help="Backtest start date MM/DD/YYYY")
     parser.add_argument("--backtest_end", type=str, default=None, help="Backtest end date MM/DD/YYYY")
 
@@ -1349,14 +1502,28 @@ def main(argv=None):
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"], help="Min confidence")
     parser.add_argument("--play_max_abs_ml", type=int, default=400, help="Pass if selected ML |odds| > this (set 0 to disable)")
 
-    # ATS settlement price assumption
+    # ATS settlement price assumption (NBA backtest)
     parser.add_argument("--ats_price", type=float, default=-110.0, help="ATS price for backtest settlement (default -110)")
 
     args = parser.parse_args(argv)
-    api_key = get_bdl_api_key()
 
-    # Backtest mode
+    SPORT_TO_ODDS_KEY = {
+        "nba": "basketball_nba",
+        "nfl": "americanfootball_nfl",
+        "nhl": "icehockey_nhl",
+    }
+
+    SPORT_ELO_PARAMS = {
+        "nba": {"k": 20.0, "hfa": 65.0, "use_mov": True},
+        "nfl": {"k": 28.0, "hfa": 55.0, "use_mov": True},
+        "nhl": {"k": 18.0, "hfa": 45.0, "use_mov": False},
+    }
+
+    # Backtest mode (NBA only)
     if args.backtest_start and args.backtest_end:
+        if args.sport != "nba":
+            raise RuntimeError("Backtest mode is NBA-only right now (BallDontLie settlement). Use --sport nba.")
+        api_key = get_bdl_api_key()
         play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
         equity_df, bets_df = backtest_range(
             args.backtest_start,
@@ -1385,13 +1552,14 @@ def main(argv=None):
     else:
         game_date = args.date
 
-    print(f"Running model for {game_date}...")
+    print(f"Running {args.sport.upper()} model for {game_date}...")
+
+    sport_key = SPORT_TO_ODDS_KEY[args.sport]
 
     # Load odds (Odds API first; fallback to CSV)
     odds_dict, spreads_dict = {}, {}
-
     try:
-        odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(game_date)
+        odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(game_date, sport_key=sport_key)
         if odds_dict:
             print(f"[odds_api] Loaded odds for {len(odds_dict)} games.")
         else:
@@ -1406,19 +1574,84 @@ def main(argv=None):
             print(f"[odds_csv] WARNING: failed to load odds from CSV: {e}")
             odds_dict, spreads_dict = {}, {}
 
-    # Build stats_df as-of the date
-    game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
-    season_year = season_start_year_for_date(game_date_obj)
-    end_date_iso = game_date_obj.strftime("%Y-%m-%d")
-    stats_df = fetch_team_ratings_bdl(season_year=season_year, end_date_iso=end_date_iso, api_key=api_key)
+    # -----------------------------
+    # NBA: BallDontLie + Injuries
+    # -----------------------------
+    if args.sport == "nba":
+        api_key = get_bdl_api_key()
 
-    results_df = run_daily_probs_for_date(
-        game_date=game_date,
-        odds_dict=odds_dict,
-        spreads_dict=spreads_dict,
-        stats_df=stats_df,
-        api_key=api_key,
-    )
+        game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
+        season_year = season_start_year_for_date(game_date_obj)
+        end_date_iso = game_date_obj.strftime("%Y-%m-%d")
+        stats_df = fetch_team_ratings_bdl(season_year=season_year, end_date_iso=end_date_iso, api_key=api_key)
+
+        results_df = run_daily_probs_for_date(
+            game_date=game_date,
+            odds_dict=odds_dict,
+            spreads_dict=spreads_dict,
+            stats_df=stats_df,
+            api_key=api_key,
+        )
+
+    # -----------------------------
+    # NFL/NHL: Elo from Odds API /scores
+    # -----------------------------
+    else:
+        p = SPORT_ELO_PARAMS[args.sport]
+        elo_path = f"results/elo_state_{args.sport}.json"
+
+        state = load_elo_state(elo_path)
+        try:
+            scores_events = fetch_scores_from_odds_api(sport_key, days_from=3, date_format="iso")
+            state = update_elo_from_scores(
+                state,
+                scores_events,
+                k_factor=p["k"],
+                home_adv=p["hfa"],
+                use_mov=p["use_mov"],
+            )
+            save_elo_state(elo_path, state)
+            print(f"[elo] Updated Elo. Teams tracked: {len(state.get('ratings', {}))}")
+        except Exception as e:
+            print(f"[elo] WARNING: could not update Elo from /scores: {e}")
+
+        games = []
+        try:
+            games = fetch_games_for_date_from_odds_api(game_date, sport_key=sport_key)
+        except Exception as e:
+            print(f"[schedule] WARNING: could not fetch games from /odds: {e}")
+
+        rows = []
+        for home, away in games:
+            model_home_prob = elo_predict_home_prob(state.get("ratings", {}), home, away, home_adv=p["hfa"])
+
+            odds_info = odds_dict.get((home, away), {}) or {}
+            rows.append({
+                "date": game_date,
+                "home": home,
+                "away": away,
+                "model_home_prob": float(model_home_prob),
+                "home_ml": odds_info.get("home_ml", np.nan),
+                "away_ml": odds_info.get("away_ml", np.nan),
+                "home_spread": odds_info.get("home_spread", np.nan),
+                "model_spread_home": np.nan,  # add Elo->spread later
+            })
+
+        results_df = pd.DataFrame(rows)
+
+        results_df, debug_df = add_recommendations_to_df(
+            results_df,
+            thresholds=Thresholds(
+                ml_edge_strong=0.06,
+                ml_edge_lean=0.035,
+                ats_edge_strong_pts=3.0,
+                ats_edge_lean_pts=1.5,
+                conf_high=0.18,
+                conf_med=0.10,
+            ),
+            model_spread_home_col="model_spread_home",
+            model_margin_home_col=None,
+        )
 
     # Apply play/pass + sizing for TODAY output
     play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
@@ -1451,7 +1684,7 @@ def main(argv=None):
     results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
 
     os.makedirs("results", exist_ok=True)
-    out_name = f"results/predictions_{game_date.replace('/', '-')}.csv"
+    out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
     results_df.to_csv(out_name, index=False)
 
     with pd.option_context("display.max_columns", None):
