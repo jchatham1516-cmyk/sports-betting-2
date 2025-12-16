@@ -82,6 +82,14 @@ def fetch_odds_for_date_from_odds_api(
     }
 
     r = requests.get(url, params=params, timeout=30)
+    
+        # DEBUG: Odds API response info
+    print("[odds_api DEBUG] status:", r.status_code)
+    print("[odds_api DEBUG] remaining:", r.headers.get("x-requests-remaining"))
+    print("[odds_api DEBUG] used:", r.headers.get("x-requests-used"))
+    print("[odds_api DEBUG] last:", r.headers.get("x-requests-last"))
+    print("[odds_api DEBUG] url:", r.url)
+    
     r.raise_for_status()
     data = r.json()
 
