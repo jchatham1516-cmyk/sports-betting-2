@@ -7,10 +7,7 @@ import os
 import argparse
 from datetime import datetime
 
-import numpy as np
 import pandas as pd
-from sports.nfl.model import run_daily_nfl
-from sports.nhl.model import run_daily_nhl
 
 from recommendations import add_recommendations_to_df, Thresholds
 
@@ -26,8 +23,16 @@ from sports.common.bankroll import (
     compute_bet_size,
 )
 
-from sports.nba.bdl_client import get_bdl_api_key, season_start_year_for_date, fetch_team_ratings_bdl
+from sports.nba.bdl_client import (
+    get_bdl_api_key,
+    season_start_year_for_date,
+    fetch_team_ratings_bdl,
+)
 from sports.nba.model import run_daily_probs_for_date as run_nba_daily
+
+# placeholders (won’t run unless you wire them)
+from sports.nfl.model import run_daily_nfl
+from sports.nhl.model import run_daily_nhl
 
 
 def main(argv=None):
@@ -36,7 +41,6 @@ def main(argv=None):
     parser.add_argument("--sport", type=str, default="nba", choices=["nba", "nfl", "nhl"], help="Which sport to run")
     parser.add_argument("--date", type=str, default=None, help="Game date in MM/DD/YYYY (default: today UTC).")
 
-    # Backtest flags kept for later expansion (NBA backtest still lives in NBA module until we refactor fully)
     parser.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL, help="Starting bankroll (default 250)")
     parser.add_argument("--sizing", type=str, default="flat", choices=["flat", "kelly"], help="Sizing mode")
     parser.add_argument("--flat_pct", type=float, default=UNIT_PCT, help="Flat stake percent (default 0.04)")
@@ -94,8 +98,17 @@ def main(argv=None):
             stats_df=stats_df,
             api_key=api_key,
         )
+
+    elif args.sport == "nfl":
+        # placeholder until you wire a full NFL model
+        results_df = run_daily_nfl(game_date, odds_dict=odds_dict, spreads_dict=spreads_dict)
+
+    elif args.sport == "nhl":
+        # placeholder until you wire a full NHL model
+        results_df = run_daily_nhl(game_date, odds_dict=odds_dict, spreads_dict=spreads_dict)
+
     else:
-        raise RuntimeError(f"{args.sport.upper()} not wired yet. NBA is working; NFL/NHL coming next.")
+        raise RuntimeError(f"Unknown sport: {args.sport}")
 
     if results_df is None or results_df.empty:
         print("[model] No games returned.")
@@ -159,24 +172,8 @@ def main(argv=None):
 
     print(f"\nSaved predictions to {out_name}")
     print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
-if args.sport == "nfl":
-    df = run_daily_nfl(game_date)
-    os.makedirs("results", exist_ok=True)
-    out_name = f"results/predictions_nfl_{game_date.replace('/', '-')}.csv"
-    df.to_csv(out_name, index=False)
-    print(df)
-    print(f"Saved predictions to {out_name}")
-    return
-
-if args.sport == "nhl":
-    df = run_daily_nhl(game_date)
-    os.makedirs("results", exist_ok=True)
-    out_name = f"results/predictions_nhl_{game_date.replace('/', '-')}.csv"
-    df.to_csv(out_name, index=False)
-    print(df)
-    print(f"Saved predictions to {out_name}")
-    return
 
 
 if __name__ == "__main__":
     main()
+
