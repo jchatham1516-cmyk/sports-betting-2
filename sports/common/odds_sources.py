@@ -1,13 +1,10 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
-
-print("[odds_api] key present:", bool(os.environ.get("ODDS_API_KEY")))
 
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 DEFAULT_ODDS_BOOKMAKERS = ["draftkings", "fanduel", "betmgm", "pointsbetus", "caesars", "betrivers"]
@@ -20,17 +17,12 @@ SPORT_TO_ODDS_KEY = {
 
 
 def get_odds_api_key() -> str:
-    k = os.environ.get("ODDS_API_KEY", "")
-    print("[odds_api] key length:", len(k))  # SAFE: does not reveal the key
+    k = (os.environ.get("ODDS_API_KEY") or "").strip()
+    print("[odds_api] key present:", bool(k))
+    print("[odds_api] key length:", len(k))  # SAFE
     if not k:
         raise RuntimeError("ODDS_API_KEY environment variable is not set.")
-    return k.strip()
-
-def _iso_day_bounds(game_date_str: str) -> Tuple[str, str]:
-    d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
-    start = datetime(d.year, d.month, d.day, 0, 0, 0).isoformat() + "Z"
-    end = datetime(d.year, d.month, d.day, 23, 59, 59).isoformat() + "Z"
-    return start, end
+    return k
 
 
 def _pick_best_bookmaker(bookmakers: list, preferred: list[str]) -> Optional[dict]:
@@ -50,15 +42,17 @@ def _extract_market(bookmaker: dict, market_key: str) -> Optional[dict]:
             return m
     return None
 
-def _iso_wide_bounds(game_date_str: str) -> tuple[str, str]:
+
+def _iso_wide_bounds(game_date_str: str) -> Tuple[str, str]:
     """
-    Wide UTC bounds to avoid Odds API timezone rollover issues.
-    Pulls ±1 day around the local date.
+    Wide UTC bounds to avoid timezone rollover (US games can start after midnight UTC).
+    Pulls ±1 day around the given date.
     """
     d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
-    start = datetime(d.year, d.month, d.day) - timedelta(days=1)
+    start = datetime(d.year, d.month, d.day, 0, 0, 0) - timedelta(days=1)
     end = datetime(d.year, d.month, d.day, 23, 59, 59) + timedelta(days=1)
     return start.isoformat() + "Z", end.isoformat() + "Z"
+
 
 def fetch_odds_for_date_from_odds_api(
     game_date_str: str,
@@ -93,24 +87,14 @@ def fetch_odds_for_date_from_odds_api(
     }
 
     r = requests.get(url, params=params, timeout=30)
-    from datetime import datetime, timedelta  # make sure timedelta is imported
 
-def _iso_wide_bounds(game_date_str: str) -> tuple[str, str]:
-    """
-    Use a wide UTC window so "today" in US time doesn't miss games that start after midnight UTC.
-    """
-    d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
-    start = datetime(d.year, d.month, d.day, 0, 0, 0) - timedelta(days=1)
-    end = datetime(d.year, d.month, d.day, 23, 59, 59) + timedelta(days=1)
-    return start.isoformat() + "Z", end.isoformat() + "Z"
-
-        # DEBUG: Odds API response info
+    # DEBUG: Odds API response info
     print("[odds_api DEBUG] status:", r.status_code)
     print("[odds_api DEBUG] remaining:", r.headers.get("x-requests-remaining"))
     print("[odds_api DEBUG] used:", r.headers.get("x-requests-used"))
     print("[odds_api DEBUG] last:", r.headers.get("x-requests-last"))
     print("[odds_api DEBUG] url:", r.url)
-    
+
     r.raise_for_status()
     data = r.json()
 
@@ -158,17 +142,16 @@ def _iso_wide_bounds(game_date_str: str) -> tuple[str, str]:
 
 def fetch_odds_for_date_from_csv(game_date_str: str, *, sport: str = "nba"):
     """
-    Backwards compatible:
-      - tries: odds/odds_<sport>_MM-DD-YYYY.csv
-      - else: odds/odds_MM-DD-YYYY.csv  (your current naming)
+    Tries:
+      - odds/odds_<sport>_MM-DD-YYYY.csv
+      - else odds/odds_MM-DD-YYYY.csv
 
-    Required columns: home, away, home_ml, away_ml
+    Required: home, away, home_ml, away_ml
     Optional: home_spread
     """
     date_part = game_date_str.replace("/", "-")
     fname1 = os.path.join("odds", f"odds_{sport}_{date_part}.csv")
     fname2 = os.path.join("odds", f"odds_{date_part}.csv")
-
     fname = fname1 if os.path.exists(fname1) else fname2
 
     if not os.path.exists(fname):
