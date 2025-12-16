@@ -20,11 +20,11 @@ SPORT_TO_ODDS_KEY = {
 
 
 def get_odds_api_key() -> str:
-    k = os.environ.get("ODDS_API_KEY")
+    k = os.environ.get("ODDS_API_KEY", "")
+    print("[odds_api] key length:", len(k))  # SAFE: does not reveal the key
     if not k:
         raise RuntimeError("ODDS_API_KEY environment variable is not set.")
-    return k
-
+    return k.strip()
 
 def _iso_day_bounds(game_date_str: str) -> Tuple[str, str]:
     d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
