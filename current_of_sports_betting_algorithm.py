@@ -66,11 +66,10 @@ def main(argv=None):
     # Odds (API first, fallback CSV) — NFL/NHL also use this for daily markets
     odds_dict, spreads_dict = {}, {}
     try:
-        odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
-            game_date,
-            sport_key=SPORT_TO_ODDS_KEY[args.sport],
-            debug=True,
-        )
+       odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
+    game_date,
+    sport_key=SPORT_TO_ODDS_KEY[args.sport],
+)
         if odds_dict:
             print(f"[odds_api] Loaded odds for {len(odds_dict)} games.")
         else:
