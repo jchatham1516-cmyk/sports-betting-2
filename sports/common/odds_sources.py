@@ -97,6 +97,16 @@ def fetch_odds_for_date_from_odds_api(
 
     r.raise_for_status()
     data = r.json()
+print("[odds_api DEBUG] events returned:", len(data))
+if data:
+    ev0 = data[0]
+    print("[odds_api DEBUG] sample sport_key:", ev0.get("sport_key"))
+    print("[odds_api DEBUG] sample home_team:", ev0.get("home_team"))
+    print("[odds_api DEBUG] sample teams:", ev0.get("teams"))
+    print("[odds_api DEBUG] sample bookmakers:", len(ev0.get("bookmakers", []) or []))
+
+num_with_books = sum(1 for ev in data if (ev.get("bookmakers") or []))
+print("[odds_api DEBUG] events with bookmakers:", num_with_books)
 
     odds_dict: dict = {}
     spreads_dict: dict = {}
@@ -138,6 +148,7 @@ def fetch_odds_for_date_from_odds_api(
         spreads_dict[key] = home_spread
 
     return odds_dict, spreads_dict
+
 
 
 def fetch_odds_for_date_from_csv(game_date_str: str, *, sport: str = "nba"):
