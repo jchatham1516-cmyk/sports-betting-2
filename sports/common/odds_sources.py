@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 import requests
+from datetime import datetime, timedelta
 
 
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
@@ -48,6 +49,15 @@ def _extract_market(bookmaker: dict, market_key: str) -> Optional[dict]:
             return m
     return None
 
+def _iso_wide_bounds(game_date_str: str) -> tuple[str, str]:
+    """
+    Wide UTC bounds to avoid Odds API timezone rollover issues.
+    Pulls ±1 day around the local date.
+    """
+    d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
+    start = datetime(d.year, d.month, d.day) - timedelta(days=1)
+    end = datetime(d.year, d.month, d.day, 23, 59, 59) + timedelta(days=1)
+    return start.isoformat() + "Z", end.isoformat() + "Z"
 
 def fetch_odds_for_date_from_odds_api(
     game_date_str: str,
