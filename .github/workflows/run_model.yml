@@ -18,14 +18,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies      # ← PUT IT HERE
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run daily model
         env:
+          PYTHONUNBUFFERED: "1"
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
           python current_of_sports_betting_algorithm.py
 
