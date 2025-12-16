@@ -23,13 +23,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run daily model
-        env:
-          PYTHONUNBUFFERED: "1"
-          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-        run: |
-          python current_of_sports_betting_algorithm.py
+     - name: Run model
+  env:
+    ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+    BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+  run: |
+    python current_of_sports_betting_algorithm.py
 
       - name: Upload predictions
         uses: actions/upload-artifact@v4
