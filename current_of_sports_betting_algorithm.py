@@ -63,23 +63,29 @@ def main(argv=None):
 
     print(f"Running {args.sport.upper()} model for {game_date}...")
 
-    # Odds (API first, fallback CSV) — NFL/NHL also use this for daily markets
+       # Odds (API first, fallback CSV)
     odds_dict, spreads_dict = {}, {}
+
     try:
-       odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
-    game_date,
-    sport_key=SPORT_TO_ODDS_KEY[args.sport],
-)
+        odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
+            game_date,
+            sport_key=SPORT_TO_ODDS_KEY[args.sport],
+        )
+
         if odds_dict:
             print(f"[odds_api] Loaded odds for {len(odds_dict)} games.")
         else:
             print("[odds_api] No odds returned; will try CSV fallback.")
+
     except Exception as e:
         print(f"[odds_api] WARNING: failed to load odds from API: {e}")
 
     if not odds_dict:
         try:
-            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date, sport=args.sport)
+            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(
+                game_date,
+                sport=args.sport,
+            )
         except Exception as e:
             print(f"[odds_csv] WARNING: failed to load odds from CSV: {e}")
             odds_dict, spreads_dict = {}, {}
