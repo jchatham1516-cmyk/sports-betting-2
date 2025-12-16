@@ -7,7 +7,14 @@ import pandas as pd
 import requests
 
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
-DEFAULT_ODDS_BOOKMAKERS = ["draftkings", "fanduel", "betmgm", "pointsbetus", "caesars", "betrivers"]
+DEFAULT_ODDS_BOOKMAKERS = [
+    "draftkings",
+    "fanduel",
+    "betmgm",
+    "pointsbetus",
+    "caesars",
+    "betrivers",
+]
 
 SPORT_TO_ODDS_KEY = {
     "nba": "basketball_nba",
@@ -16,13 +23,31 @@ SPORT_TO_ODDS_KEY = {
 }
 
 
+# -----------------------------
+# API key
+# -----------------------------
+
 def get_odds_api_key() -> str:
-    k = (os.environ.get("ODDS_API_KEY") or "").strip()
-    print("[odds_api] key present:", bool(k))
-    print("[odds_api] key length:", len(k))  # SAFE
-    if not k:
-        raise RuntimeError("ODDS_API_KEY environment variable is not set.")
-    return k
+    key = (os.environ.get("ODDS_API_KEY") or "").strip()
+    print("[odds_api] key present:", bool(key))
+    print("[odds_api] key length:", len(key))
+    if not key:
+        raise RuntimeError("ODDS_API_KEY is not set")
+    return key
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def _iso_wide_bounds(game_date_str: str) -> Tuple[str, str]:
+    """
+    Wide UTC window to avoid US-time → UTC rollover issues.
+    """
+    d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
+    start = datetime(d.year, d.month, d.day) - timedelta(days=1)
+    end = datetime(d.year, d.month, d.day, 23, 59, 59) + timedelta(days=1)
+    return start.isoformat() + "Z", end.isoformat() + "Z"
 
 
 def _pick_best_bookmaker(bookmakers: list, preferred: list[str]) -> Optional[dict]:
@@ -36,23 +61,15 @@ def _pick_best_bookmaker(bookmakers: list, preferred: list[str]) -> Optional[dic
 
 
 def _extract_market(bookmaker: dict, market_key: str) -> Optional[dict]:
-    markets = bookmaker.get("markets", []) or []
-    for m in markets:
+    for m in bookmaker.get("markets", []) or []:
         if m.get("key") == market_key:
             return m
     return None
 
 
-def _iso_wide_bounds(game_date_str: str) -> Tuple[str, str]:
-    """
-    Wide UTC bounds to avoid timezone rollover (US games can start after midnight UTC).
-    Pulls ±1 day around the given date.
-    """
-    d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
-    start = datetime(d.year, d.month, d.day, 0, 0, 0) - timedelta(days=1)
-    end = datetime(d.year, d.month, d.day, 23, 59, 59) + timedelta(days=1)
-    return start.isoformat() + "Z", end.isoformat() + "Z"
-
+# -----------------------------
+# Odds API
+# -----------------------------
 
 def fetch_odds_for_date_from_odds_api(
     game_date_str: str,
@@ -64,12 +81,6 @@ def fetch_odds_for_date_from_odds_api(
     date_format: str = "iso",
     preferred_books: Optional[list[str]] = None,
 ) -> tuple[dict, dict]:
-    """
-    Returns (odds_dict, spreads_dict) keyed by (home_team, away_team)
-
-      odds_dict[(home, away)] = {"home_ml": ..., "away_ml": ..., "home_spread": ...}
-      spreads_dict[(home, away)] = home_spread
-    """
     api_key = get_odds_api_key()
     preferred_books = preferred_books or DEFAULT_ODDS_BOOKMAKERS
 
@@ -88,124 +99,85 @@ def fetch_odds_for_date_from_odds_api(
 
     r = requests.get(url, params=params, timeout=30)
 
-    # DEBUG: Odds API response info
     print("[odds_api DEBUG] status:", r.status_code)
     print("[odds_api DEBUG] remaining:", r.headers.get("x-requests-remaining"))
     print("[odds_api DEBUG] used:", r.headers.get("x-requests-used"))
-    print("[odds_api DEBUG] last:", r.headers.get("x-requests-last"))
     print("[odds_api DEBUG] url:", r.url)
 
     r.raise_for_status()
     data = r.json()
-print("[odds_api DEBUG] events returned:", len(data))
-if data:
-    ev0 = data[0]
-    print("[odds_api DEBUG] sample sport_key:", ev0.get("sport_key"))
-    print("[odds_api DEBUG] sample home_team:", ev0.get("home_team"))
-    print("[odds_api DEBUG] sample teams:", ev0.get("teams"))
-    print("[odds_api DEBUG] sample bookmakers:", len(ev0.get("bookmakers", []) or []))
 
-num_with_books = sum(1 for ev in data if (ev.get("bookmakers") or []))
-print("[odds_api DEBUG] events with bookmakers:", num_with_books)
+    print("[odds_api DEBUG] events returned:", len(data))
 
-    odds_dict: dict = {}
-    spreads_dict: dict = {}
+    odds_dict = {}
+    spreads_dict = {}
 
     for ev in data:
         home = ev.get("home_team")
-        teams = ev.get("teams", []) or []
+        teams = ev.get("teams") or []
         if not home or len(teams) != 2:
             continue
+
         away = teams[0] if teams[1] == home else teams[1]
 
-        bookmaker = _pick_best_bookmaker(ev.get("bookmakers", []) or [], preferred_books)
+        bookmaker = _pick_best_bookmaker(ev.get("bookmakers") or [], preferred_books)
         if not bookmaker:
             continue
 
-        # Moneyline (h2h)
-        h2h = _extract_market(bookmaker, "h2h")
+        # Moneyline
         home_ml = np.nan
         away_ml = np.nan
+        h2h = _extract_market(bookmaker, "h2h")
         if h2h:
-            outs = h2h.get("outcomes", []) or []
-            prices = {o.get("name"): o.get("price") for o in outs}
-            if home in prices and prices[home] is not None:
-                home_ml = float(prices[home])
-            if away in prices and prices[away] is not None:
-                away_ml = float(prices[away])
+            prices = {o["name"]: o["price"] for o in h2h.get("outcomes", [])}
+            home_ml = prices.get(home, np.nan)
+            away_ml = prices.get(away, np.nan)
 
-        # Spreads
-        spreads = _extract_market(bookmaker, "spreads")
+        # Spread
         home_spread = np.nan
+        spreads = _extract_market(bookmaker, "spreads")
         if spreads:
-            outs = spreads.get("outcomes", []) or []
-            points = {o.get("name"): o.get("point") for o in outs}
-            if home in points and points[home] is not None:
-                home_spread = float(points[home])
+            points = {o["name"]: o["point"] for o in spreads.get("outcomes", [])}
+            home_spread = points.get(home, np.nan)
 
         key = (home, away)
-        odds_dict[key] = {"home_ml": home_ml, "away_ml": away_ml, "home_spread": home_spread}
+        odds_dict[key] = {
+            "home_ml": home_ml,
+            "away_ml": away_ml,
+            "home_spread": home_spread,
+        }
         spreads_dict[key] = home_spread
 
     return odds_dict, spreads_dict
 
 
+# -----------------------------
+# CSV fallback
+# -----------------------------
 
 def fetch_odds_for_date_from_csv(game_date_str: str, *, sport: str = "nba"):
-    """
-    Tries:
-      - odds/odds_<sport>_MM-DD-YYYY.csv
-      - else odds/odds_MM-DD-YYYY.csv
-
-    Required: home, away, home_ml, away_ml
-    Optional: home_spread
-    """
     date_part = game_date_str.replace("/", "-")
-    fname1 = os.path.join("odds", f"odds_{sport}_{date_part}.csv")
-    fname2 = os.path.join("odds", f"odds_{date_part}.csv")
-    fname = fname1 if os.path.exists(fname1) else fname2
+    fname1 = f"odds/odds_{sport}_{date_part}.csv"
+    fname2 = f"odds/odds_{date_part}.csv"
 
+    fname = fname1 if os.path.exists(fname1) else fname2
     if not os.path.exists(fname):
-        print(f"[odds_csv] No odds file found at {fname1} or {fname2}.")
+        print("[odds_csv] No odds file found")
         return {}, {}
 
     print(f"[odds_csv] Loading odds from {fname}")
     df = pd.read_csv(fname)
 
-    required_cols = {"home", "away", "home_ml", "away_ml"}
-    if not required_cols.issubset(set(df.columns)):
-        raise ValueError(f"Odds CSV {fname} must contain columns: {required_cols}. Found: {list(df.columns)}")
-
-    def _parse_number(val):
-        if pd.isna(val):
-            return np.nan
-        if isinstance(val, str):
-            s = val.strip()
-            if s == "":
-                return np.nan
-            try:
-                return float(s)
-            except ValueError:
-                return np.nan
-        try:
-            return float(val)
-        except (TypeError, ValueError):
-            return np.nan
-
     odds_dict = {}
     spreads_dict = {}
 
-    for _, row in df.iterrows():
-        home = str(row["home"]).strip()
-        away = str(row["away"]).strip()
-        key = (home, away)
-
-        home_ml = _parse_number(row.get("home_ml"))
-        away_ml = _parse_number(row.get("away_ml"))
-        home_spread = _parse_number(row.get("home_spread")) if "home_spread" in df.columns else np.nan
-
-        odds_dict[key] = {"home_ml": home_ml, "away_ml": away_ml, "home_spread": home_spread}
-        spreads_dict[key] = home_spread
+    for _, r in df.iterrows():
+        key = (r["home"], r["away"])
+        odds_dict[key] = {
+            "home_ml": r["home_ml"],
+            "away_ml": r["away_ml"],
+            "home_spread": r.get("home_spread", np.nan),
+        }
+        spreads_dict[key] = r.get("home_spread", np.nan)
 
     return odds_dict, spreads_dict
-
