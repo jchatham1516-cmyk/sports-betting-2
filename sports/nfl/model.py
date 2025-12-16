@@ -15,7 +15,6 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
 
-    # Odds API scores only supports daysFrom 1..3
     events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 3))
 
     for ev in events:
@@ -51,19 +50,29 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
 def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=3)
 
+    HOME_ADV = 55.0
+    ELO_PER_POINT = 25.0  # simple spread-ish mapping (tunable)
+
     rows = []
     for (home, away), oi in (odds_dict or {}).items():
-        p_home = elo_win_prob(st.get(home), st.get(away), home_adv=55.0)
-        rows.append(
-            {
-                "date": game_date_str,
-                "home": home,
-                "away": away,
-                "model_home_prob": float(p_home),
-                "home_ml": oi.get("home_ml"),
-                "away_ml": oi.get("away_ml"),
-                "home_spread": oi.get("home_spread"),
-            }
-        )
+        eh = st.get(home)
+        ea = st.get(away)
+
+        p_home = elo_win_prob(eh, ea, home_adv=HOME_ADV)
+
+        # Negative means home favored (Vegas-style)
+        elo_diff = (eh - ea) + HOME_ADV
+        model_spread_home = -(elo_diff / ELO_PER_POINT)
+
+        rows.append({
+            "date": game_date_str,
+            "home": home,
+            "away": away,
+            "model_home_prob": float(p_home),
+            "model_spread_home": float(model_spread_home),
+            "home_ml": oi.get("home_ml"),
+            "away_ml": oi.get("away_ml"),
+            "home_spread": oi.get("home_spread"),
+        })
 
     return pd.DataFrame(rows)
