@@ -7,6 +7,7 @@ import pandas as pd
 from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
+from sports.nfl.injuries import fetch_espn_nfl_injuries, build_injury_list_for_team_nfl, injury_adjustment_points
 
 ELO_PATH = "results/elo_state_nfl.json"
 
