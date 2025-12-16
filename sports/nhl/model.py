@@ -50,19 +50,28 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=3)
 
+    HOME_ADV = 45.0
+    ELO_PER_GOAL = 30.0  # simple spread-ish mapping (tunable)
+
     rows = []
     for (home, away), oi in (odds_dict or {}).items():
-        p_home = elo_win_prob(st.get(home), st.get(away), home_adv=45.0)
-        rows.append(
-            {
-                "date": game_date_str,
-                "home": home,
-                "away": away,
-                "model_home_prob": float(p_home),
-                "home_ml": oi.get("home_ml"),
-                "away_ml": oi.get("away_ml"),
-                "home_spread": oi.get("home_spread"),
-            }
-        )
+        eh = st.get(home)
+        ea = st.get(away)
+
+        p_home = elo_win_prob(eh, ea, home_adv=HOME_ADV)
+
+        elo_diff = (eh - ea) + HOME_ADV
+        model_spread_home = -(elo_diff / ELO_PER_GOAL)
+
+        rows.append({
+            "date": game_date_str,
+            "home": home,
+            "away": away,
+            "model_home_prob": float(p_home),
+            "model_spread_home": float(model_spread_home),
+            "home_ml": oi.get("home_ml"),
+            "away_ml": oi.get("away_ml"),
+            "home_spread": oi.get("home_spread"),
+        })
 
     return pd.DataFrame(rows)
