@@ -47,22 +47,35 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
     st.save(ELO_PATH)
     return st
 
-
 def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=3)
 
+    injuries_map = {}
+    try:
+        injuries_map = fetch_espn_nfl_injuries()
+    except Exception as e:
+        print(f"[nfl injuries] WARNING: failed to load ESPN injuries: {e}")
+
     HOME_ADV = 55.0
-    ELO_PER_POINT = 25.0  # simple spread-ish mapping (tunable)
+    ELO_PER_POINT = 25.0
+
+    # Tunable: how many Elo points per “injury point”
+    INJ_ELO_PER_POINT = 18.0
 
     rows = []
     for (home, away), oi in (odds_dict or {}).items():
         eh = st.get(home)
         ea = st.get(away)
 
-        p_home = elo_win_prob(eh, ea, home_adv=HOME_ADV)
+        home_inj = build_injury_list_for_team_nfl(home, injuries_map)
+        away_inj = build_injury_list_for_team_nfl(away, injuries_map)
+        inj_pts = injury_adjustment_points(home_inj, away_inj)  # + means away more hurt
 
-        # Negative means home favored (Vegas-style)
-        elo_diff = (eh - ea) + HOME_ADV
+        inj_elo_adj = inj_pts * INJ_ELO_PER_POINT
+
+        p_home = elo_win_prob(eh + inj_elo_adj, ea, home_adv=HOME_ADV)
+
+        elo_diff = ((eh + inj_elo_adj) - ea) + HOME_ADV
         model_spread_home = -(elo_diff / ELO_PER_POINT)
 
         rows.append({
@@ -71,6 +84,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "away": away,
             "model_home_prob": float(p_home),
             "model_spread_home": float(model_spread_home),
+            "inj_points_home_minus_away": float(-inj_pts),   # optional debug
             "home_ml": oi.get("home_ml"),
             "away_ml": oi.get("away_ml"),
             "home_spread": oi.get("home_spread"),
