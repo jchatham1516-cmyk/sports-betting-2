@@ -10,7 +10,22 @@
 #
 # Requires:
 # - recommendations.py in same folder (add_recommendations_to_df, Thresholds, etc.)
-
+parser.add_argument(
+    "--sport",
+    type=str,
+    default="nba",
+    choices=["nba", "nfl", "nhl"],
+    help="Which sport to run",
+)
+SPORT_TO_ODDS_KEY = {
+    "nba": "basketball_nba",
+    "nfl": "americanfootball_nfl",
+    "nhl": "icehockey_nhl",
+}
+odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
+    game_date,
+    sport_key=SPORT_TO_ODDS_KEY[args.sport],
+)
 import os
 import re
 import math
@@ -134,6 +149,7 @@ def _extract_market(bookmaker: dict, market_key: str) -> Optional[dict]:
 def fetch_odds_for_date_from_odds_api(
     game_date_str: str,
     *,
+    sport_key: str = "basketball_nba",
     regions: str = "us",
     markets: str = "h2h,spreads",
     odds_format: str = "american",
@@ -142,22 +158,22 @@ def fetch_odds_for_date_from_odds_api(
 ) -> tuple[dict, dict]:
     """
     Returns (odds_dict, spreads_dict) keyed by (home_team, away_team)
-
-      odds_dict[(home, away)] = {"home_ml": ..., "away_ml": ..., "home_spread": ...}
-      spreads_dict[(home, away)] = home_spread
     """
     api_key = get_odds_api_key()
     preferred_books = preferred_books or DEFAULT_ODDS_BOOKMAKERS
 
     start_iso, end_iso = _iso_day_bounds(game_date_str)
 
-    url = f"{ODDS_API_BASE_URL}/sports/basketball_nba/odds"
+    url = f"{ODDS_API_BASE_URL}/sports/{sport_key}/odds"
     params = {
         "apiKey": api_key,
         "regions": regions,
         "markets": markets,
         "oddsFormat": odds_format,
         "dateFormat": date_format,
+        # better than fetching everything then filtering yourself:
+        "commenceTimeFrom": start_iso,
+        "commenceTimeTo": end_iso,
     }
 
     r = requests.get(url, params=params, timeout=30)
@@ -168,12 +184,6 @@ def fetch_odds_for_date_from_odds_api(
     spreads_dict: dict = {}
 
     for ev in data:
-        commence = ev.get("commence_time")
-        if not commence:
-            continue
-        if commence < start_iso or commence > end_iso:
-            continue
-
         home = ev.get("home_team")
         teams = ev.get("teams", []) or []
         if not home or len(teams) != 2:
@@ -184,7 +194,6 @@ def fetch_odds_for_date_from_odds_api(
         if not bookmaker:
             continue
 
-        # Moneyline (h2h)
         h2h = _extract_market(bookmaker, "h2h")
         home_ml = np.nan
         away_ml = np.nan
@@ -196,7 +205,6 @@ def fetch_odds_for_date_from_odds_api(
             if away in prices and prices[away] is not None:
                 away_ml = float(prices[away])
 
-        # Spreads
         spreads = _extract_market(bookmaker, "spreads")
         home_spread = np.nan
         if spreads:
@@ -210,7 +218,6 @@ def fetch_odds_for_date_from_odds_api(
         spreads_dict[key] = home_spread
 
     return odds_dict, spreads_dict
-
 
 # -----------------------------
 # CSV odds loader (still used for backtest + fallback)
