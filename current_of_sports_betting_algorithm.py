@@ -9,6 +9,8 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+from sports.nfl.model import run_daily_nfl
+from sports.nhl.model import run_daily_nhl
 
 from recommendations import add_recommendations_to_df, Thresholds
 
