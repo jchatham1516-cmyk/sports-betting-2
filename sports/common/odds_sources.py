@@ -116,10 +116,18 @@ def fetch_odds_for_date_from_odds_api(
         skipped_no_books = 0
 
         for ev in data:
-            home = ev.get("home_team")
-            teams = ev.get("teams") or []
-            if not home or len(teams) != 2:
-                continue
+home = ev.get("home_team")
+away = ev.get("away_team")
+
+# Fallback if 'away_team' isn't present for some reason
+if not away:
+    teams = ev.get("teams") or []
+    if home and len(teams) >= 2:
+        away = teams[0] if teams[1] == home else teams[1]
+
+# If still missing, skip
+if not home or not away:
+    continue
 
             away = teams[0] if teams[1] == home else teams[1]
 
