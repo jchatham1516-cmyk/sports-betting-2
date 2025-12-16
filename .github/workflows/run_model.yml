@@ -1,4 +1,4 @@
-name: Run NBA Betting Model Daily
+name: Run Betting Models Daily
 
 on:
   schedule:
@@ -23,32 +23,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run model
+      # -------- NBA --------
+      - name: Run NBA
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
         run: |
-          python current_of_sports_betting_algorithm.py
+          python current_of_sports_betting_algorithm.py --sport nba
 
+      # -------- NFL --------
+      - name: Run NFL
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          python current_of_sports_betting_algorithm.py --sport nfl
+
+      # -------- NHL --------
+      - name: Run NHL
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          python current_of_sports_betting_algorithm.py --sport nhl
+
+      # -------- Upload outputs --------
       - name: Upload predictions
         uses: actions/upload-artifact@v4
         with:
           name: predictions
           path: results/
           if-no-files-found: ignore
-- name: Run NBA
-  env:
-    ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-    BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
-  run: python current_of_sports_betting_algorithm.py --sport nba
-
-- name: Run NFL
-  env:
-    ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-  run: python current_of_sports_betting_algorithm.py --sport nfl
-
-- name: Run NHL
-  env:
-    ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-  run: python current_of_sports_betting_algorithm.py --sport nhl
+.py --sport nhl
 
