@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  run-model:
+  run-models:
     runs-on: ubuntu-latest
 
     steps:
@@ -42,7 +42,7 @@ jobs:
         run: |
           python current_of_sports_betting_algorithm.py --sport nhl
 
-      - name: Upload predictions
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: predictions
