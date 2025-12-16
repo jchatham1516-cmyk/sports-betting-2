@@ -79,7 +79,7 @@ def fetch_odds_for_date_from_odds_api(
     api_key = get_odds_api_key()
     preferred_books = preferred_books or DEFAULT_ODDS_BOOKMAKERS
 
-    start_iso, end_iso = _iso_day_bounds(game_date_str)
+    start_iso, end_iso = _iso_wide_bounds(game_date_str)
 
     url = f"{ODDS_API_BASE_URL}/sports/{sport_key}/odds"
     params = {
@@ -93,7 +93,17 @@ def fetch_odds_for_date_from_odds_api(
     }
 
     r = requests.get(url, params=params, timeout=30)
-    
+    from datetime import datetime, timedelta  # make sure timedelta is imported
+
+def _iso_wide_bounds(game_date_str: str) -> tuple[str, str]:
+    """
+    Use a wide UTC window so "today" in US time doesn't miss games that start after midnight UTC.
+    """
+    d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
+    start = datetime(d.year, d.month, d.day, 0, 0, 0) - timedelta(days=1)
+    end = datetime(d.year, d.month, d.day, 23, 59, 59) + timedelta(days=1)
+    return start.isoformat() + "Z", end.isoformat() + "Z"
+
         # DEBUG: Odds API response info
     print("[odds_api DEBUG] status:", r.status_code)
     print("[odds_api DEBUG] remaining:", r.headers.get("x-requests-remaining"))
