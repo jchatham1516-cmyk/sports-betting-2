@@ -159,6 +159,23 @@ def main(argv=None):
 
     print(f"\nSaved predictions to {out_name}")
     print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
+if args.sport == "nfl":
+    df = run_daily_nfl(game_date)
+    os.makedirs("results", exist_ok=True)
+    out_name = f"results/predictions_nfl_{game_date.replace('/', '-')}.csv"
+    df.to_csv(out_name, index=False)
+    print(df)
+    print(f"Saved predictions to {out_name}")
+    return
+
+if args.sport == "nhl":
+    df = run_daily_nhl(game_date)
+    os.makedirs("results", exist_ok=True)
+    out_name = f"results/predictions_nhl_{game_date.replace('/', '-')}.csv"
+    df.to_csv(out_name, index=False)
+    print(df)
+    print(f"Saved predictions to {out_name}")
+    return
 
 
 if __name__ == "__main__":
