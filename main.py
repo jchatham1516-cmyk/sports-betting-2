@@ -19,7 +19,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     api_key = get_bdl_api_key()
-
+from sports.common.scores import (
+    fetch_scores_from_odds_api,
+    load_elo_state,
+    save_elo_state,
+    update_elo_from_scores,
+    elo_predict_home_prob,
+)
     # --------------------------
     # TRAINING MODE
     # --------------------------
