@@ -7,6 +7,7 @@ import pandas as pd
 from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
+from sports.nhl.injuries import fetch_espn_nhl_injuries, build_injury_list_for_team_nhl, injury_adjustment_points
 
 ELO_PATH = "results/elo_state_nhl.json"
 
@@ -52,6 +53,22 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     HOME_ADV = 45.0
     ELO_PER_GOAL = 30.0  # simple spread-ish mapping (tunable)
+injuries_map = {}
+try:
+    injuries_map = fetch_espn_nhl_injuries()
+except Exception as e:
+    print(f"[nhl injuries] WARNING: failed to load ESPN injuries: {e}")
+
+INJ_ELO_PER_POINT = 22.0   # tunable for NHL
+
+home_inj = build_injury_list_for_team_nhl(home, injuries_map)
+away_inj = build_injury_list_for_team_nhl(away, injuries_map)
+inj_pts = injury_adjustment_points(home_inj, away_inj)
+inj_elo_adj = inj_pts * INJ_ELO_PER_POINT
+
+p_home = elo_win_prob(eh + inj_elo_adj, ea, home_adv=HOME_ADV)
+elo_diff = ((eh + inj_elo_adj) - ea) + HOME_ADV
+model_spread_home = -(elo_diff / ELO_PER_GOAL)
 
     rows = []
     for (home, away), oi in (odds_dict or {}).items():
