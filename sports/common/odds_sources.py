@@ -7,6 +7,7 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 
+print("[odds_api] key present:", bool(os.environ.get("ODDS_API_KEY")))
 
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 DEFAULT_ODDS_BOOKMAKERS = ["draftkings", "fanduel", "betmgm", "pointsbetus", "caesars", "betrivers"]
