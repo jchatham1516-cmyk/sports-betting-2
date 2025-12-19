@@ -11,7 +11,7 @@ from sports.nfl.injuries import fetch_espn_nfl_injuries, build_injury_list_for_t
 from sports.common.teams import canon_team
 
 ELO_PATH = "results/elo_state_nfl.json"
-
+inj_pts = max(min(inj_pts, 8.0), -8.0)
 
 def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
     st = EloState.load(ELO_PATH)
