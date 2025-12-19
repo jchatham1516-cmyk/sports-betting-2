@@ -8,6 +8,7 @@ from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.nfl.injuries import fetch_espn_nfl_injuries, build_injury_list_for_team_nfl, injury_adjustment_points
+from sports.common.teams import canon_team
 
 ELO_PATH = "results/elo_state_nfl.json"
 
@@ -17,6 +18,8 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
 
     events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 3))
+home = canon_team(home)
+away = canon_team(away)
 
     for ev in events:
         home = ev.get("home_team")
