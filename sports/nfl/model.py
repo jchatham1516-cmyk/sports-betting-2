@@ -7,19 +7,21 @@ import pandas as pd
 from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
-from sports.nfl.injuries import fetch_espn_nfl_injuries, build_injury_list_for_team_nfl, injury_adjustment_points
+from sports.nfl.injuries import (
+    fetch_espn_nfl_injuries,
+    build_injury_list_for_team_nfl,
+    injury_adjustment_points,
+)
 from sports.common.teams import canon_team
 
 ELO_PATH = "results/elo_state_nfl.json"
-inj_pts = max(min(inj_pts, 8.0), -8.0)
+
 
 def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
 
     events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 3))
-home = canon_team(home)
-away = canon_team(away)
 
     for ev in events:
         home = ev.get("home_team")
@@ -28,14 +30,27 @@ away = canon_team(away)
         if not home or not away or not scores:
             continue
 
+        # Canonicalize team keys so Elo doesn't split names
+        home = canon_team(home)
+        away = canon_team(away)
+
         game_key = f"{ev.get('id','')}|{ev.get('commence_time','')}|{home}|{away}"
         if st.is_processed(game_key):
             continue
 
         score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
-            hs = float(score_map.get(home))
-            aw = float(score_map.get(away))
+            # IMPORTANT: scores dict keys are likely the original names in the feed
+            # so we try both canonical and raw lookup
+            hs = score_map.get(ev.get("home_team"))
+            aw = score_map.get(ev.get("away_team"))
+            if hs is None:
+                hs = score_map.get(home)
+            if aw is None:
+                aw = score_map.get(away)
+
+            hs = float(hs)
+            aw = float(aw)
         except Exception:
             continue
 
@@ -50,8 +65,17 @@ away = canon_team(away)
     st.save(ELO_PATH)
     return st
 
+
 def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=3)
+
+    # Clean empty output on off-days
+    if not odds_dict:
+        return pd.DataFrame(columns=[
+            "date", "home", "away",
+            "model_home_prob", "model_spread_home",
+            "inj_points", "home_ml", "away_ml", "home_spread"
+        ])
 
     injuries_map = {}
     try:
@@ -61,18 +85,22 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     HOME_ADV = 55.0
     ELO_PER_POINT = 25.0
-
-    # Tunable: how many Elo points per “injury point”
-    INJ_ELO_PER_POINT = 18.0
+    INJ_ELO_PER_POINT = 18.0  # tunable
 
     rows = []
     for (home, away), oi in (odds_dict or {}).items():
+        home = canon_team(home)
+        away = canon_team(away)
+
         eh = st.get(home)
         ea = st.get(away)
 
         home_inj = build_injury_list_for_team_nfl(home, injuries_map)
         away_inj = build_injury_list_for_team_nfl(away, injuries_map)
-        inj_pts = injury_adjustment_points(home_inj, away_inj)  # + means away more hurt
+
+        # +inj_pts means away more hurt => helps home
+        inj_pts = injury_adjustment_points(home_inj, away_inj)
+        inj_pts = max(min(inj_pts, 8.0), -8.0)  # clamp for stability
 
         inj_elo_adj = inj_pts * INJ_ELO_PER_POINT
 
@@ -87,7 +115,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "away": away,
             "model_home_prob": float(p_home),
             "model_spread_home": float(model_spread_home),
-            "inj_points": float(inj_pts),   # optional debug
+            "inj_points": float(inj_pts),
             "home_ml": oi.get("home_ml"),
             "away_ml": oi.get("away_ml"),
             "home_spread": oi.get("home_spread"),
