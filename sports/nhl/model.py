@@ -15,15 +15,13 @@ from sports.nhl.injuries import (
 )
 
 ELO_PATH = "results/elo_state_nhl.json"
-inj_pts = max(min(inj_pts, 8.0), -8.0)
+
 
 def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nhl"]
 
     events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 3))
-home = canon_team(home)
-away = canon_team(away)
 
     for ev in events:
         home = ev.get("home_team")
@@ -32,14 +30,26 @@ away = canon_team(away)
         if not home or not away or not scores:
             continue
 
+        # Canonicalize team keys so Elo doesn't split names
+        home = canon_team(home)
+        away = canon_team(away)
+
         game_key = f"{ev.get('id','')}|{ev.get('commence_time','')}|{home}|{away}"
         if st.is_processed(game_key):
             continue
 
         score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
-            hs = float(score_map.get(home))
-            aw = float(score_map.get(away))
+            # Scores dict keys may be raw names; try raw then canonical
+            hs = score_map.get(ev.get("home_team"))
+            aw = score_map.get(ev.get("away_team"))
+            if hs is None:
+                hs = score_map.get(home)
+            if aw is None:
+                aw = score_map.get(away)
+
+            hs = float(hs)
+            aw = float(aw)
         except Exception:
             continue
 
@@ -58,11 +68,18 @@ away = canon_team(away)
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=3)
 
-    HOME_ADV = 45.0
-    ELO_PER_GOAL = 30.0  # simple spread-ish mapping (tunable)
-    INJ_ELO_PER_POINT = 22.0  # tunable for NHL
+    # Clean empty output
+    if not odds_dict:
+        return pd.DataFrame(columns=[
+            "date", "home", "away",
+            "model_home_prob", "model_spread_home",
+            "inj_points", "home_ml", "away_ml", "home_spread"
+        ])
 
-    # Load injuries once (do NOT do this per game)
+    HOME_ADV = 45.0
+    ELO_PER_GOAL = 30.0
+    INJ_ELO_PER_POINT = 22.0  # tunable
+
     injuries_map = {}
     try:
         injuries_map = fetch_espn_nhl_injuries()
@@ -71,15 +88,18 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     rows = []
     for (home, away), oi in (odds_dict or {}).items():
+        home = canon_team(home)
+        away = canon_team(away)
+
         eh = st.get(home)
         ea = st.get(away)
 
-        # Injuries for this matchup
         home_inj = build_injury_list_for_team_nhl(home, injuries_map)
         away_inj = build_injury_list_for_team_nhl(away, injuries_map)
 
-        # +inj_pts means away is more hurt => helps home
-        inj_pts = injury_adjustment_points(home_inj, away_inj)
+        inj_pts = injury_adjustment_points(home_inj, away_inj)  # + means away more hurt
+        inj_pts = max(min(inj_pts, 8.0), -8.0)  # clamp for stability
+
         inj_elo_adj = inj_pts * INJ_ELO_PER_POINT
 
         p_home = elo_win_prob(eh + inj_elo_adj, ea, home_adv=HOME_ADV)
