@@ -198,9 +198,22 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)
-def run_daily_probs_for_date(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
+def run_daily_probs_for_date(
+    game_date_str: str = None,
+    *,
+    game_date: str = None,
+    odds_dict: dict,
+) -> pd.DataFrame:
     """
-    Backwards-compatible alias for older code that imports:
-      run_daily_probs_for_date as run_nba_daily
+    Backwards-compatible alias for older code paths.
+
+    Some callers pass:
+      run_daily_probs_for_date(game_date="12/19/2025", odds_dict=...)
+
+    Others may pass:
+      run_daily_probs_for_date(game_date_str="12/19/2025", odds_dict=...)
     """
-    return run_daily_nba(game_date_str, odds_dict=odds_dict)
+    date_in = game_date if game_date is not None else game_date_str
+    if date_in is None:
+        raise ValueError("Must provide game_date or game_date_str")
+    return run_daily_nba(str(date_in), odds_dict=odds_dict)
