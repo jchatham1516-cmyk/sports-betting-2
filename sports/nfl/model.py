@@ -84,7 +84,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "away": away,
             "model_home_prob": float(p_home),
             "model_spread_home": float(model_spread_home),
-            "inj_points_home_minus_away": float(-inj_pts),   # optional debug
+            "inj_points": float(inj_pts),   # optional debug
             "home_ml": oi.get("home_ml"),
             "away_ml": oi.get("away_ml"),
             "home_spread": oi.get("home_spread"),
