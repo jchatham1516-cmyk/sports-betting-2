@@ -202,18 +202,22 @@ def run_daily_probs_for_date(
     game_date_str: str = None,
     *,
     game_date: str = None,
-    odds_dict: dict,
+    odds_dict: dict = None,
+    spreads_dict: dict = None,   # older callers pass this
+    **kwargs,                    # swallow any future extra args safely
 ) -> pd.DataFrame:
     """
     Backwards-compatible alias for older code paths.
 
-    Some callers pass:
-      run_daily_probs_for_date(game_date="12/19/2025", odds_dict=...)
+    Supports calls like:
+      run_daily_probs_for_date(game_date="12/19/2025", odds_dict=..., spreads_dict=...)
 
-    Others may pass:
-      run_daily_probs_for_date(game_date_str="12/19/2025", odds_dict=...)
+    This implementation only needs odds_dict because it includes home_spread already.
     """
     date_in = game_date if game_date is not None else game_date_str
     if date_in is None:
         raise ValueError("Must provide game_date or game_date_str")
-    return run_daily_nba(str(date_in), odds_dict=odds_dict)
+
+    # odds_dict is what we actually use (spreads_dict is ignored)
+    return run_daily_nba(str(date_in), odds_dict=(odds_dict or {}))
+
