@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import requests
 
+from sports.common.teams import canon_team
+
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 DEFAULT_ODDS_BOOKMAKERS = ["draftkings", "fanduel", "betmgm", "pointsbetus", "caesars", "betrivers"]
 
@@ -107,6 +109,9 @@ def fetch_odds_for_date_from_odds_api(
     Returns:
       odds_dict[(home, away)] = {"home_ml": ..., "away_ml": ..., "home_spread": ...}
       spreads_dict[(home, away)] = home_spread
+
+    IMPORTANT:
+      Keys (home, away) are stored using canon_team() so they match your model's team names.
     """
     api_key = get_odds_api_key()
     preferred_books = preferred_books or DEFAULT_ODDS_BOOKMAKERS
@@ -142,17 +147,21 @@ def fetch_odds_for_date_from_odds_api(
     spreads_dict: Dict[Tuple[str, str], float] = {}
 
     for ev in data:
-        home = ev.get("home_team")
-        away = ev.get("away_team")
+        home_raw = ev.get("home_team")
+        away_raw = ev.get("away_team")
 
         # fallback if away_team missing
-        if not away:
+        if not away_raw:
             teams = ev.get("teams") or []
-            if home and len(teams) >= 2:
-                away = teams[0] if teams[1] == home else teams[1]
+            if home_raw and len(teams) >= 2:
+                away_raw = teams[0] if teams[1] == home_raw else teams[1]
 
-        if not home or not away:
+        if not home_raw or not away_raw:
             continue
+
+        # Canonicalize keys used for lookups/storage
+        home = canon_team(home_raw)
+        away = canon_team(away_raw)
 
         books = ev.get("bookmakers") or []
         if not books:
@@ -162,22 +171,37 @@ def fetch_odds_for_date_from_odds_api(
         if not bookmaker:
             continue
 
-        # Moneyline (h2h)
+        # --- Moneyline (h2h) ---
         home_ml = np.nan
         away_ml = np.nan
         h2h = _extract_market(bookmaker, "h2h")
         if h2h:
-            prices = {o.get("name"): o.get("price") for o in (h2h.get("outcomes") or [])}
+            # Build canonical outcome map: canon(name) -> price
+            prices = {}
+            for o in (h2h.get("outcomes") or []):
+                name = o.get("name")
+                price = o.get("price")
+                if name is None or price is None:
+                    continue
+                prices[canon_team(str(name))] = price
+
             if prices.get(home) is not None:
                 home_ml = float(prices[home])
             if prices.get(away) is not None:
                 away_ml = float(prices[away])
 
-        # Spreads (optional)
+        # --- Spreads (optional) ---
         home_spread = np.nan
         spreads = _extract_market(bookmaker, "spreads")
         if spreads:
-            pts = {o.get("name"): o.get("point") for o in (spreads.get("outcomes") or [])}
+            pts = {}
+            for o in (spreads.get("outcomes") or []):
+                name = o.get("name")
+                point = o.get("point")
+                if name is None or point is None:
+                    continue
+                pts[canon_team(str(name))] = point
+
             if pts.get(home) is not None:
                 home_spread = float(pts[home])
 
@@ -196,6 +220,9 @@ def fetch_odds_for_date_from_csv(game_date_str: str, *, sport: str = "nba"):
 
     Required columns: home, away, home_ml, away_ml
     Optional: home_spread
+
+    IMPORTANT:
+      Keys (home, away) are stored using canon_team() so they match your model.
     """
     date_part = game_date_str.replace("/", "-")
     fname1 = os.path.join("odds", f"odds_{sport}_{date_part}.csv")
@@ -233,8 +260,8 @@ def fetch_odds_for_date_from_csv(game_date_str: str, *, sport: str = "nba"):
     spreads_dict = {}
 
     for _, row in df.iterrows():
-        home = str(row["home"]).strip()
-        away = str(row["away"]).strip()
+        home = canon_team(str(row["home"]))
+        away = canon_team(str(row["away"]))
         key = (home, away)
 
         home_ml = _parse_number(row.get("home_ml"))
