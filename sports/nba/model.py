@@ -198,3 +198,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)
+def run_daily_probs_for_date(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
+    """
+    Backwards-compatible alias for older code that imports:
+      run_daily_probs_for_date as run_nba_daily
+    """
+    return run_daily_nba(game_date_str, odds_dict=odds_dict)
