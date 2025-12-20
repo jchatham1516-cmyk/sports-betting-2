@@ -21,7 +21,7 @@ def american_to_implied_prob(ml: float) -> float:
 
 def breakeven_prob_from_american(price: float) -> float:
     """
-    Returns probability needed to break even at given American odds.
+    Probability needed to break even at American odds.
     -110 => 0.523809...
     """
     try:
@@ -32,7 +32,7 @@ def breakeven_prob_from_american(price: float) -> float:
             return (-price) / ((-price) + 100.0)
         return 100.0 / (price + 100.0)
     except Exception:
-        return 0.5238095238  # safe fallback
+        return 0.5238095238
 
 
 def _phi(z: float) -> float:
@@ -63,30 +63,28 @@ def cover_prob_from_edge(spread_edge_pts: float, sd_pts: float) -> float:
 # -----------------------
 @dataclass(frozen=True)
 class Thresholds:
-    # ML edge thresholds
+    # ML thresholds (prob edge)
     ml_edge_strong: float = 0.06
     ml_edge_lean: float = 0.035
 
-    # Legacy ATS thresholds (points-based) ONLY used if you force it
-    ats_edge_strong_pts: float = 4.0
-    ats_edge_lean_pts: float = 2.5
+    # NEW: ATS gating for NON-NFL sports (probability edge vs breakeven)
+    # This is the key change that stops "ATS every game".
+    ats_min_edge_vs_be: float = 0.035     # must clear breakeven by 3.5%
+    ats_strong_edge_vs_be: float = 0.060  # "strong" if 6% above breakeven
 
-    # New ATS gating for NON-NFL sports (probability-based)
-    # Edge vs breakeven required to recommend ATS at all
-    ats_min_edge_vs_be: float = 0.03  # 3% above breakeven
-    ats_strong_edge_vs_be: float = 0.06  # strong label threshold
+    # SD for cover-prob approximation (NBA ~ 11-13)
+    ats_sd_pts_default: float = 12.5
 
-    # SD used for cover probability approximation (tunable)
-    # NBA typical margin SD is ~11-13, NHL is lower; using a conservative default.
-    ats_sd_pts_default: float = 12.0
+    # Optional: cap ATS picks per slate for non-NFL too
+    max_non_nfl_ats_plays: int | None = 3
 
-    # Confidence thresholds
+    # Confidence
     conf_high: float = 0.18
     conf_med: float = 0.10
 
 
 # -----------------------
-# Labels & formatting
+# Labels
 # -----------------------
 def confidence_from_prob(model_home_prob: float, t: Thresholds) -> str:
     certainty = abs(float(model_home_prob) - 0.5)
@@ -153,7 +151,7 @@ def explain_ml_ats(
 
 
 # -----------------------
-# Main function
+# Main
 # -----------------------
 def add_recommendations_to_df(
     df: pd.DataFrame,
@@ -200,21 +198,24 @@ def add_recommendations_to_df(
     else:
         raise ValueError("Need either model_spread_home_col or model_margin_home_col present in df")
 
-    # ATS edge in points (market - model)
     out["spread_edge_home"] = out[home_spread_col].astype(float) - out["model_spread_home_norm"].astype(float)
 
     # -----------------------
-    # ML rec
+    # ML recommendation
     # -----------------------
     out["ml_recommendation"] = out["edge_home"].apply(lambda e: ml_recommendation(e, thresholds))
 
     # -----------------------
-    # ATS rec (NFL-aware + NBA/NHL fix)
+    # ATS recommendation
+    # NFL: keep nfl model's gating if columns exist.
+    # Non-NFL: use probability vs breakeven gating.
     # -----------------------
     has_nfl_ats_fields = ("ats_strength" in out.columns) and ("ats_pass_reason" in out.columns)
 
+    DEFAULT_SPREAD_PRICE = -110.0
+
     if has_nfl_ats_fields:
-        # NFL: DO NOT recompute ATS here. Trust nfl model gating.
+        # Trust nfl model's decision; don't overwrite.
         def nfl_spread_rec_row(r):
             strength = str(r.get("ats_strength", "")).strip().lower()
             pass_reason = str(r.get("ats_pass_reason", "")).strip()
@@ -222,7 +223,6 @@ def add_recommendations_to_df(
 
             if strength not in {"strong", "medium", "lean"}:
                 return f"No ATS bet (gated){': ' + pass_reason if pass_reason else ''}"
-
             if side not in {"HOME", "AWAY"}:
                 return "No ATS bet (missing side)"
 
@@ -238,33 +238,27 @@ def add_recommendations_to_df(
             strength = str(r.get("ats_strength", "")).strip().lower()
 
             ats_is_play = strength in {"strong", "medium", "lean"} and not ats_rec.startswith("No ATS bet")
-
             if not ats_is_play:
                 if "PICK:" in ml_rec or "lean:" in ml_rec:
                     return ml_rec
                 return "NO BET - edges too small"
 
-            strong_ml = ("PICK:" in ml_rec) and ("(strong)" in ml_rec)
-
             if strength == "strong":
                 return ats_rec
-            if strong_ml:
-                return ml_rec
-            return ats_rec
+
+            strong_ml = ("PICK:" in ml_rec) and ("(strong)" in ml_rec)
+            return ml_rec if strong_ml else ats_rec
 
         out["primary_recommendation"] = out.apply(choose_primary_nfl, axis=1)
 
     else:
-        # NON-NFL (NBA/NHL): probability + breakeven gating so it doesn't "like ATS every game"
-        DEFAULT_SPREAD_PRICE = -110.0
+        # Non-NFL ATS gating (NBA / NHL)
+        def non_nfl_ats_row(r):
+            se = r.get("spread_edge_home")
+            if pd.isna(se):
+                return ("Too close to call ATS (edge too small)", float("nan"))
 
-        def non_nfl_spread_rec_row(r):
-            try:
-                se = float(r.get("spread_edge_home", float("nan")))
-            except Exception:
-                se = float("nan")
-
-            # spread_price may or may not exist in nba/nhl rows
+            # Use spread_price if present; else default -110
             price = r.get("spread_price", DEFAULT_SPREAD_PRICE)
             try:
                 price = float(price)
@@ -272,12 +266,10 @@ def add_recommendations_to_df(
                 price = DEFAULT_SPREAD_PRICE
 
             be = breakeven_prob_from_american(price)
-            p_home_cover = cover_prob_from_edge(se, sd_pts=thresholds.ats_sd_pts_default)
-
+            p_home_cover = cover_prob_from_edge(float(se), sd_pts=thresholds.ats_sd_pts_default)
             if pd.isna(p_home_cover):
-                return "No ATS bet (missing spread)"
+                return ("Too close to call ATS (edge too small)", float("nan"))
 
-            # Choose side with higher win prob
             p_away_cover = 1.0 - p_home_cover
             if p_home_cover >= p_away_cover:
                 side = "HOME"
@@ -286,26 +278,38 @@ def add_recommendations_to_df(
                 side = "AWAY"
                 p_win = p_away_cover
 
-            edge_vs_be = p_win - be
+            edge_vs_be = float(p_win - be)
 
-            # Gate ATS
+            # Gate
             if edge_vs_be < thresholds.ats_min_edge_vs_be:
-                return "Too close to call ATS (edge too small)"
+                return ("Too close to call ATS (edge too small)", edge_vs_be)
 
-            # Strength labels
-            if edge_vs_be >= thresholds.ats_strong_edge_vs_be:
-                return f"Model PICK ATS: {side} (strong)"
-            return f"Model PICK ATS: {side} (medium)"
+            strength = "strong" if edge_vs_be >= thresholds.ats_strong_edge_vs_be else "medium"
+            return (f"Model PICK ATS: {side} ({strength})", edge_vs_be)
 
-        out["spread_recommendation"] = out.apply(non_nfl_spread_rec_row, axis=1)
+        tmp = out.apply(non_nfl_ats_row, axis=1, result_type="expand")
+        out["spread_recommendation"] = tmp[0]
+        out["ats_edge_vs_be"] = tmp[1]
 
-        # primary uses legacy chooser
+        # Optional: keep only top N ATS plays per slate
+        if thresholds.max_non_nfl_ats_plays is not None and thresholds.max_non_nfl_ats_plays > 0:
+            is_pick = out["spread_recommendation"].astype(str).str.contains("Model PICK ATS:", na=False)
+            out["__ats_rank"] = out["ats_edge_vs_be"].where(is_pick, -999.0)
+
+            top_idx = out.sort_values("__ats_rank", ascending=False).head(thresholds.max_non_nfl_ats_plays).index
+            keep = set(top_idx.tolist())
+
+            for i in out.index:
+                if is_pick.loc[i] and i not in keep:
+                    out.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
+            out.drop(columns=["__ats_rank"], inplace=True, errors="ignore")
+
         out["primary_recommendation"] = [
             choose_primary_legacy(mr, sr) for mr, sr in zip(out["ml_recommendation"], out["spread_recommendation"])
         ]
 
     # -----------------------
-    # Confidence / value / why
+    # Confidence / Value / Why
     # -----------------------
     out["confidence"] = out[model_home_prob_col].apply(lambda p: confidence_from_prob(p, thresholds))
     out["value_tier"] = out["edge_home"].abs().apply(value_tier_from_ml_edge)
@@ -329,7 +333,6 @@ def add_recommendations_to_df(
         )
     ]
 
-    # Debug view (include NFL fields if present)
     debug_cols = [
         "date", "home", "away",
         model_home_prob_col, "market_home_prob", "edge_home",
@@ -337,10 +340,9 @@ def add_recommendations_to_df(
         "ml_recommendation", "spread_recommendation", "primary_recommendation",
         "confidence", "value_tier", "why_bet",
     ]
-    for c in ["ats_strength", "ats_pass_reason", "ats_edge_vs_be", "ats_pick_side", "ats_pick_prob"]:
+    for c in ["ats_edge_vs_be", "ats_strength", "ats_pass_reason", "ats_pick_side", "ats_pick_prob"]:
         if c in out.columns and c not in debug_cols:
             debug_cols.append(c)
 
     debug = out[debug_cols].copy()
-
     return out, debug
