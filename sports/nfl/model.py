@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import math
 from datetime import datetime, date
 from typing import Dict, Optional, Tuple
 
@@ -26,8 +27,7 @@ ELO_PATH = "results/elo_state_nfl.json"
 HOME_ADV = 55.0
 ELO_K = 20.0
 
-# Elo -> points (spread-ish). Higher number = less aggressive spreads.
-# If your spreads are too extreme, increase this (e.g., 40.0).
+# Elo -> points (spread-ish). Higher number = less aggressive model spreads.
 ELO_PER_POINT = 40.0
 
 # Caps for sanity
@@ -50,7 +50,10 @@ BASE_COMPRESS = 0.75
 
 # Betting thresholds
 MIN_ML_EDGE = 0.02       # 2% no-vig edge for ML
-MIN_ATS_EDGE_PTS = 1.5   # 1.5 points edge for ATS
+MIN_ATS_EDGE_PTS = 1.5   # legacy point-edge threshold (kept as fallback)
+
+# ATS probability model (normal approximation of margin)
+ATS_SD_PTS = 13.5  # tune 13.0–14.0
 
 
 # ----------------------------
@@ -113,11 +116,9 @@ def _rest_elo(days_off: Optional[int]) -> float:
 
 def _qb_cost(inj_list) -> float:
     """
-    Detect QB-ish injuries from your injury tuples (player, role, mult, impact).
+    Detect QB-ish injuries from injury tuples (player, role, mult, impact).
 
-    Your current NFL injuries mapping uses QB impact ~4.0.
-    We treat impact >= 3.7 as QB-like. Also supports a light "QB" hint
-    if the player string contains ' qb' or 'quarterback'.
+    QB-like if impact >= 3.7 OR player text hints QB.
     """
     if not inj_list:
         return 0.0
@@ -192,25 +193,86 @@ def _ml_recommendation(model_p: float, market_p: float, min_edge: float = MIN_ML
         return "No ML bet (missing market prob)"
     edge = model_p - market_p
     if edge >= min_edge:
-        return "Model PICK: HOME ML"
+        return "Model PICK: HOME ML (strong)" if edge >= 0.06 else "Model lean: HOME ML"
     if edge <= -min_edge:
-        return "Model PICK: AWAY ML"
+        return "Model PICK: AWAY ML (strong)" if edge <= -0.06 else "Model lean: AWAY ML"
     return "No ML bet (edge too small)"
 
 
-def _ats_recommendation(spread_edge_home: float, min_pts: float = MIN_ATS_EDGE_PTS) -> str:
+# ---------- ATS helpers (how much it likes the spread) ----------
+def _phi(z: float) -> float:
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def _cover_prob_from_edge(spread_edge_pts: float, sd_pts: float = ATS_SD_PTS) -> float:
     """
-    spread_edge_home = (market_home_spread - model_spread_home)
-      + means market is giving home MORE points than model thinks -> value HOME
-      - means value AWAY
+    spread_edge_pts = (market_home_spread - model_spread_home)
+      + => value HOME
+      - => value AWAY
+
+    Approx P(home covers) = Phi(edge / sd)
     """
-    if np.isnan(spread_edge_home):
-        return "No ATS bet (missing spread)"
-    if spread_edge_home >= min_pts:
-        return "Model PICK ATS: HOME"
-    if spread_edge_home <= -min_pts:
-        return "Model PICK ATS: AWAY"
-    return "No ATS bet (edge too small)"
+    if spread_edge_pts is None or np.isnan(spread_edge_pts):
+        return float("nan")
+    z = float(spread_edge_pts) / float(sd_pts)
+    return float(_clamp(_phi(z), 0.001, 0.999))
+
+
+def _breakeven_prob_from_american(price: float) -> float:
+    """
+    Break-even win probability for a given American odds.
+    Example: -110 -> 110/(110+100) = 0.5238
+    """
+    try:
+        price = float(price)
+        if price == 0:
+            return float("nan")
+        if price < 0:
+            return (-price) / ((-price) + 100.0)
+        return 100.0 / (price + 100.0)
+    except Exception:
+        return float("nan")
+
+
+def _ats_pick_and_edge(p_home_cover: float, spread_price: float = -110.0) -> Tuple[str, float, float, float]:
+    """
+    Returns (side, p_win_for_that_side, edge_vs_breakeven, breakeven_prob)
+    """
+    be = _breakeven_prob_from_american(spread_price)
+    if np.isnan(p_home_cover) or np.isnan(be):
+        return ("NONE", float("nan"), float("nan"), float("nan"))
+
+    p_away_cover = 1.0 - p_home_cover
+
+    if p_home_cover >= p_away_cover:
+        side = "HOME"
+        p_win = p_home_cover
+    else:
+        side = "AWAY"
+        p_win = p_away_cover
+
+    edge = p_win - be
+    return (side, float(p_win), float(edge), float(be))
+
+
+def _ats_strength_label(edge_vs_be: float) -> str:
+    if np.isnan(edge_vs_be):
+        return "UNKNOWN"
+    if edge_vs_be >= 0.06:
+        return "strong"
+    if edge_vs_be >= 0.03:
+        return "medium"
+    if edge_vs_be >= 0.015:
+        return "lean"
+    return "too_close"
+
+
+def _ats_recommendation_from_strength(side: str, strength: str) -> str:
+    if side == "NONE" or strength == "UNKNOWN":
+        return "No ATS bet (missing spread/price)"
+    if strength == "too_close":
+        return "Too close to call ATS (edge too small)"
+    return f"Model PICK ATS: {side} ({strength})"
 
 
 # ----------------------------
@@ -303,7 +365,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
       - market_home_prob (no-vig from ML)
       - edges (model - market)
       - model_spread_home (Elo -> points)
-      - spread edge + ATS rec
+      - spread edge + ATS "how much it likes it" via cover prob and breakeven edge
       - ML rec + value tier
       - debug columns (elo_diff, injuries, qb, rest)
     """
@@ -338,22 +400,22 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         away_days_off = _calc_days_off(target_date, last_played.get(away))
         rest_adj = _rest_elo(home_days_off) - _rest_elo(away_days_off)
 
-        # Injuries (tuples come from your sports/nfl/injuries.py)
+        # Injuries
         home_inj = build_injury_list_for_team_nfl(home, injuries_map)
         away_inj = build_injury_list_for_team_nfl(away, injuries_map)
 
-        # injury_adjustment_points: + means away more hurt (per your comment)
+        # injury_adjustment_points: + means away more hurt
         inj_pts = float(injury_adjustment_points(home_inj, away_inj))
         inj_elo_adj = inj_pts * INJ_ELO_PER_POINT
 
-        # QB extra weighting (difference in QB injury cost)
+        # QB extra weighting
         qb_diff = _qb_cost(away_inj) - _qb_cost(home_inj)
         qb_elo_adj = qb_diff * QB_EXTRA_ELO
 
         # Cap injury Elo swing (cap in Elo space)
         inj_total_elo = _clamp(inj_elo_adj + qb_elo_adj, -MAX_ABS_INJ_ELO_ADJ, MAX_ABS_INJ_ELO_ADJ)
 
-        # Apply injury symmetrically (cleaner than applying only to home)
+        # Apply injury symmetrically
         eh_eff = eh + rest_adj + 0.5 * inj_total_elo
         ea_eff = ea - 0.5 * inj_total_elo
 
@@ -364,7 +426,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         p_home = 0.5 + BASE_COMPRESS * (p_raw - 0.5)
         p_home = _clamp(p_home, 0.01, 0.99)
 
-        # Spread-ish output (for ATS comparisons)
+        # Spread-ish output
         elo_diff = (eh_eff - ea_eff) + HOME_ADV
         model_spread_home = -(elo_diff / ELO_PER_POINT)
         model_spread_home = _clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
@@ -374,7 +436,10 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         away_ml = _safe_float((oi or {}).get("away_ml"))
         home_spread = _safe_float((oi or {}).get("home_spread"))
 
-        # Market no-vig prob + edges
+        # Optional spread price (if your odds source provides it); assume -110 if missing
+        spread_price = _safe_float((oi or {}).get("spread_price"), default=-110.0)
+
+        # Market no-vig prob + ML edges
         mkt_home_p, mkt_away_p = (float("nan"), float("nan"))
         if not np.isnan(home_ml) and not np.isnan(away_ml):
             mkt_home_p, mkt_away_p = _no_vig_probs(home_ml, away_ml)
@@ -385,10 +450,14 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         ml_pick = _ml_recommendation(float(p_home), float(mkt_home_p), min_edge=MIN_ML_EDGE)
         value_tier = _pick_value_tier(abs(edge_home)) if not np.isnan(edge_home) else "UNKNOWN"
 
-        # ATS edge/reco
-        # spread_edge_home = market - model ; + => value HOME, - => value AWAY
+        # ATS point edge: market - model ; + => value HOME, - => value AWAY
         spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
-        ats_pick = _ats_recommendation(spread_edge_home, min_pts=MIN_ATS_EDGE_PTS)
+
+        # ATS "how much it likes it" -> cover prob and edge vs breakeven
+        p_home_cover = _cover_prob_from_edge(spread_edge_home, sd_pts=ATS_SD_PTS)
+        ats_side, ats_p_win, ats_edge_vs_be, ats_be = _ats_pick_and_edge(p_home_cover, spread_price=spread_price)
+        ats_strength = _ats_strength_label(ats_edge_vs_be)
+        spread_reco = _ats_recommendation_from_strength(ats_side, ats_strength)
 
         rows.append({
             "date": game_date_str,
@@ -406,8 +475,15 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
             # ATS
             "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
+            "ats_home_cover_prob": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
+            "ats_pick_side": ats_side,
+            "ats_pick_prob": float(ats_p_win) if not np.isnan(ats_p_win) else np.nan,
+            "ats_breakeven_prob": float(ats_be) if not np.isnan(ats_be) else np.nan,
+            "ats_edge_vs_be": float(ats_edge_vs_be) if not np.isnan(ats_edge_vs_be) else np.nan,
+            "ats_strength": ats_strength,
+
             "ml_recommendation": ml_pick,
-            "spread_recommendation": ats_pick,
+            "spread_recommendation": spread_reco,
             "value_tier": value_tier,
 
             # Debug columns
@@ -422,6 +498,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "home_ml": home_ml,
             "away_ml": away_ml,
             "home_spread": home_spread,
+            "spread_price": spread_price,
         })
 
     return pd.DataFrame(rows)
