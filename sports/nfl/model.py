@@ -27,42 +27,46 @@ ELO_PATH = "results/elo_state_nfl.json"
 HOME_ADV = 55.0
 ELO_K = 20.0
 
-# Elo -> points (spread-ish). Higher number = less aggressive spreads.
+# Elo -> points (spread-ish)
 ELO_PER_POINT = 40.0
 
-# Caps / scaling for injuries (FIX: prevent constant saturation)
-MAX_ABS_INJ_ELO_ADJ = 45.0       # was 80; too easy to hit
-MAX_ABS_INJ_POINTS = 6.0         # cap raw injury-points diff before converting
-INJ_ELO_PER_POINT = 6.0          # was 14; too strong
-QB_EXTRA_ELO = 10.0              # was 18; too strong
+# Injury scaling (reduced to avoid saturation)
+MAX_ABS_INJ_ELO_ADJ = 45.0
+MAX_ABS_INJ_POINTS = 6.0
+INJ_ELO_PER_POINT = 6.0
+QB_EXTRA_ELO = 10.0
 
 # Spread cap
 MAX_ABS_MODEL_SPREAD = 17.0
 
-# Rest / short-week effects (Elo)
-SHORT_REST_PENALTY_ELO = -14.0   # <=4 days off
+# Rest effects (Elo)
+SHORT_REST_PENALTY_ELO = -14.0
 NORMAL_REST_BONUS_ELO = 0.0
-BYE_BONUS_ELO = +8.0             # 10+ days off
+BYE_BONUS_ELO = +8.0
 
-# Probability compression: NFL has variance; shrink toward 0.5
+# Prob compression
 BASE_COMPRESS = 0.75
 
-# Betting thresholds
-MIN_ML_EDGE = 0.02  # 2% no-vig edge for ML
+# ML threshold
+MIN_ML_EDGE = 0.02
 
-# ATS probability model (normal approximation of margin)
-ATS_SD_PTS = 13.5    # tune 13.0–14.0
+# ATS model
+ATS_SD_PTS = 13.5
 ATS_DEFAULT_PRICE = -110.0
 
-# ATS strength labels (edge vs break-even)
-ATS_STRONG_EDGE = 0.06
-ATS_MED_EDGE = 0.03
-ATS_LEAN_EDGE = 0.015
+# ATS gating (FIX: prevent ATS for every game)
+ATS_MIN_EDGE_VS_BE = 0.03   # must beat breakeven by 3% to bet ATS
+ATS_MIN_PTS_EDGE = 2.0      # must have at least 2.0 pts edge to bet ATS
 
-# Sanity filter: if market line is huge but model line is tiny, downgrade
-ATS_BIG_LINE = 9.0
-ATS_TINY_MODEL = 3.0
-ATS_BIGLINE_DOWNGRADE = 0.03  # subtract from ats_edge_vs_be if triggered
+# Plausibility gate:
+# If the market line is large but your model line is near 0, it's probably an artifact
+# of weak Elo separation + leftover injury scaling. Don't bet ATS in that case.
+ATS_BIG_LINE = 7.0          # market spread magnitude considered "big"
+ATS_TINY_MODEL = 2.0        # model spread magnitude considered "tiny"
+ATS_BIGLINE_FORCE_PASS = True
+
+# Optional: limit ATS picks per day
+MAX_ATS_PLAYS_PER_DAY = 3   # set None to disable
 
 
 # ----------------------------
@@ -97,10 +101,6 @@ def _parse_iso_date(s: str) -> Optional[date]:
 
 
 def _calc_days_off(target: Optional[date], last: Optional[date]) -> Optional[int]:
-    """
-    days_off = days between games (not counting game days).
-    Returns None if data looks invalid.
-    """
     if target is None or last is None:
         return None
     delta = (target - last).days - 1
@@ -171,13 +171,6 @@ def _phi(z: float) -> float:
 
 
 def _cover_prob_from_edge(spread_edge_pts: float, sd_pts: float = ATS_SD_PTS) -> float:
-    """
-    spread_edge_pts = (market_home_spread - model_spread_home)
-      + => value HOME
-      - => value AWAY
-
-    Approx P(home covers) = Phi(edge / sd)
-    """
     if spread_edge_pts is None or np.isnan(spread_edge_pts):
         return float("nan")
     z = float(spread_edge_pts) / float(sd_pts)
@@ -197,9 +190,6 @@ def _breakeven_prob_from_american(price: float) -> float:
 
 
 def _ats_pick_and_edge(p_home_cover: float, spread_price: float) -> Tuple[str, float, float, float]:
-    """
-    Returns (side, p_win_for_side, edge_vs_be, breakeven_prob)
-    """
     be = _breakeven_prob_from_american(spread_price)
     if np.isnan(p_home_cover) or np.isnan(be):
         return ("NONE", float("nan"), float("nan"), float("nan"))
@@ -220,11 +210,11 @@ def _ats_pick_and_edge(p_home_cover: float, spread_price: float) -> Tuple[str, f
 def _ats_strength_label(edge_vs_be: float) -> str:
     if np.isnan(edge_vs_be):
         return "UNKNOWN"
-    if edge_vs_be >= ATS_STRONG_EDGE:
+    if edge_vs_be >= 0.06:
         return "strong"
-    if edge_vs_be >= ATS_MED_EDGE:
+    if edge_vs_be >= 0.03:
         return "medium"
-    if edge_vs_be >= ATS_LEAN_EDGE:
+    if edge_vs_be >= 0.015:
         return "lean"
     return "too_close"
 
@@ -267,9 +257,6 @@ def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
 
 
 def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
-    """
-    Updates Elo state from recent completed games.
-    """
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
 
@@ -291,13 +278,8 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
         score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
-            hs = score_map.get(home_raw)
-            aw = score_map.get(away_raw)
-            if hs is None:
-                hs = score_map.get(home)
-            if aw is None:
-                aw = score_map.get(away)
-
+            hs = score_map.get(home_raw) or score_map.get(home)
+            aw = score_map.get(away_raw) or score_map.get(away)
             hs = float(hs)
             aw = float(aw)
         except Exception:
@@ -320,13 +302,6 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 # Main daily run
 # ----------------------------
 def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
-    """
-    Fixes applied:
-      1) Injury scaling reduced + raw injury points capped (prevents constant ±max).
-      2) Symmetric injury Elo application (home gets +0.5, away gets -0.5).
-      3) ATS "how much it likes it" based on cover prob vs breakeven.
-      4) Big-line sanity downgrade (prevents overconfident ATS on huge lines).
-    """
     st = update_elo_from_recent_scores(days_from=14)
 
     # Parse date
@@ -358,44 +333,38 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         away_days_off = _calc_days_off(target_date, last_played.get(away))
         rest_adj = _rest_elo(home_days_off) - _rest_elo(away_days_off)
 
-        # Injuries (from your injuries.py)
+        # Injuries
         home_inj = build_injury_list_for_team_nfl(home, injuries_map)
         away_inj = build_injury_list_for_team_nfl(away, injuries_map)
 
-        # injury_adjustment_points returns (away_cost - home_cost)
         # Positive => HOME advantage (away more hurt)
         inj_pts_raw = float(injury_adjustment_points(home_inj, away_inj))
         inj_pts = _clamp(inj_pts_raw, -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
 
-        # QB differential: compute QB cost from injury tuples (impact already contains QB scaling)
-        # We treat "QB-like" by impact >= ~6.0 (since injuries.py applies STARTER_QB_MULT),
-        # and also by name hint.
-        qb_home = 0.0
-        qb_away = 0.0
-        for (player, role, mult, impact) in (home_inj or []):
-            try:
-                player_s = str(player).lower()
-                if float(impact) >= 6.0 or (" qb" in player_s) or ("quarterback" in player_s):
-                    qb_home += (1.0 if role == "starter" else 0.55) * float(mult) * float(impact)
-            except Exception:
-                continue
-        for (player, role, mult, impact) in (away_inj or []):
-            try:
-                player_s = str(player).lower()
-                if float(impact) >= 6.0 or (" qb" in player_s) or ("quarterback" in player_s):
-                    qb_away += (1.0 if role == "starter" else 0.55) * float(mult) * float(impact)
-            except Exception:
-                continue
+        # QB cost (use impact already scaled in injuries.py)
+        def qb_cost(lst) -> float:
+            s = 0.0
+            for (player, role, mult, impact) in (lst or []):
+                try:
+                    player_s = str(player).lower()
+                    qb_like = (str(player_s).find(" qb") >= 0) or ("quarterback" in player_s) or (float(impact) >= 6.0)
+                    if not qb_like:
+                        continue
+                    rw = 1.0 if role == "starter" else 0.55
+                    s += rw * float(mult) * float(impact)
+                except Exception:
+                    continue
+            return float(s)
 
-        # qb_diff > 0 means away QB situation worse => helps HOME
+        qb_home = qb_cost(home_inj)
+        qb_away = qb_cost(away_inj)
         qb_diff = float(qb_away - qb_home)
 
         inj_elo_adj = float(inj_pts) * float(INJ_ELO_PER_POINT)
         qb_elo_adj = float(qb_diff) * float(QB_EXTRA_ELO)
-
         inj_total_elo = _clamp(inj_elo_adj + qb_elo_adj, -MAX_ABS_INJ_ELO_ADJ, MAX_ABS_INJ_ELO_ADJ)
 
-        # Symmetric injury application (prevents weird spread behavior)
+        # Symmetric injury application
         eh_eff = eh + rest_adj + 0.5 * inj_total_elo
         ea_eff = ea - 0.5 * inj_total_elo
 
@@ -414,9 +383,9 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         spread_price = _safe_float((oi or {}).get("spread_price"), default=ATS_DEFAULT_PRICE)
 
         # Market no-vig prob + ML edges
-        mkt_home_p, mkt_away_p = (float("nan"), float("nan"))
+        mkt_home_p, _ = (float("nan"), float("nan"))
         if not np.isnan(home_ml) and not np.isnan(away_ml):
-            mkt_home_p, mkt_away_p = _no_vig_probs(home_ml, away_ml)
+            mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
 
         edge_home = float(p_home - mkt_home_p) if not np.isnan(mkt_home_p) else float("nan")
         edge_away = float(-edge_home) if not np.isnan(edge_home) else float("nan")
@@ -424,25 +393,39 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         ml_pick = _ml_recommendation(float(p_home), float(mkt_home_p), min_edge=MIN_ML_EDGE)
         value_tier = _pick_value_tier(abs(edge_home)) if not np.isnan(edge_home) else "UNKNOWN"
 
-        # ATS edge in points
+        # ATS calculations
         spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
-
-        # ATS "liking" based on cover prob vs break-even
         p_home_cover = _cover_prob_from_edge(spread_edge_home, sd_pts=ATS_SD_PTS)
         ats_side, ats_p_win, ats_edge_vs_be, ats_be = _ats_pick_and_edge(p_home_cover, spread_price=spread_price)
 
-        # Sanity downgrade for big market lines when model line is tiny
-        if (
-            not np.isnan(home_spread)
-            and not np.isnan(model_spread_home)
-            and abs(home_spread) >= ATS_BIG_LINE
-            and abs(model_spread_home) <= ATS_TINY_MODEL
-            and not np.isnan(ats_edge_vs_be)
-        ):
-            ats_edge_vs_be = float(ats_edge_vs_be - ATS_BIGLINE_DOWNGRADE)
+        # --- ATS gating to avoid "ATS every game" ---
+        ats_pass_reason = ""
+        ats_allowed = True
 
-        ats_strength = _ats_strength_label(ats_edge_vs_be)
-        spread_reco = _ats_reco(ats_side, ats_strength)
+        if np.isnan(home_spread) or np.isnan(model_spread_home):
+            ats_allowed = False
+            ats_pass_reason = "missing spread"
+        else:
+            # Plausibility gate
+            if ATS_BIGLINE_FORCE_PASS and abs(home_spread) >= ATS_BIG_LINE and abs(model_spread_home) <= ATS_TINY_MODEL:
+                ats_allowed = False
+                ats_pass_reason = "big market line but tiny model line"
+
+            # Minimum edge gates
+            if ats_allowed and (np.isnan(ats_edge_vs_be) or ats_edge_vs_be < ATS_MIN_EDGE_VS_BE):
+                ats_allowed = False
+                ats_pass_reason = f"ats_edge_vs_be<{ATS_MIN_EDGE_VS_BE:.3f}"
+
+            if ats_allowed and (np.isnan(spread_edge_home) or abs(spread_edge_home) < ATS_MIN_PTS_EDGE):
+                ats_allowed = False
+                ats_pass_reason = f"|spread_edge|<{ATS_MIN_PTS_EDGE:.1f}"
+
+        if not ats_allowed:
+            ats_strength = "pass"
+            spread_reco = "No ATS bet (gated)"
+        else:
+            ats_strength = _ats_strength_label(ats_edge_vs_be)
+            spread_reco = _ats_reco(ats_side, ats_strength)
 
         rows.append({
             "date": game_date_str,
@@ -456,9 +439,9 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             # Market (processed)
             "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
             "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
-            "edge_away": float(edge_away) if not np.isnan(edge_away) else np.nan,
+            "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
 
-            # ATS (how much it likes the spread)
+            # ATS
             "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
             "ats_home_cover_prob": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
             "ats_pick_side": ats_side,
@@ -466,6 +449,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "ats_breakeven_prob": float(ats_be) if not np.isnan(ats_be) else np.nan,
             "ats_edge_vs_be": float(ats_edge_vs_be) if not np.isnan(ats_edge_vs_be) else np.nan,
             "ats_strength": ats_strength,
+            "ats_pass_reason": ats_pass_reason,
 
             "ml_recommendation": ml_pick,
             "spread_recommendation": spread_reco,
@@ -487,7 +471,27 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "spread_price": spread_price,
         })
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+
+    # Optional: limit ATS picks to top N edges per slate
+    if MAX_ATS_PLAYS_PER_DAY is not None and not df.empty:
+        # mark eligible ATS
+        elig = df["spread_recommendation"].astype(str).str.contains("Model PICK ATS:", na=False)
+        df["ats_rank_score"] = np.where(elig, df["ats_edge_vs_be"].astype(float), -999.0)
+
+        # keep only top N
+        top_idx = df.sort_values("ats_rank_score", ascending=False).head(MAX_ATS_PLAYS_PER_DAY).index
+        keep = set(top_idx.tolist())
+
+        for i in df.index:
+            if elig.loc[i] and i not in keep:
+                df.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
+                df.loc[i, "ats_strength"] = "pass"
+                df.loc[i, "ats_pass_reason"] = "top-N filter"
+
+        df.drop(columns=["ats_rank_score"], inplace=True, errors="ignore")
+
+    return df
 
 
 # Backwards-compatible alias
@@ -496,7 +500,7 @@ def run_daily_probs_for_date(
     *,
     game_date: str = None,
     odds_dict: dict = None,
-    spreads_dict: dict = None,  # kept for compatibility (unused)
+    spreads_dict: dict = None,
     **kwargs,
 ) -> pd.DataFrame:
     date_in = game_date if game_date is not None else game_date_str
