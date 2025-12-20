@@ -167,53 +167,51 @@ def add_recommendations_to_df(
     # -----------------------
     has_nfl_ats_fields = ("ats_strength" in out.columns) and ("ats_pass_reason" in out.columns)
 
-    if has_nfl_ats_fields:
-        # Use what the NFL model decided; DO NOT overwrite it with points-based ATS logic.
+     if has_nfl_ats_fields:
+        # Use ONLY NFL model outputs for ATS. Never recompute ATS from points here.
         def nfl_spread_rec_row(r):
             strength = str(r.get("ats_strength", "")).strip().lower()
             pass_reason = str(r.get("ats_pass_reason", "")).strip()
+            side = str(r.get("ats_pick_side", "")).strip().upper()
 
-            if strength in {"pass", "gated"}:
-                # Include reason if you want it visible
+            # Only these strengths mean ATS is actually a bet
+            if strength not in {"strong", "medium", "lean"}:
                 return f"No ATS bet (gated){': ' + pass_reason if pass_reason else ''}"
 
-            # If your NFL model already wrote spread_recommendation, keep it.
-            existing = r.get("spread_recommendation")
-            if isinstance(existing, str) and existing.strip():
-                # But still guard against accidental leakage:
-                if "Model PICK ATS" in existing or "Model lean ATS" in existing or "Too close" in existing:
-                    return existing
-            # Fallback: if missing for some reason, revert to points-based
-            return ats_recommendation_points_based(float(r["spread_edge_home"]), thresholds)
+            if side not in {"HOME", "AWAY"}:
+                return "No ATS bet (missing side)"
+
+            # If your NFL model already wrote a spread recommendation, keep it IF it matches strength/side
+            # (optional safety)
+            return f"Model PICK ATS: {side} ({strength})" if strength in {"strong", "medium"} else f"Model lean ATS: {side}"
 
         out["spread_recommendation"] = out.apply(nfl_spread_rec_row, axis=1)
 
-        # Primary: ATS is only eligible if NOT gated
         def choose_primary_nfl(r):
             ml_rec = str(r.get("ml_recommendation", ""))
             ats_rec = str(r.get("spread_recommendation", ""))
             strength = str(r.get("ats_strength", "")).strip().lower()
 
-            if strength in {"pass", "gated"} or ats_rec.startswith("No ATS bet"):
-                # ATS can't be primary if gated
-                # Prefer ML, else no bet
+            # ATS is only eligible if not gated
+            ats_is_play = strength in {"strong", "medium", "lean"} and not ats_rec.startswith("No ATS bet")
+
+            # If ATS isn't eligible, fall back to ML or no bet
+            if not ats_is_play:
                 if "PICK:" in ml_rec or "lean:" in ml_rec:
                     return ml_rec
                 return "NO BET — edges too small"
 
-            return choose_primary(ml_rec, ats_rec)
+            # If ATS is eligible, decide whether ATS or ML is primary
+            # Prefer ATS only if it is STRONG, otherwise prefer ML if ML is strong.
+            strong_ml = ("PICK:" in ml_rec) and ("(strong)" in ml_rec)
+
+            if strength == "strong":
+                return ats_rec
+            if strong_ml:
+                return ml_rec
+            return ats_rec  # medium/lean ATS becomes primary only if ML isn't strong
 
         out["primary_recommendation"] = out.apply(choose_primary_nfl, axis=1)
-
-    else:
-        # Legacy behavior (NBA / old NFL): compute ATS from points edge
-        out["spread_recommendation"] = out["spread_edge_home"].apply(
-            lambda se: ats_recommendation_points_based(se, thresholds)
-        )
-        out["primary_recommendation"] = [
-            choose_primary(mr, sr) for mr, sr in zip(out["ml_recommendation"], out["spread_recommendation"])
-        ]
-
     # -----------------------
     # Confidence / value tier / why
     # -----------------------
