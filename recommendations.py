@@ -67,10 +67,15 @@ class Thresholds:
     ml_edge_strong: float = 0.06
     ml_edge_lean: float = 0.035
 
-    # NEW: ATS gating for NON-NFL sports (probability edge vs breakeven)
-    # This is the key change that stops "ATS every game".
-    ats_min_edge_vs_be: float = 0.035     # must clear breakeven by 3.5%
-    ats_strong_edge_vs_be: float = 0.060  # "strong" if 6% above breakeven
+    # --- LEGACY (keep so main.py doesn't error) ---
+    # If your main() passes these, we accept them, but we won't use them
+    # for NBA/NHL if we have spread gating logic enabled.
+    ats_edge_strong_pts: float = 3.0
+    ats_edge_lean_pts: float = 1.5
+
+    # --- NEW: ATS gating for NON-NFL sports (probability edge vs breakeven) ---
+    ats_min_edge_vs_be: float = 0.035
+    ats_strong_edge_vs_be: float = 0.060
 
     # SD for cover-prob approximation (NBA ~ 11-13)
     ats_sd_pts_default: float = 12.5
@@ -81,7 +86,6 @@ class Thresholds:
     # Confidence
     conf_high: float = 0.18
     conf_med: float = 0.10
-
 
 # -----------------------
 # Labels
