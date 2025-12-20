@@ -1,3 +1,4 @@
+# recommendations.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ class Thresholds:
     ml_edge_strong: float = 0.06
     ml_edge_lean: float = 0.035
 
-    # Legacy ATS thresholds (points-based, used if no NFL ATS fields exist)
+    # Legacy ATS thresholds (points-based, used when NFL ATS gating fields are NOT present)
     ats_edge_strong_pts: float = 3.0
     ats_edge_lean_pts: float = 1.5
 
@@ -63,6 +64,8 @@ def ml_recommendation(edge_home: float, t: Thresholds) -> str:
 def ats_recommendation_points_based(spread_edge_home_pts: float, t: Thresholds) -> str:
     """
     Legacy ATS rec (NBA-style): purely points edge.
+    Positive spread_edge_home => HOME ATS value
+    Negative spread_edge_home => AWAY ATS value
     """
     se = float(spread_edge_home_pts)
     if se >= t.ats_edge_strong_pts:
@@ -76,7 +79,10 @@ def ats_recommendation_points_based(spread_edge_home_pts: float, t: Thresholds) 
     return "Too close to call ATS (edge too small)"
 
 
-def choose_primary(ml_rec: str, ats_rec: str) -> str:
+def choose_primary_legacy(ml_rec: str, ats_rec: str) -> str:
+    """
+    Legacy chooser (NBA/NHL style): ATS can win if strong, then ML, then leans.
+    """
     strong_ats = ("PICK ATS" in ats_rec) and ("(strong)" in ats_rec)
     strong_ml = ("PICK:" in ml_rec) and ("(strong)" in ml_rec)
     lean_ats = "lean ATS" in ats_rec
@@ -118,7 +124,23 @@ def add_recommendations_to_df(
     home_spread_col: str = "home_spread",
     model_home_prob_col: str = "model_home_prob",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Adds:
+      - market_home_prob (no-vig if both sides exist)
+      - edge_home/edge_away
+      - model_spread_home_norm
+      - spread_edge_home (market - model; + means HOME ATS value)
+      - ml_recommendation
+      - spread_recommendation
+      - primary_recommendation
+      - confidence
+      - value_tier
+      - why_bet
 
+    IMPORTANT NFL FIX:
+      If NFL gating fields exist (ats_strength / ats_pass_reason), we DO NOT recompute ATS
+      from points edge. We format ATS only if the NFL model says it's a play.
+    """
     out = df.copy()
 
     # -----------------------
@@ -162,13 +184,12 @@ def add_recommendations_to_df(
     out["ml_recommendation"] = out["edge_home"].apply(lambda e: ml_recommendation(e, thresholds))
 
     # -----------------------
-    # ATS rec (FIX)
-    # Prefer the NFL model's gated output if present.
+    # ATS rec (NFL-aware)
     # -----------------------
     has_nfl_ats_fields = ("ats_strength" in out.columns) and ("ats_pass_reason" in out.columns)
 
-     if has_nfl_ats_fields:
-        # Use ONLY NFL model outputs for ATS. Never recompute ATS from points here.
+    if has_nfl_ats_fields:
+        # Format ATS from NFL fields ONLY; never recompute from points edge here.
         def nfl_spread_rec_row(r):
             strength = str(r.get("ats_strength", "")).strip().lower()
             pass_reason = str(r.get("ats_pass_reason", "")).strip()
@@ -181,9 +202,9 @@ def add_recommendations_to_df(
             if side not in {"HOME", "AWAY"}:
                 return "No ATS bet (missing side)"
 
-            # If your NFL model already wrote a spread recommendation, keep it IF it matches strength/side
-            # (optional safety)
-            return f"Model PICK ATS: {side} ({strength})" if strength in {"strong", "medium"} else f"Model lean ATS: {side}"
+            if strength in {"strong", "medium"}:
+                return f"Model PICK ATS: {side} ({strength})"
+            return f"Model lean ATS: {side}"
 
         out["spread_recommendation"] = out.apply(nfl_spread_rec_row, axis=1)
 
@@ -192,26 +213,34 @@ def add_recommendations_to_df(
             ats_rec = str(r.get("spread_recommendation", ""))
             strength = str(r.get("ats_strength", "")).strip().lower()
 
-            # ATS is only eligible if not gated
             ats_is_play = strength in {"strong", "medium", "lean"} and not ats_rec.startswith("No ATS bet")
 
-            # If ATS isn't eligible, fall back to ML or no bet
+            # If ATS isn't eligible, ATS can never be primary
             if not ats_is_play:
                 if "PICK:" in ml_rec or "lean:" in ml_rec:
                     return ml_rec
                 return "NO BET — edges too small"
 
-            # If ATS is eligible, decide whether ATS or ML is primary
-            # Prefer ATS only if it is STRONG, otherwise prefer ML if ML is strong.
+            # Prefer ATS only if ATS is strong; otherwise let strong ML win
             strong_ml = ("PICK:" in ml_rec) and ("(strong)" in ml_rec)
 
             if strength == "strong":
                 return ats_rec
             if strong_ml:
                 return ml_rec
-            return ats_rec  # medium/lean ATS becomes primary only if ML isn't strong
+            return ats_rec
 
         out["primary_recommendation"] = out.apply(choose_primary_nfl, axis=1)
+
+    else:
+        # Legacy behavior (NBA / NHL / old NFL): compute ATS from points edge
+        out["spread_recommendation"] = out["spread_edge_home"].apply(
+            lambda se: ats_recommendation_points_based(se, thresholds)
+        )
+        out["primary_recommendation"] = [
+            choose_primary_legacy(mr, sr) for mr, sr in zip(out["ml_recommendation"], out["spread_recommendation"])
+        ]
+
     # -----------------------
     # Confidence / value tier / why
     # -----------------------
@@ -237,6 +266,7 @@ def add_recommendations_to_df(
         )
     ]
 
+    # Debug view (keep NFL columns if present)
     debug_cols = [
         "date", "home", "away",
         model_home_prob_col, "market_home_prob", "edge_home",
@@ -244,9 +274,8 @@ def add_recommendations_to_df(
         "ml_recommendation", "spread_recommendation", "primary_recommendation",
         "confidence", "value_tier", "why_bet",
     ]
-    # include nfl-specific columns if present
     for c in ["ats_strength", "ats_pass_reason", "ats_edge_vs_be", "ats_pick_side", "ats_pick_prob"]:
-        if c in out.columns:
+        if c in out.columns and c not in debug_cols:
             debug_cols.append(c)
 
     debug = out[debug_cols].copy()
