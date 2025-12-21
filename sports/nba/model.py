@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, date
 import numpy as np
 import pandas as pd
 
@@ -10,8 +11,10 @@ from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.calibration import load_nba_calibrator, update_and_save_nba_calibration
+from sports.nba.bdl_client import bdl_get, get_bdl_api_key, season_start_year_for_date
 
 ELO_PATH = "results/elo_state_nba.json"
+BACKFILL_MARKER_PATH = "results/.elo_state_nba_backfill_date.txt"
 
 # ---- Tunables ----
 HOME_ADV = 65.0           # Elo home advantage (tunable)
@@ -68,8 +71,206 @@ def _load_nba_injuries():
 # -----------------------------
 # Elo update from recent scores
 # -----------------------------
-def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
-    st = EloState.load(ELO_PATH)
+def _parse_game_datetime(date_str: str | None) -> datetime | None:
+    if not date_str:
+        return None
+    try:
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except Exception:
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d")
+        except Exception:
+            return None
+
+
+def _fetch_finished_games_from_bdl(*, season_year: int, api_key: str) -> list[dict]:
+    params = {"seasons[]": season_year, "per_page": 100}
+    cursor = None
+    games: list[dict] = []
+
+    while True:
+        if cursor is not None:
+            params["cursor"] = cursor
+        else:
+            params.pop("cursor", None)
+
+        games_json = bdl_get("games", params=params, api_key=api_key)
+        data = games_json.get("data", []) or []
+        meta = games_json.get("meta", {}) or {}
+        cursor = meta.get("next_cursor")
+
+        for g in data:
+            home_team = (g.get("home_team") or {}).get("full_name")
+            away_team = (g.get("visitor_team") or {}).get("full_name")
+            if not home_team or not away_team:
+                continue
+
+            home_score = _safe_float(g.get("home_team_score"), 0.0)
+            away_score = _safe_float(g.get("visitor_team_score"), 0.0)
+            if home_score == 0.0 and away_score == 0.0 and (g.get("period", 0) == 0):
+                continue  # not completed
+
+            dt = _parse_game_datetime(g.get("date"))
+            date_key = dt.date().isoformat() if dt else str(g.get("date") or "")
+            sort_ts = dt.timestamp() if dt else 0.0
+
+            home = canon_team(home_team)
+            away = canon_team(away_team)
+            if not home or not away:
+                continue
+
+            games.append({
+                "game_key": f"{date_key}|{home}|{away}",
+                "home": home,
+                "away": away,
+                "home_score": float(home_score),
+                "away_score": float(away_score),
+                "sort_ts": sort_ts,
+            })
+
+        if not cursor:
+            break
+
+    return games
+
+
+def _fetch_finished_games_from_odds_api(days_from: int = 3) -> list[dict]:
+    sport_key = SPORT_TO_ODDS_KEY["nba"]
+    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 3))
+
+    games: list[dict] = []
+    for ev in events:
+        home_raw = ev.get("home_team")
+        away_raw = ev.get("away_team")
+        scores = ev.get("scores")
+        if not home_raw or not away_raw or not scores:
+            continue
+
+        home = canon_team(home_raw)
+        away = canon_team(away_raw)
+        if not home or not away:
+            continue
+
+        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
+        try:
+            hs = score_map.get(home_raw)
+            aw = score_map.get(away_raw)
+            if hs is None:
+                hs = score_map.get(home)
+            if aw is None:
+                aw = score_map.get(away)
+
+            hs = float(hs)
+            aw = float(aw)
+        except Exception:
+            continue
+
+        dt = _parse_game_datetime(ev.get("commence_time"))
+        date_key = dt.date().isoformat() if dt else str(ev.get("commence_time") or "")
+        sort_ts = dt.timestamp() if dt else 0.0
+
+        games.append({
+            "game_key": f"{date_key}|{home}|{away}",
+            "home": home,
+            "away": away,
+            "home_score": float(hs),
+            "away_score": float(aw),
+            "sort_ts": sort_ts,
+        })
+    return games
+
+
+def backfill_nba_elo_state(
+    *,
+    season_year: int | None = None,
+    bdl_api_key: str | None = None,
+    force_full_rebuild: bool = False,
+) -> EloState:
+    today_str = datetime.utcnow().date().isoformat()
+    if not force_full_rebuild and os.path.exists(ELO_PATH) and os.path.exists(BACKFILL_MARKER_PATH):
+        try:
+            with open(BACKFILL_MARKER_PATH, "r", encoding="utf-8") as f:
+                last_run = f.read().strip()
+            if last_run == today_str:
+                print("[nba backfill] Backfill already executed today; using existing Elo state.")
+                return EloState.load(ELO_PATH)
+        except Exception:
+            pass
+
+    if season_year is None:
+        season_year = season_start_year_for_date(date.today())
+
+    if bdl_api_key is None:
+        try:
+            bdl_api_key = get_bdl_api_key()
+        except Exception as e:
+            print(f"[nba backfill] WARNING: no BallDontLie API key available: {e}")
+            bdl_api_key = None
+
+    games: list[dict] = []
+    if bdl_api_key:
+        try:
+            games.extend(_fetch_finished_games_from_bdl(season_year=season_year, api_key=bdl_api_key))
+        except Exception as e:
+            print(f"[nba backfill] WARNING: failed to load season games from BallDontLie: {e}")
+
+    try:
+        games.extend(_fetch_finished_games_from_odds_api(days_from=3))
+    except Exception as e:
+        print(f"[nba backfill] WARNING: failed to load recent scores from Odds API: {e}")
+
+    if not games:
+        print("[nba backfill] No finished games fetched; returning existing Elo state.")
+        return EloState.load(ELO_PATH)
+
+    deduped = []
+    seen_keys = set()
+    for g in games:
+        key = g.get("game_key")
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(g)
+
+    deduped.sort(key=lambda x: x.get("sort_ts", 0.0))
+
+    st = EloState(ratings={}, processed_games={})
+    applied = 0
+    for g in deduped:
+        home = g.get("home")
+        away = g.get("away")
+        hs = g.get("home_score")
+        aw = g.get("away_score")
+        game_key = g.get("game_key")
+
+        if not home or not away or hs is None or aw is None or not game_key:
+            continue
+        if st.is_processed(game_key):
+            continue
+
+        eh = st.get(home)
+        ea = st.get(away)
+        nh, na = elo_update(eh, ea, float(hs), float(aw), k=ELO_K, home_adv=HOME_ADV)
+        st.set(home, nh)
+        st.set(away, na)
+        st.mark_processed(game_key)
+        applied += 1
+
+    os.makedirs("results", exist_ok=True)
+    st.save(ELO_PATH)
+    try:
+        with open(BACKFILL_MARKER_PATH, "w", encoding="utf-8") as f:
+            f.write(today_str)
+    except Exception:
+        pass
+
+    print(f"[nba backfill] Applied {applied} finished games out of {len(deduped)} fetched for season {season_year}.")
+    return st
+
+
+def update_elo_from_recent_scores(days_from: int = 3, st: EloState | None = None) -> EloState:
+    if st is None:
+        st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nba"]
 
     events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 3))
@@ -84,7 +285,9 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
         home = canon_team(home_raw)
         away = canon_team(away_raw)
 
-        game_key = f"{ev.get('id','')}|{ev.get('commence_time','')}|{home}|{away}"
+       dt = _parse_game_datetime(ev.get("commence_time"))
+        date_key = dt.date().isoformat() if dt else str(ev.get("commence_time") or "")
+        game_key = f"{date_key}|{home}|{away}"
         if st.is_processed(game_key):
             continue
 
@@ -194,8 +397,18 @@ def _build_form_adjustments(stats_df: pd.DataFrame | None) -> dict[str, float]:
 # -----------------------------
 # Daily run
 # -----------------------------
-def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: pd.DataFrame | None = None) -> pd.DataFrame:
-    st = update_elo_from_recent_scores(days_from=3)
+def run_daily_nba(
+    game_date_str: str,
+    *,
+    odds_dict: dict,
+    stats_df: pd.DataFrame | None = None,
+    spreads_dict: dict | None = None,
+    force_full_rebuild: bool = False,
+    bdl_api_key: str | None = None,
+    **kwargs,
+) -> pd.DataFrame:
+    st = backfill_nba_elo_state(force_full_rebuild=force_full_rebuild, bdl_api_key=bdl_api_key)
+    st = update_elo_from_recent_scores(days_from=3, st=st)
     form_adjustments = _build_form_adjustments(stats_df)
     # Calibration
     cal = load_nba_calibrator()
@@ -271,14 +484,15 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: pd.DataFrame
 
     return pd.DataFrame(rows)
 
-
 def run_daily_probs_for_date(
     game_date_str: str = None,
     *,
     game_date: str = None,
     odds_dict: dict = None,
     spreads_dict: dict = None,   # older callers pass this
-        stats_df: pd.DataFrame | None = None,
+         stats_df: pd.DataFrame | None = None,
+    force_full_rebuild: bool = False,
+    api_key: str | None = None,
     **kwargs,                    # swallow any future extra args safely
 ) -> pd.DataFrame:
     """
@@ -288,4 +502,12 @@ def run_daily_probs_for_date(
     if date_in is None:
         raise ValueError("Must provide game_date or game_date_str")
 
-        return run_daily_nba(str(date_in), odds_dict=(odds_dict or {}), stats_df=stats_df)
+    return run_daily_nba(
+        str(date_in),
+        odds_dict=(odds_dict or {}),
+        stats_df=stats_df,
+        spreads_dict=spreads_dict,
+        force_full_rebuild=force_full_rebuild,
+        bdl_api_key=api_key,
+        **kwargs,
+    )
