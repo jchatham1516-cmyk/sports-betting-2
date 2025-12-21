@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import math
+from collections import defaultdict
 from datetime import datetime, date
 from typing import Dict, Optional, Tuple
 
@@ -43,6 +44,12 @@ MAX_ABS_MODEL_SPREAD = 17.0
 SHORT_REST_PENALTY_ELO = -14.0
 NORMAL_REST_BONUS_ELO = 0.0
 BYE_BONUS_ELO = +8.0
+
+# Recent form (based on scoring margin)
+FORM_LOOKBACK_DAYS = 35
+FORM_MIN_GAMES = 2
+FORM_ELO_PER_POINT = 1.35
+FORM_ELO_CLAMP = 40.0
 
 # Prob compression
 BASE_COMPRESS = 0.75
@@ -118,7 +125,69 @@ def _rest_elo(days_off: Optional[int]) -> float:
         return float(BYE_BONUS_ELO)
     return float(NORMAL_REST_BONUS_ELO)
 
+def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, Dict[str, float]]:
+    """
+    Builds per-team recent form adjustments based on average scoring margin.
+    Returns:
+      { team: {\"avg_margin\": float, \"games\": int, \"elo_adj\": float } }
+    """
+    sport_key = SPORT_TO_ODDS_KEY.get("nfl")
+    if not sport_key:
+        return {}
 
+    try:
+        events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 45))
+    except Exception:
+        return {}
+
+    margins = defaultdict(list)  # team -> list[(date, margin)]
+
+    for ev in events:
+        home_raw = ev.get("home_team")
+        away_raw = ev.get("away_team")
+        scores = ev.get("scores")
+        if not home_raw or not away_raw or not scores:
+            continue
+
+        d = _parse_iso_date(ev.get("commence_time") or "")
+        if d is None:
+            continue
+
+        home = canon_team(home_raw)
+        away = canon_team(away_raw)
+        if not home or not away:
+            continue
+
+        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
+        try:
+            hs = score_map.get(home_raw) or score_map.get(home)
+            aw = score_map.get(away_raw) or score_map.get(away)
+            hs = float(hs)
+            aw = float(aw)
+        except Exception:
+            continue
+
+        margin = float(hs - aw)
+        margins[home].append((d, margin))
+        margins[away].append((d, -margin))
+
+    out: Dict[str, Dict[str, float]] = {}
+    for team, lst in margins.items():
+        # Sort by date descending to prioritize most recent games
+        lst = sorted(lst, key=lambda x: x[0], reverse=True)
+        margins_only = [m for _, m in lst]
+        games = len(margins_only)
+        if games < FORM_MIN_GAMES:
+            continue
+        avg_margin = float(np.mean(margins_only))
+        elo_adj = _clamp(avg_margin * FORM_ELO_PER_POINT, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
+        out[team] = {
+            "avg_margin": avg_margin,
+            "games": float(games),
+            "elo_adj": elo_adj,
+        }
+
+    return out
 def _american_to_prob(ml: float) -> float:
     ml = float(ml)
     if ml == 0:
@@ -319,7 +388,9 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     # Rest map once
     last_played = _build_last_game_date_map(days_back=21)
-
+ # Recent form once
+    form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
+    
     rows = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
@@ -367,7 +438,20 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         # Symmetric injury application
         eh_eff = eh + rest_adj + 0.5 * inj_total_elo
         ea_eff = ea - 0.5 * inj_total_elo
+        # Recent form (scoring margin -> Elo tweak)
+        form_home = (form_map.get(home) or {}).get("elo_adj", 0.0)
+        form_away = (form_map.get(away) or {}).get("elo_adj", 0.0)
+        form_diff = float(form_home - form_away)
 
+        # Recent form (scoring margin -> Elo tweak)
+        form_home = (form_map.get(home) or {}).get("elo_adj", 0.0)
+        form_away = (form_map.get(away) or {}).get("elo_adj", 0.0)
+        form_diff = float(form_home - form_away)
+
+        # Symmetric injury + form application
+        eh_eff = eh + rest_adj + 0.5 * inj_total_elo + 0.5 * form_diff
+        ea_eff = ea - 0.5 * inj_total_elo - 0.5 * form_diff      
+        
         # Win prob + compression
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
         p_home = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
@@ -461,6 +545,13 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "inj_points": float(inj_pts),
             "inj_elo_total": float(inj_total_elo),
             "qb_diff": float(qb_diff),
+            "form_elo_diff": float(form_diff),
+            "form_home_elo": float(form_home),
+            "form_away_elo": float(form_away),
+            "form_home_avg_margin": float((form_map.get(home) or {}).get("avg_margin", np.nan)),
+            "form_away_avg_margin": float((form_map.get(away) or {}).get("avg_margin", np.nan)),
+            "form_home_games": float((form_map.get(home) or {}).get("games", np.nan)),
+            "form_away_games": float((form_map.get(away) or {}).get("games", np.nan)),
             "rest_days_home": np.nan if home_days_off is None else float(home_days_off),
             "rest_days_away": np.nan if away_days_off is None else float(away_days_off),
 
