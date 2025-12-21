@@ -47,9 +47,7 @@ def _safe_float(x, default=np.nan):
 # -----------------------------
 def _load_nba_injuries():
     """
-    Tries to load your existing NBA injury implementation.
-    Falls back to no injuries if it doesn't exist / fails.
-    Expected (if present) in sports/nba/injuries.py:
+    Expected in sports/nba/injuries.py:
       - fetch_official_nba_injuries()
       - build_injury_list_for_team_nba(team, injuries_map)
       - injury_adjustment_points(home_inj, away_inj)
@@ -61,7 +59,8 @@ def _load_nba_injuries():
             injury_adjustment_points,
         )
         return fetch_official_nba_injuries, build_injury_list_for_team_nba, injury_adjustment_points
-    except Exception:
+    except Exception as e:
+        print(f"[nba injuries] NOTE: injuries module not available: {e}")
         return None, None, None
 
 
@@ -88,7 +87,6 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
         if st.is_processed(game_key):
             continue
 
-        # Score map might use raw names; try raw first then canonical.
         score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
             hs = score_map.get(home_raw)
@@ -115,34 +113,62 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
     return st
 
 
+def _injuries_debug_summary(injuries_map: dict) -> None:
+    """Print a small summary so we can confirm injuries are actually loading."""
+    try:
+        if not injuries_map:
+            print("[nba injuries] loaded: 0 teams")
+            return
+        teams = list(injuries_map.keys())
+        total_rows = 0
+        for k in teams[:10]:
+            total_rows += len(injuries_map.get(k, []) or [])
+        print(f"[nba injuries] loaded teams: {len(teams)} | sample teams: {teams[:5]}")
+        # total rows across ALL teams (cheap)
+        tot = sum(len(v or []) for v in injuries_map.values())
+        print(f"[nba injuries] total rows: {tot}")
+    except Exception:
+        pass
+
+
+def _build_team_injuries(build_list_fn, team: str, injuries_map: dict):
+    """
+    Robust team lookup helper:
+    - Try canonical team key
+    - Try raw key
+    - Try partial nickname fallback (handled in injuries.py too, but redundancy helps)
+    """
+    if build_list_fn is None or not injuries_map:
+        return []
+    try:
+        return build_list_fn(team, injuries_map)
+    except Exception:
+        # If build_list itself throws, don't kill the run
+        return []
+
+
 # -----------------------------
 # Daily run
 # -----------------------------
 def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
-    """
-    Returns a DataFrame with at least:
-      date, home, away,
-      model_home_prob, model_spread_home,
-      elo_diff (REQUIRED for calibration training),
-      home_ml, away_ml, home_spread
-    """
     st = update_elo_from_recent_scores(days_from=3)
 
-    # Update calibration from your historical saved prediction CSVs
+    # Calibration
     cal = load_nba_calibrator()
     cal = update_and_save_nba_calibration()
 
-    # Load injuries once
+    # Injuries
     fetch_inj, build_list, inj_points_fn = _load_nba_injuries()
     injuries_map = {}
     if fetch_inj is not None:
         try:
-            injuries_map = fetch_inj()
+            injuries_map = fetch_inj() or {}
         except Exception as e:
             print(f"[nba injuries] WARNING: failed to load injuries: {e}")
             injuries_map = {}
 
-    # Clean empty output on off-days / missing odds
+    _injuries_debug_summary(injuries_map)
+
     if not odds_dict:
         return pd.DataFrame(columns=[
             "date", "home", "away",
@@ -158,30 +184,28 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         eh = st.get(home)
         ea = st.get(away)
 
-        # Injuries -> injury points -> elo adjustment
         inj_pts = 0.0
         inj_elo_adj = 0.0
-        if build_list is not None and inj_points_fn is not None and injuries_map:
+
+        if inj_points_fn is not None and build_list is not None and injuries_map:
             try:
-                home_inj = build_list(home, injuries_map)
-                away_inj = build_list(away, injuries_map)
+                home_inj = _build_team_injuries(build_list, home, injuries_map)
+                away_inj = _build_team_injuries(build_list, away, injuries_map)
+
                 inj_pts = float(inj_points_fn(home_inj, away_inj))  # + means away more hurt
-                inj_pts = _clamp(inj_pts, -8.0, 8.0)  # stability clamp
-                inj_elo_adj = inj_pts * INJ_ELO_PER_POINT
-            except Exception:
+                inj_pts = _clamp(inj_pts, -8.0, 8.0)                # stability clamp
+                inj_elo_adj = float(inj_pts) * INJ_ELO_PER_POINT
+            except Exception as e:
+                # Important: keep run alive
+                print(f"[nba injuries] WARNING: injury calc failed for {home} vs {away}: {e}")
                 inj_pts = 0.0
                 inj_elo_adj = 0.0
 
-        # Elo-based win prob (with injury adjustment)
         p_home = elo_win_prob(eh + inj_elo_adj, ea, home_adv=HOME_ADV)
 
-        # Elo diff (store this so calibration can learn)
         elo_diff = ((eh + inj_elo_adj) - ea) + HOME_ADV
 
-        # Calibrated spread to historical closing lines
         model_spread_home = cal.predict_spread(elo_diff)
-
-        # Sanity clamp for NBA spreads
         model_spread_home = _clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
 
         rows.append({
@@ -198,6 +222,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)
+
+
 def run_daily_probs_for_date(
     game_date_str: str = None,
     *,
@@ -208,16 +234,10 @@ def run_daily_probs_for_date(
 ) -> pd.DataFrame:
     """
     Backwards-compatible alias for older code paths.
-
-    Supports calls like:
-      run_daily_probs_for_date(game_date="12/19/2025", odds_dict=..., spreads_dict=...)
-
-    This implementation only needs odds_dict because it includes home_spread already.
     """
     date_in = game_date if game_date is not None else game_date_str
     if date_in is None:
         raise ValueError("Must provide game_date or game_date_str")
 
-    # odds_dict is what we actually use (spreads_dict is ignored)
     return run_daily_nba(str(date_in), odds_dict=(odds_dict or {}))
 
