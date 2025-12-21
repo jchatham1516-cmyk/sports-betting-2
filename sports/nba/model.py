@@ -22,7 +22,8 @@ MAX_ABS_MODEL_SPREAD = 15.0
 
 # Injury impact mapping (inj_points -> elo points)
 INJ_ELO_PER_POINT = 18.0  # tune this
-
+FORM_ELO_PER_NET = 3.0    # elo points per 1 pt net rating above league avg (tunable)
+FORM_ELO_CLAMP = 50.0     # clamp for form-based adjustment
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     try:
@@ -146,13 +147,56 @@ def _build_team_injuries(build_list_fn, team: str, injuries_map: dict):
         # If build_list itself throws, don't kill the run
         return []
 
+def _build_form_adjustments(stats_df: pd.DataFrame | None) -> dict[str, float]:
+    """
+    Build per-team Elo bump based on recent net rating relative to league average.
+    Uses recency-weighted ORtg/DRtg when available (via bdl_client).
+    """
+    if stats_df is None or len(stats_df) == 0:
+        return {}
+
+    try:
+        team_col = None
+        for cand in ["TEAM_NAME", "team", "TEAM"]:
+            if cand in stats_df.columns:
+                team_col = cand
+                break
+        if team_col is None:
+            return {}
+
+        off_col = "ORtg_RECENT" if "ORtg_RECENT" in stats_df.columns else "ORtg"
+        def_col = "DRtg_RECENT" if "DRtg_RECENT" in stats_df.columns else "DRtg"
+        if off_col not in stats_df.columns or def_col not in stats_df.columns:
+            return {}
+
+        df = stats_df[[team_col, off_col, def_col]].copy()
+        df["net_recent"] = df[off_col].apply(_safe_float) - df[def_col].apply(_safe_float)
+        nets = df["net_recent"].dropna().astype(float)
+        if len(nets) == 0:
+            return {}
+
+        league_avg_net = float(nets.mean())
+        adjs = {}
+        for _, row in df.iterrows():
+            team = canon_team(row.get(team_col))
+            net_recent = _safe_float(row.get("net_recent"))
+            if not team or net_recent is None or np.isnan(net_recent):
+                continue
+
+            centered = net_recent - league_avg_net
+            elo_adj = centered * FORM_ELO_PER_NET
+            elo_adj = _clamp(elo_adj, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
+            adjs[team] = elo_adj
+        return adjs
+    except Exception:
+        return {}
 
 # -----------------------------
 # Daily run
 # -----------------------------
-def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
+def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: pd.DataFrame | None = None) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=3)
-
+    form_adjustments = _build_form_adjustments(stats_df)
     # Calibration
     cal = load_nba_calibrator()
     cal = update_and_save_nba_calibration()
@@ -183,10 +227,12 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
         eh = st.get(home)
         ea = st.get(away)
+        home_form = float(form_adjustments.get(home, 0.0))
+        away_form = float(form_adjustments.get(away, 0.0))
 
         inj_pts = 0.0
         inj_elo_adj = 0.0
-
+ 
         if inj_points_fn is not None and build_list is not None and injuries_map:
             try:
                 home_inj = _build_team_injuries(build_list, home, injuries_map)
@@ -201,10 +247,12 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 inj_pts = 0.0
                 inj_elo_adj = 0.0
 
-        p_home = elo_win_prob(eh + inj_elo_adj, ea, home_adv=HOME_ADV)
+        eh_total = eh + inj_elo_adj + home_form
+        ea_total = ea + away_form
 
-        elo_diff = ((eh + inj_elo_adj) - ea) + HOME_ADV
+        p_home = elo_win_prob(eh_total, ea_total, home_adv=HOME_ADV)
 
+        elo_diff = (eh_total - ea_total) + HOME_ADV
         model_spread_home = cal.predict_spread(elo_diff)
         model_spread_home = _clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
 
@@ -230,6 +278,7 @@ def run_daily_probs_for_date(
     game_date: str = None,
     odds_dict: dict = None,
     spreads_dict: dict = None,   # older callers pass this
+        stats_df: pd.DataFrame | None = None,
     **kwargs,                    # swallow any future extra args safely
 ) -> pd.DataFrame:
     """
@@ -239,5 +288,4 @@ def run_daily_probs_for_date(
     if date_in is None:
         raise ValueError("Must provide game_date or game_date_str")
 
-    return run_daily_nba(str(date_in), odds_dict=(odds_dict or {}))
-
+        return run_daily_nba(str(date_in), odds_dict=(odds_dict or {}), stats_df=stats_df)
