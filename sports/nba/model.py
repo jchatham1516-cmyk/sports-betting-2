@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, date
+from datetime import datetime, timezone
+from typing import Dict, Optional, Tuple, List
+
 import numpy as np
 import pandas as pd
 
@@ -11,10 +13,8 @@ from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.calibration import load_nba_calibrator, update_and_save_nba_calibration
-from sports.nba.bdl_client import bdl_get, get_bdl_api_key, season_start_year_for_date
 
 ELO_PATH = "results/elo_state_nba.json"
-BACKFILL_MARKER_PATH = "results/.elo_state_nba_backfill_date.txt"
 
 # ---- Tunables ----
 HOME_ADV = 65.0           # Elo home advantage (tunable)
@@ -25,9 +25,17 @@ MAX_ABS_MODEL_SPREAD = 15.0
 
 # Injury impact mapping (inj_points -> elo points)
 INJ_ELO_PER_POINT = 18.0  # tune this
-FORM_ELO_PER_NET = 3.0    # elo points per 1 pt net rating above league avg (tunable)
-FORM_ELO_CLAMP = 50.0     # clamp for form-based adjustment
 
+# ML threshold
+MIN_ML_EDGE = 0.02
+
+# Prob compression (helps avoid extremes)
+BASE_COMPRESS = 0.85
+
+
+# ----------------------------
+# Helpers
+# ----------------------------
 def _clamp(x: float, lo: float, hi: float) -> float:
     try:
         return float(max(lo, min(hi, float(x))))
@@ -35,7 +43,7 @@ def _clamp(x: float, lo: float, hi: float) -> float:
         return float(np.nan)
 
 
-def _safe_float(x, default=np.nan):
+def _safe_float(x, default=np.nan) -> float:
     try:
         if x is None:
             return default
@@ -46,99 +54,89 @@ def _safe_float(x, default=np.nan):
         return default
 
 
-# -----------------------------
-# Injuries (auto-detected)
-# -----------------------------
-def _load_nba_injuries():
-    """
-    Expected in sports/nba/injuries.py:
-      - fetch_official_nba_injuries()
-      - build_injury_list_for_team_nba(team, injuries_map)
-      - injury_adjustment_points(home_inj, away_inj)
-    """
+def _american_to_prob(ml: float) -> float:
+    ml = float(ml)
+    if ml == 0:
+        return float("nan")
+    if ml > 0:
+        return 100.0 / (ml + 100.0)
+    return (-ml) / ((-ml) + 100.0)
+
+
+def _no_vig_probs(home_ml: float, away_ml: float) -> Tuple[float, float]:
     try:
-        from sports.nba.injuries import (
-            fetch_official_nba_injuries,
-            build_injury_list_for_team_nba,
-            injury_adjustment_points,
-        )
-        return fetch_official_nba_injuries, build_injury_list_for_team_nba, injury_adjustment_points
-    except Exception as e:
-        print(f"[nba injuries] NOTE: injuries module not available: {e}")
-        return None, None, None
+        hp = _american_to_prob(home_ml)
+        ap = _american_to_prob(away_ml)
+        if np.isnan(hp) or np.isnan(ap):
+            return (float("nan"), float("nan"))
+        s = hp + ap
+        if s <= 0:
+            return (float("nan"), float("nan"))
+        return (hp / s, ap / s)
+    except Exception:
+        return (float("nan"), float("nan"))
 
 
-# -----------------------------
-# Elo update from recent scores
-# -----------------------------
-def _parse_game_datetime(date_str: str | None) -> datetime | None:
-    if not date_str:
+def _pick_value_tier(abs_edge: float) -> str:
+    if np.isnan(abs_edge):
+        return "UNKNOWN"
+    if abs_edge >= 0.08:
+        return "HIGH CONFIDENCE"
+    if abs_edge >= 0.04:
+        return "MEDIUM CONFIDENCE"
+    if abs_edge >= 0.02:
+        return "LOW CONFIDENCE"
+    return "NO EDGE"
+
+
+def _ml_recommendation(model_p: float, market_p: float, min_edge: float = MIN_ML_EDGE) -> str:
+    if np.isnan(model_p) or np.isnan(market_p):
+        return "No ML bet (missing market prob)"
+    edge = model_p - market_p
+    if edge >= min_edge:
+        return "Model PICK: HOME (strong)" if edge >= 0.06 else "Model lean: HOME"
+    if edge <= -min_edge:
+        return "Model PICK: AWAY (strong)" if edge <= -0.06 else "Model lean: AWAY"
+    return "No ML bet (edge too small)"
+
+
+def _parse_game_datetime(commence_time: Optional[str]) -> Optional[datetime]:
+    """
+    Parses ISO time strings from The Odds API / score feeds.
+    Returns timezone-aware datetime in UTC.
+    """
+    if not commence_time:
         return None
     try:
-        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        # Handles "2025-12-20T01:00:00Z" or "+00:00"
+        s = str(commence_time).strip()
+        if s.endswith("Z"):
+            s = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
-        try:
-            return datetime.strptime(date_str, "%Y-%m-%d")
-        except Exception:
-            return None
+        return None
 
 
-def _fetch_finished_games_from_bdl(*, season_year: int, api_key: str) -> list[dict]:
-    params = {"seasons[]": season_year, "per_page": 100}
-    cursor = None
-    games: list[dict] = []
+# ----------------------------
+# Elo update from recent games
+# ----------------------------
+def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
+    """
+    Pulls recent final scores and updates Elo state, de-duping by a processed game key.
+    """
+    st = EloState.load(ELO_PATH)
+    sport_key = SPORT_TO_ODDS_KEY.get("nba")
+    if not sport_key:
+        return st
 
-    while True:
-        if cursor is not None:
-            params["cursor"] = cursor
-        else:
-            params.pop("cursor", None)
+    try:
+        events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 21))
+    except Exception:
+        return st
 
-        games_json = bdl_get("games", params=params, api_key=api_key)
-        data = games_json.get("data", []) or []
-        meta = games_json.get("meta", {}) or {}
-        cursor = meta.get("next_cursor")
-
-        for g in data:
-            home_team = (g.get("home_team") or {}).get("full_name")
-            away_team = (g.get("visitor_team") or {}).get("full_name")
-            if not home_team or not away_team:
-                continue
-
-            home_score = _safe_float(g.get("home_team_score"), 0.0)
-            away_score = _safe_float(g.get("visitor_team_score"), 0.0)
-            if home_score == 0.0 and away_score == 0.0 and (g.get("period", 0) == 0):
-                continue  # not completed
-
-            dt = _parse_game_datetime(g.get("date"))
-            date_key = dt.date().isoformat() if dt else str(g.get("date") or "")
-            sort_ts = dt.timestamp() if dt else 0.0
-
-            home = canon_team(home_team)
-            away = canon_team(away_team)
-            if not home or not away:
-                continue
-
-            games.append({
-                "game_key": f"{date_key}|{home}|{away}",
-                "home": home,
-                "away": away,
-                "home_score": float(home_score),
-                "away_score": float(away_score),
-                "sort_ts": sort_ts,
-            })
-
-        if not cursor:
-            break
-
-    return games
-
-
-def _fetch_finished_games_from_odds_api(days_from: int = 3) -> list[dict]:
-    sport_key = SPORT_TO_ODDS_KEY["nba"]
-    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 3))
-
-    games: list[dict] = []
     for ev in events:
         home_raw = ev.get("home_team")
         away_raw = ev.get("away_team")
@@ -151,155 +149,14 @@ def _fetch_finished_games_from_odds_api(days_from: int = 3) -> list[dict]:
         if not home or not away:
             continue
 
-        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
-        try:
-            hs = score_map.get(home_raw)
-            aw = score_map.get(away_raw)
-            if hs is None:
-                hs = score_map.get(home)
-            if aw is None:
-                aw = score_map.get(away)
-
-            hs = float(hs)
-            aw = float(aw)
-        except Exception:
-            continue
-
-        dt = _parse_game_datetime(ev.get("commence_time"))
-        date_key = dt.date().isoformat() if dt else str(ev.get("commence_time") or "")
-        sort_ts = dt.timestamp() if dt else 0.0
-
-        games.append({
-            "game_key": f"{date_key}|{home}|{away}",
-            "home": home,
-            "away": away,
-            "home_score": float(hs),
-            "away_score": float(aw),
-            "sort_ts": sort_ts,
-        })
-    return games
-
-
-def backfill_nba_elo_state(
-    *,
-    season_year: int | None = None,
-    bdl_api_key: str | None = None,
-    force_full_rebuild: bool = False,
-) -> EloState:
-    today_str = datetime.utcnow().date().isoformat()
-    if not force_full_rebuild and os.path.exists(ELO_PATH) and os.path.exists(BACKFILL_MARKER_PATH):
-        try:
-            with open(BACKFILL_MARKER_PATH, "r", encoding="utf-8") as f:
-                last_run = f.read().strip()
-            if last_run == today_str:
-                print("[nba backfill] Backfill already executed today; using existing Elo state.")
-                return EloState.load(ELO_PATH)
-        except Exception:
-            pass
-
-    if season_year is None:
-        season_year = season_start_year_for_date(date.today())
-
-    if bdl_api_key is None:
-        try:
-            bdl_api_key = get_bdl_api_key()
-        except Exception as e:
-            print(f"[nba backfill] WARNING: no BallDontLie API key available: {e}")
-            bdl_api_key = None
-
-    games: list[dict] = []
-    if bdl_api_key:
-        try:
-            games.extend(_fetch_finished_games_from_bdl(season_year=season_year, api_key=bdl_api_key))
-        except Exception as e:
-            print(f"[nba backfill] WARNING: failed to load season games from BallDontLie: {e}")
-
-    try:
-        games.extend(_fetch_finished_games_from_odds_api(days_from=3))
-    except Exception as e:
-        print(f"[nba backfill] WARNING: failed to load recent scores from Odds API: {e}")
-
-    if not games:
-        print("[nba backfill] No finished games fetched; returning existing Elo state.")
-        return EloState.load(ELO_PATH)
-
-    deduped = []
-    seen_keys = set()
-    for g in games:
-        key = g.get("game_key")
-        if not key or key in seen_keys:
-            continue
-        seen_keys.add(key)
-        deduped.append(g)
-
-    deduped.sort(key=lambda x: x.get("sort_ts", 0.0))
-
-    st = EloState(ratings={}, processed_games={})
-    applied = 0
-    for g in deduped:
-        home = g.get("home")
-        away = g.get("away")
-        hs = g.get("home_score")
-        aw = g.get("away_score")
-        game_key = g.get("game_key")
-
-        if not home or not away or hs is None or aw is None or not game_key:
-            continue
-        if st.is_processed(game_key):
-            continue
-
-        eh = st.get(home)
-        ea = st.get(away)
-        nh, na = elo_update(eh, ea, float(hs), float(aw), k=ELO_K, home_adv=HOME_ADV)
-        st.set(home, nh)
-        st.set(away, na)
-        st.mark_processed(game_key)
-        applied += 1
-
-    os.makedirs("results", exist_ok=True)
-    st.save(ELO_PATH)
-    try:
-        with open(BACKFILL_MARKER_PATH, "w", encoding="utf-8") as f:
-            f.write(today_str)
-    except Exception:
-        pass
-
-    print(f"[nba backfill] Applied {applied} finished games out of {len(deduped)} fetched for season {season_year}.")
-    return st
-
-
-def update_elo_from_recent_scores(days_from: int = 3, st: EloState | None = None) -> EloState:
-    if st is None:
-        st = EloState.load(ELO_PATH)
-    sport_key = SPORT_TO_ODDS_KEY["nba"]
-
-    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 3))
-
-    for ev in events:
-        home_raw = ev.get("home_team")
-        away_raw = ev.get("away_team")
-        scores = ev.get("scores")
-        if not home_raw or not away_raw or not scores:
-            continue
-
-        home = canon_team(home_raw)
-        away = canon_team(away_raw)
-
-       dt = _parse_game_datetime(ev.get("commence_time"))
-        date_key = dt.date().isoformat() if dt else str(ev.get("commence_time") or "")
-        game_key = f"{date_key}|{home}|{away}"
+        game_key = f"{ev.get('id','')}|{ev.get('commence_time','')}|{home}|{away}"
         if st.is_processed(game_key):
             continue
 
         score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
-            hs = score_map.get(home_raw)
-            aw = score_map.get(away_raw)
-            if hs is None:
-                hs = score_map.get(home)
-            if aw is None:
-                aw = score_map.get(away)
-
+            hs = score_map.get(home_raw) or score_map.get(home)
+            aw = score_map.get(away_raw) or score_map.get(away)
             hs = float(hs)
             aw = float(aw)
         except Exception:
@@ -307,6 +164,7 @@ def update_elo_from_recent_scores(days_from: int = 3, st: EloState | None = None
 
         eh = st.get(home)
         ea = st.get(away)
+
         nh, na = elo_update(eh, ea, hs, aw, k=ELO_K, home_adv=HOME_ADV)
         st.set(home, nh)
         st.set(away, na)
@@ -317,197 +175,161 @@ def update_elo_from_recent_scores(days_from: int = 3, st: EloState | None = None
     return st
 
 
-def _injuries_debug_summary(injuries_map: dict) -> None:
-    """Print a small summary so we can confirm injuries are actually loading."""
+# ----------------------------
+# Main daily run
+# ----------------------------
+def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
+    """
+    odds_dict format (what your runner passes):
+      {
+        (home_name, away_name): {
+          "home_ml": -150,
+          "away_ml": +130,
+          "home_spread": -3.5,
+          "spread_price": -110,   # optional
+          ...
+        },
+        ...
+      }
+    """
+    st = update_elo_from_recent_scores(days_from=14)
+
+    # Load calibrator if available (maps elo_diff -> spread)
     try:
-        if not injuries_map:
-            print("[nba injuries] loaded: 0 teams")
-            return
-        teams = list(injuries_map.keys())
-        total_rows = 0
-        for k in teams[:10]:
-            total_rows += len(injuries_map.get(k, []) or [])
-        print(f"[nba injuries] loaded teams: {len(teams)} | sample teams: {teams[:5]}")
-        # total rows across ALL teams (cheap)
-        tot = sum(len(v or []) for v in injuries_map.values())
-        print(f"[nba injuries] total rows: {tot}")
+        calibrator = load_nba_calibrator()
     except Exception:
-        pass
+        calibrator = None
 
+    rows: List[dict] = []
 
-def _build_team_injuries(build_list_fn, team: str, injuries_map: dict):
-    """
-    Robust team lookup helper:
-    - Try canonical team key
-    - Try raw key
-    - Try partial nickname fallback (handled in injuries.py too, but redundancy helps)
-    """
-    if build_list_fn is None or not injuries_map:
-        return []
-    try:
-        return build_list_fn(team, injuries_map)
-    except Exception:
-        # If build_list itself throws, don't kill the run
-        return []
-
-def _build_form_adjustments(stats_df: pd.DataFrame | None) -> dict[str, float]:
-    """
-    Build per-team Elo bump based on recent net rating relative to league average.
-    Uses recency-weighted ORtg/DRtg when available (via bdl_client).
-    """
-    if stats_df is None or len(stats_df) == 0:
-        return {}
-
-    try:
-        team_col = None
-        for cand in ["TEAM_NAME", "team", "TEAM"]:
-            if cand in stats_df.columns:
-                team_col = cand
-                break
-        if team_col is None:
-            return {}
-
-        off_col = "ORtg_RECENT" if "ORtg_RECENT" in stats_df.columns else "ORtg"
-        def_col = "DRtg_RECENT" if "DRtg_RECENT" in stats_df.columns else "DRtg"
-        if off_col not in stats_df.columns or def_col not in stats_df.columns:
-            return {}
-
-        df = stats_df[[team_col, off_col, def_col]].copy()
-        df["net_recent"] = df[off_col].apply(_safe_float) - df[def_col].apply(_safe_float)
-        nets = df["net_recent"].dropna().astype(float)
-        if len(nets) == 0:
-            return {}
-
-        league_avg_net = float(nets.mean())
-        adjs = {}
-        for _, row in df.iterrows():
-            team = canon_team(row.get(team_col))
-            net_recent = _safe_float(row.get("net_recent"))
-            if not team or net_recent is None or np.isnan(net_recent):
-                continue
-
-            centered = net_recent - league_avg_net
-            elo_adj = centered * FORM_ELO_PER_NET
-            elo_adj = _clamp(elo_adj, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
-            adjs[team] = elo_adj
-        return adjs
-    except Exception:
-        return {}
-
-# -----------------------------
-# Daily run
-# -----------------------------
-def run_daily_nba(
-    game_date_str: str,
-    *,
-    odds_dict: dict,
-    stats_df: pd.DataFrame | None = None,
-    spreads_dict: dict | None = None,
-    force_full_rebuild: bool = False,
-    bdl_api_key: str | None = None,
-    **kwargs,
-) -> pd.DataFrame:
-    st = backfill_nba_elo_state(force_full_rebuild=force_full_rebuild, bdl_api_key=bdl_api_key)
-    st = update_elo_from_recent_scores(days_from=3, st=st)
-    form_adjustments = _build_form_adjustments(stats_df)
-    # Calibration
-    cal = load_nba_calibrator()
-    cal = update_and_save_nba_calibration()
-
-    # Injuries
-    fetch_inj, build_list, inj_points_fn = _load_nba_injuries()
-    injuries_map = {}
-    if fetch_inj is not None:
-        try:
-            injuries_map = fetch_inj() or {}
-        except Exception as e:
-            print(f"[nba injuries] WARNING: failed to load injuries: {e}")
-            injuries_map = {}
-
-    _injuries_debug_summary(injuries_map)
-
-    if not odds_dict:
-        return pd.DataFrame(columns=[
-            "date", "home", "away",
-            "model_home_prob", "model_spread_home", "elo_diff", "inj_points",
-            "home_ml", "away_ml", "home_spread",
-        ])
-
-    rows = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
         away = canon_team(away_in)
+        if not home or not away:
+            continue
 
         eh = st.get(home)
         ea = st.get(away)
-        home_form = float(form_adjustments.get(home, 0.0))
-        away_form = float(form_adjustments.get(away, 0.0))
 
-        inj_pts = 0.0
-        inj_elo_adj = 0.0
- 
-        if inj_points_fn is not None and build_list is not None and injuries_map:
+        # Injury points (optional) - only apply if your odds_dict runner provides them
+        # Convention: oi may include "inj_points_home" and "inj_points_away" as positive numbers.
+        inj_home_pts = _safe_float((oi or {}).get("inj_points_home"), default=0.0)
+        inj_away_pts = _safe_float((oi or {}).get("inj_points_away"), default=0.0)
+        # Positive inj_diff means AWAY is more injured -> helps HOME
+        inj_diff_pts = float(inj_away_pts - inj_home_pts)
+
+        inj_elo = float(inj_diff_pts) * float(INJ_ELO_PER_POINT)
+
+        # Effective elos (symmetric)
+        eh_eff = float(eh) + 0.5 * inj_elo
+        ea_eff = float(ea) - 0.5 * inj_elo
+
+        # Win prob + compression
+        p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
+        p_home = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
+
+        # Elo diff for spread mapping
+        elo_diff = (eh_eff - ea_eff) + HOME_ADV  # HOME advantage included
+
+        # Spread from calibrator if available, otherwise fallback linear
+        if calibrator is not None:
             try:
-                home_inj = _build_team_injuries(build_list, home, injuries_map)
-                away_inj = _build_team_injuries(build_list, away, injuries_map)
+                model_spread_home = float(calibrator.elo_diff_to_spread(float(elo_diff)))
+            except Exception:
+                model_spread_home = float(-(float(elo_diff) / 25.0))
+        else:
+            model_spread_home = float(-(float(elo_diff) / 25.0))
 
-                inj_pts = float(inj_points_fn(home_inj, away_inj))  # + means away more hurt
-                inj_pts = _clamp(inj_pts, -8.0, 8.0)                # stability clamp
-                inj_elo_adj = float(inj_pts) * INJ_ELO_PER_POINT
-            except Exception as e:
-                # Important: keep run alive
-                print(f"[nba injuries] WARNING: injury calc failed for {home} vs {away}: {e}")
-                inj_pts = 0.0
-                inj_elo_adj = 0.0
-
-        eh_total = eh + inj_elo_adj + home_form
-        ea_total = ea + away_form
-
-        p_home = elo_win_prob(eh_total, ea_total, home_adv=HOME_ADV)
-
-        elo_diff = (eh_total - ea_total) + HOME_ADV
-        model_spread_home = cal.predict_spread(elo_diff)
         model_spread_home = _clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
+
+        # Market
+        home_ml = _safe_float((oi or {}).get("home_ml"))
+        away_ml = _safe_float((oi or {}).get("away_ml"))
+        home_spread = _safe_float((oi or {}).get("home_spread"))
+
+        # Market no-vig prob + ML edges
+        mkt_home_p = float("nan")
+        if not np.isnan(home_ml) and not np.isnan(away_ml):
+            mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
+
+        edge_home = float(p_home - mkt_home_p) if not np.isnan(mkt_home_p) else float("nan")
+        edge_away = float(-edge_home) if not np.isnan(edge_home) else float("nan")
+
+        ml_pick = _ml_recommendation(float(p_home), float(mkt_home_p), min_edge=MIN_ML_EDGE)
+        value_tier = _pick_value_tier(abs(edge_home)) if not np.isnan(edge_home) else "UNKNOWN"
+
+        # Simple spread recommendation (optional)
+        # spread_edge_home > 0 means market gives HOME more points than model (value on HOME ATS)
+        spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
+        if np.isnan(spread_edge_home):
+            spread_reco = "No ATS bet (missing spread)"
+        else:
+            if spread_edge_home >= 2.0:
+                spread_reco = "Model lean ATS: HOME"
+            elif spread_edge_home <= -2.0:
+                spread_reco = "Model lean ATS: AWAY"
+            else:
+                spread_reco = "Too close to call ATS (edge too small)"
 
         rows.append({
             "date": game_date_str,
             "home": home,
             "away": away,
+
+            # Model
             "model_home_prob": float(p_home),
             "model_spread_home": float(model_spread_home),
+
+            # Market (processed)
+            "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
+            "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
+            "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
+
+            # Market raw
+            "home_ml": home_ml,
+            "away_ml": away_ml,
+            "home_spread": home_spread,
+
+            # Spread edge + recos
+            "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
+            "ml_recommendation": ml_pick,
+            "spread_recommendation": spread_reco,
+            "primary_recommendation": (
+                spread_reco if ("Model" in spread_reco and "ATS" in spread_reco) else ml_pick
+            ),
+            "abs_edge_home": float(abs(edge_home)) if not np.isnan(edge_home) else np.nan,
+            "value_tier": value_tier,
+
+            # Debug
             "elo_diff": float(elo_diff),
-            "inj_points": float(inj_pts),
-            "home_ml": _safe_float((oi or {}).get("home_ml")),
-            "away_ml": _safe_float((oi or {}).get("away_ml")),
-            "home_spread": _safe_float((oi or {}).get("home_spread")),
+            "inj_points_home": float(inj_home_pts) if not np.isnan(inj_home_pts) else 0.0,
+            "inj_points_away": float(inj_away_pts) if not np.isnan(inj_away_pts) else 0.0,
+            "inj_elo": float(inj_elo),
         })
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
 
+    # If you have a calibration update pipeline, keep it safe:
+    # (This won't crash if calibrator is missing; it only runs if function exists / works.)
+    try:
+        if not df.empty:
+            update_and_save_nba_calibration(df)
+    except Exception:
+        pass
+
+    return df
+
+
+# Backwards-compatible alias
 def run_daily_probs_for_date(
     game_date_str: str = None,
     *,
     game_date: str = None,
     odds_dict: dict = None,
-    spreads_dict: dict = None,   # older callers pass this
-         stats_df: pd.DataFrame | None = None,
-    force_full_rebuild: bool = False,
-    api_key: str | None = None,
-    **kwargs,                    # swallow any future extra args safely
+    spreads_dict: dict = None,
+    **kwargs,
 ) -> pd.DataFrame:
-    """
-    Backwards-compatible alias for older code paths.
-    """
     date_in = game_date if game_date is not None else game_date_str
     if date_in is None:
         raise ValueError("Must provide game_date or game_date_str")
-
-    return run_daily_nba(
-        str(date_in),
-        odds_dict=(odds_dict or {}),
-        stats_df=stats_df,
-        spreads_dict=spreads_dict,
-        force_full_rebuild=force_full_rebuild,
-        bdl_api_key=api_key,
-        **kwargs,
-    )
+    return run_daily_nba(str(date_in), odds_dict=(odds_dict or {}))
