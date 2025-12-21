@@ -52,7 +52,8 @@ def main(argv=None):
     parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
-
+    parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
+    
     args = parser.parse_args(argv)
 
     # Date
@@ -104,6 +105,7 @@ def main(argv=None):
             spreads_dict=spreads_dict,
             stats_df=stats_df,
             api_key=api_key,
+            force_full_rebuild=args.force_full_rebuild,
         )
 
     elif args.sport == "nfl":
