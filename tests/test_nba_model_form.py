@@ -34,7 +34,8 @@ def test_missing_team_falls_back_to_pure_elo(monkeypatch):
     })
     dummy_state = EloState(ratings={}, processed_games={})
 
-    monkeypatch.setattr(model, "update_elo_from_recent_scores", lambda days_from=3: dummy_state)
+    monkeypatch.setattr(model, "backfill_nba_elo_state", lambda **kwargs: dummy_state)
+    monkeypatch.setattr(model, "update_elo_from_recent_scores", lambda days_from=3, st=None: dummy_state)
     monkeypatch.setattr(model, "load_nba_calibrator", lambda: _DummyCal())
     monkeypatch.setattr(model, "update_and_save_nba_calibration", lambda: _DummyCal())
 
