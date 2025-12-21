@@ -61,13 +61,12 @@ MIN_ML_EDGE = 0.02
 ATS_SD_PTS = 13.5
 ATS_DEFAULT_PRICE = -110.0
 
-# ATS gating (FIX: prevent ATS for every game)
+# ATS gating (prevent ATS for every game)
 ATS_MIN_EDGE_VS_BE = 0.03   # must beat breakeven by 3% to bet ATS
 ATS_MIN_PTS_EDGE = 2.0      # must have at least 2.0 pts edge to bet ATS
 
 # Plausibility gate:
 # If the market line is large but your model line is near 0, it's probably an artifact
-# of weak Elo separation + leftover injury scaling. Don't bet ATS in that case.
 ATS_BIG_LINE = 7.0          # market spread magnitude considered "big"
 ATS_TINY_MODEL = 2.0        # model spread magnitude considered "tiny"
 ATS_BIGLINE_FORCE_PASS = True
@@ -125,11 +124,12 @@ def _rest_elo(days_off: Optional[int]) -> float:
         return float(BYE_BONUS_ELO)
     return float(NORMAL_REST_BONUS_ELO)
 
+
 def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, Dict[str, float]]:
     """
     Builds per-team recent form adjustments based on average scoring margin.
     Returns:
-      { team: {\"avg_margin\": float, \"games\": int, \"elo_adj\": float } }
+      { team: {"avg_margin": float, "games": int, "elo_adj": float } }
     """
     sport_key = SPORT_TO_ODDS_KEY.get("nfl")
     if not sport_key:
@@ -173,21 +173,24 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
 
     out: Dict[str, Dict[str, float]] = {}
     for team, lst in margins.items():
-        # Sort by date descending to prioritize most recent games
         lst = sorted(lst, key=lambda x: x[0], reverse=True)
         margins_only = [m for _, m in lst]
         games = len(margins_only)
         if games < FORM_MIN_GAMES:
             continue
+
         avg_margin = float(np.mean(margins_only))
         elo_adj = _clamp(avg_margin * FORM_ELO_PER_POINT, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
+
         out[team] = {
-            "avg_margin": avg_margin,
-            "games": float(games),
-            "elo_adj": elo_adj,
+            "avg_margin": float(avg_margin),
+            "games": int(games),
+            "elo_adj": float(elo_adj),
         }
 
     return out
+
+
 def _american_to_prob(ml: float) -> float:
     ml = float(ml)
     if ml == 0:
@@ -388,9 +391,10 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     # Rest map once
     last_played = _build_last_game_date_map(days_back=21)
- # Recent form once
+
+    # Recent form once
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
-    
+
     rows = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
@@ -418,7 +422,11 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             for (player, role, mult, impact) in (lst or []):
                 try:
                     player_s = str(player).lower()
-                    qb_like = (str(player_s).find(" qb") >= 0) or ("quarterback" in player_s) or (float(impact) >= 6.0)
+                    qb_like = (
+                        (str(player_s).find(" qb") >= 0)
+                        or ("quarterback" in player_s)
+                        or (float(impact) >= 6.0)
+                    )
                     if not qb_like:
                         continue
                     rw = 1.0 if role == "starter" else 0.55
@@ -435,23 +443,15 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         qb_elo_adj = float(qb_diff) * float(QB_EXTRA_ELO)
         inj_total_elo = _clamp(inj_elo_adj + qb_elo_adj, -MAX_ABS_INJ_ELO_ADJ, MAX_ABS_INJ_ELO_ADJ)
 
-        # Symmetric injury application
-        eh_eff = eh + rest_adj + 0.5 * inj_total_elo
-        ea_eff = ea - 0.5 * inj_total_elo
         # Recent form (scoring margin -> Elo tweak)
-        form_home = (form_map.get(home) or {}).get("elo_adj", 0.0)
-        form_away = (form_map.get(away) or {}).get("elo_adj", 0.0)
-        form_diff = float(form_home - form_away)
-
-        # Recent form (scoring margin -> Elo tweak)
-        form_home = (form_map.get(home) or {}).get("elo_adj", 0.0)
-        form_away = (form_map.get(away) or {}).get("elo_adj", 0.0)
+        form_home = float((form_map.get(home) or {}).get("elo_adj", 0.0))
+        form_away = float((form_map.get(away) or {}).get("elo_adj", 0.0))
         form_diff = float(form_home - form_away)
 
         # Symmetric injury + form application
         eh_eff = eh + rest_adj + 0.5 * inj_total_elo + 0.5 * form_diff
-        ea_eff = ea - 0.5 * inj_total_elo - 0.5 * form_diff      
-        
+        ea_eff = ea - 0.5 * inj_total_elo - 0.5 * form_diff
+
         # Win prob + compression
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
         p_home = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
@@ -467,7 +467,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         spread_price = _safe_float((oi or {}).get("spread_price"), default=ATS_DEFAULT_PRICE)
 
         # Market no-vig prob + ML edges
-        mkt_home_p, _ = (float("nan"), float("nan"))
+        mkt_home_p = float("nan")
         if not np.isnan(home_ml) and not np.isnan(away_ml):
             mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
 
@@ -477,7 +477,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         ml_pick = _ml_recommendation(float(p_home), float(mkt_home_p), min_edge=MIN_ML_EDGE)
         value_tier = _pick_value_tier(abs(edge_home)) if not np.isnan(edge_home) else "UNKNOWN"
 
-        # ATS calculations
+        # ATS calculations (spread edge in "home spread" sign convention)
         spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
         p_home_cover = _cover_prob_from_edge(spread_edge_home, sd_pts=ATS_SD_PTS)
         ats_side, ats_p_win, ats_edge_vs_be, ats_be = _ats_pick_and_edge(p_home_cover, spread_price=spread_price)
@@ -495,11 +495,12 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 ats_allowed = False
                 ats_pass_reason = "big market line but tiny model line"
 
-            # Minimum edge gates
+            # Minimum edge gates (vs breakeven)
             if ats_allowed and (np.isnan(ats_edge_vs_be) or ats_edge_vs_be < ATS_MIN_EDGE_VS_BE):
                 ats_allowed = False
                 ats_pass_reason = f"ats_edge_vs_be<{ATS_MIN_EDGE_VS_BE:.3f}"
 
+            # Minimum points edge gate
             if ats_allowed and (np.isnan(spread_edge_home) or abs(spread_edge_home) < ATS_MIN_PTS_EDGE):
                 ats_allowed = False
                 ats_pass_reason = f"|spread_edge|<{ATS_MIN_PTS_EDGE:.1f}"
@@ -566,11 +567,9 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     # Optional: limit ATS picks to top N edges per slate
     if MAX_ATS_PLAYS_PER_DAY is not None and not df.empty:
-        # mark eligible ATS
         elig = df["spread_recommendation"].astype(str).str.contains("Model PICK ATS:", na=False)
         df["ats_rank_score"] = np.where(elig, df["ats_edge_vs_be"].astype(float), -999.0)
 
-        # keep only top N
         top_idx = df.sort_values("ats_rank_score", ascending=False).head(MAX_ATS_PLAYS_PER_DAY).index
         keep = set(top_idx.tolist())
 
