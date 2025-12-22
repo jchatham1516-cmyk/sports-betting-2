@@ -2,91 +2,93 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
 
-from sports.common.odds_sources import ODDS_API_BASE_URL, get_odds_api_key
+from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 
-# NOTE:
-# - This module is intentionally "fail-soft".
-# - If Odds API returns 401/403 (bad key / plan cap / disabled) or 429 (rate limit),
-#   we return [] so your Elo/rest/form code can continue using existing state.
+ODDS_API_HOST = "https://api.the-odds-api.com"
+DEFAULT_TIMEOUT = 20
 
+def _get_api_key() -> Optional[str]:
+    return os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY") or os.getenv("ODDSAPI_KEY")
 
-def fetch_recent_scores(
-    *,
-    sport_key: str,
-    days_from: int = 3,
-    date_format: str = "iso",
-) -> List[Dict[str, Any]]:
+def _odds_api_get(url: str, params: dict) -> List[Dict[str, Any]]:
+    r = requests.get(url, params=params, timeout=DEFAULT_TIMEOUT)
+    # helpful debug (your runner already prints these, but keeping it safe)
+    try:
+        print(f"[scores_api DEBUG] status: {r.status_code}")
+        print(f"[scores_api DEBUG] url: {r.url}")
+        print(f"[scores_api DEBUG] remaining: {r.headers.get('x-requests-remaining')}")
+        print(f"[scores_api DEBUG] used: {r.headers.get('x-requests-used')}")
+        print(f"[scores_api DEBUG] last: {r.headers.get('x-requests-last')}")
+    except Exception:
+        pass
+
+    # 401 should not crash the whole model run
+    if r.status_code == 401:
+        print("[scores] WARNING: unauthorized (401). Check ODDS_API_KEY / plan. Returning no scores.")
+        return []
+
+    # 422 happens if daysFrom is invalid (Odds API docs: valid 1..3)
+    if r.status_code == 422:
+        print("[scores] WARNING: 422 from Odds API scores endpoint. Returning no scores.")
+        return []
+
+    r.raise_for_status()
+    data = r.json()
+    if not isinstance(data, list):
+        return []
+    return data
+
+def fetch_recent_scores(sport_key: str, days_from: int = 3) -> List[Dict[str, Any]]:
     """
-    Fetch finalized scores from The Odds API "scores" endpoint.
-
-    Returns a list of events (dicts). On failure (401/403/429/network), returns [].
-
-    Your models use this for:
-      - Elo updates
-      - rest map
-      - recent form / totals pacing
+    Fetch recent scores for a sport using The Odds API scores endpoint.
 
     IMPORTANT:
-      If this returns [], downstream code should just skip updates gracefully.
+    Odds API docs: daysFrom valid integers from 1 to 3.
+    If caller requests >3, we clamp to 3 so we don't get HTTP 422.
     """
-    api_key = (os.environ.get("ODDS_API_KEY") or "").strip()
+    api_key = _get_api_key()
     if not api_key:
-        # keep compatibility with your existing debug behavior
-        try:
-            api_key = get_odds_api_key()
-        except Exception as e:
-            print(f"[scores] WARNING: ODDS_API_KEY missing ({e}). Returning no scores.")
-            return []
+        print("[scores] WARNING: ODDS_API_KEY missing. Returning no scores.")
+        return []
 
+    # clamp days_from to [1, 3] because Odds API scores endpoint only supports 1..3
     try:
-        days_from_int = int(days_from)
+        df = int(days_from)
     except Exception:
-        days_from_int = 3
+        df = 3
+    if df < 1:
+        df = 1
+    if df > 3:
+        df = 3
 
-    # Endpoint (Odds API v4):
-    # /v4/sports/{sport_key}/scores/?apiKey=...&daysFrom=...&dateFormat=iso
-    url = f"{ODDS_API_BASE_URL}/sports/{sport_key}/scores/"
+    url = f"{ODDS_API_HOST}/v4/sports/{sport_key}/scores/"
+
     params = {
         "apiKey": api_key,
-        "daysFrom": max(1, min(days_from_int, 30)),  # clamp to a sane range
-        "dateFormat": date_format,
+        "daysFrom": df,
+        "dateFormat": "iso",
     }
 
-    try:
-        r = requests.get(url, params=params, timeout=30)
-
-        # Safe debug
-        print("[scores_api DEBUG] status:", r.status_code)
-        print("[scores_api DEBUG] url:", r.url)
-        print("[scores_api DEBUG] remaining:", r.headers.get("x-requests-remaining"))
-        print("[scores_api DEBUG] used:", r.headers.get("x-requests-used"))
-        print("[scores_api DEBUG] last:", r.headers.get("x-requests-last"))
-
-        # Fail-soft cases
-        if r.status_code in (401, 403):
-            # Unauthorized / forbidden (bad key, disabled key, or plan cap behavior)
-            print(f"[scores] WARNING: unauthorized ({r.status_code}). Check ODDS_API_KEY / plan. Returning no scores.")
+    # light retry for transient issues
+    for attempt in range(3):
+        try:
+            return _odds_api_get(url, params=params)
+        except requests.exceptions.HTTPError as e:
+            # if it’s not 429, just bail
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status != 429:
+                print(f"[scores] WARNING: failed to fetch scores (HTTPError: {e}). Returning no scores.")
+                return []
+            sleep_s = 3 + 2 * attempt
+            print(f"[scores] Rate limited (429) on scores, attempt {attempt+1}/3. Sleeping {sleep_s}s...")
+            time.sleep(sleep_s)
+        except Exception as e:
+            print(f"[scores] WARNING: failed to fetch scores ({type(e).__name__}: {e}). Returning no scores.")
             return []
 
-        if r.status_code == 429:
-            print("[scores] WARNING: rate limited (429). Returning no scores.")
-            return []
-
-        r.raise_for_status()
-
-        data = r.json()
-        if not isinstance(data, list):
-            return []
-
-        # Optional: only keep items that look like score events
-        # (don’t over-filter; your parsers handle missing fields)
-        return data
-
-    except Exception as e:
-        print(f"[scores] WARNING: failed to fetch scores ({type(e).__name__}: {e}). Returning no scores.")
-        return []
+    return []
