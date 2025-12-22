@@ -28,45 +28,36 @@ ELO_PATH = "results/elo_state_nhl.json"
 HOME_ADV = 45.0
 ELO_K = 18.0
 
-# Elo -> goals (spread-ish)
 ELO_PER_GOAL = 55.0
 MAX_ABS_MODEL_SPREAD = 2.0
 
-# Injuries -> Elo
 INJ_ELO_PER_POINT = 18.0
 INJ_PTS_CLAMP = 6.0
 
-# Goalie weighting
 GOALIE_IMPACT_THRESHOLD = 3.0
 GOALIE_EXTRA_ELO_PER_POINT = 16.0
 
-# Rest/fatigue (Elo)
 B2B_PENALTY_ELO = -18.0
 ONE_DAY_REST_ELO = -6.0
 THREE_PLUS_BONUS_ELO = +3.0
 
-# Prob compression
 BASE_COMPRESS = 0.65
 GOALIE_UNCERTAINTY_MULT = 0.85
 
 # ----------------------------
 # Totals model
 # ----------------------------
-TOTAL_LOOKBACK_DAYS = 28
-TOTAL_MIN_GAMES = 3
+TOTAL_LOOKBACK_DAYS = 3          # IMPORTANT: Odds API scores daysFrom max is 3
+TOTAL_MIN_GAMES = 1
 TOTAL_DECAY = 0.90
 
 TOTAL_SD_DEFAULT = 1.35
 TOTAL_MIN_EDGE_VS_BE = 0.03
 TOTAL_MIN_GOALS_EDGE = 0.35
 
-# If score history fails entirely, use a stable NHL prior so model_total isn't NaN
-TOTAL_LEAGUE_PRIOR = 6.1
+TOTAL_SHRINK_TO_SLATE = 0.35
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
 def _clamp(x: float, lo: float, hi: float) -> float:
     try:
         return float(max(lo, min(hi, float(x))))
@@ -200,12 +191,8 @@ def _goalie_cost(inj_list) -> float:
     return float(total)
 
 
-# ----------------------------
-# Builders
-# ----------------------------
-def _build_last_game_date_map(days_back: int = 10) -> Dict[str, date]:
+def _build_last_game_date_map(days_back: int = 3) -> Dict[str, date]:
     sport_key = SPORT_TO_ODDS_KEY["nhl"]
-    # NHL scores endpoint worked for 3 in your logs; 10+ often 422. Keep it small.
     events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 3))
 
     last_played: Dict[str, date] = {}
@@ -235,8 +222,9 @@ def _recent_goal_totals(days_back: int = TOTAL_LOOKBACK_DAYS) -> Dict[str, Dict[
     if not sport_key:
         return {}
 
+    days = min(int(days_back), 3)
     try:
-        events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 3))
+        events = fetch_recent_scores(sport_key=sport_key, days_from=days)
     except Exception:
         return {}
 
@@ -337,9 +325,6 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
     return st
 
 
-# ----------------------------
-# Main daily run
-# ----------------------------
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=3)
 
@@ -348,32 +333,22 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     except Exception:
         target_date = None
 
-    # injuries
     try:
         injuries_map = fetch_espn_nhl_injuries()
     except Exception as e:
         print(f"[nhl injuries] WARNING: failed to load ESPN injuries: {e}")
         injuries_map = {}
 
-    last_played = _build_last_game_date_map(days_back=10)
-    totals_map = _recent_goal_totals(days_back=TOTAL_LOOKBACK_DAYS)
+    # slate avg total fallback
+    slate_totals = []
+    for _, oi in (odds_dict or {}).items():
+        tp = _safe_float((oi or {}).get("total_points"))
+        if not np.isnan(tp):
+            slate_totals.append(float(tp))
+    slate_avg_total = float(np.mean(slate_totals)) if slate_totals else float("nan")
 
-    # League totals fallback (so totals never go missing)
-    league_tot = np.nan
-    if totals_map:
-        vals = []
-        for v in totals_map.values():
-            if isinstance(v, dict) and v.get("tot_w") is not None:
-                try:
-                    x = float(v.get("tot_w"))
-                    if not np.isnan(x):
-                        vals.append(x)
-                except Exception:
-                    pass
-        if vals:
-            league_tot = float(np.mean(vals))
-    if np.isnan(league_tot):
-        league_tot = float(TOTAL_LEAGUE_PRIOR)
+    last_played = _build_last_game_date_map(days_back=3)
+    totals_map = _recent_goal_totals(days_back=TOTAL_LOOKBACK_DAYS)
 
     rows = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
@@ -385,7 +360,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         eh = st.get(home)
         ea = st.get(away)
 
-        # Rest
         home_rest_days = None
         away_rest_days = None
         if target_date is not None:
@@ -400,7 +374,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         away_rest_elo = _rest_adjustment_days(away_rest_days)
         rest_elo_adj = float(home_rest_elo - away_rest_elo)
 
-        # Injuries + goalies
         home_inj = build_injury_list_for_team_nhl(home, injuries_map)
         away_inj = build_injury_list_for_team_nhl(away, injuries_map)
 
@@ -415,7 +388,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
         goalie_uncertain = (home_goalie_cost == 0.0 and away_goalie_cost == 0.0)
 
-        # Effective Elo
         eh_eff = float(eh) + float(inj_elo_adj) + float(goalie_elo_adj) + float(rest_elo_adj)
         ea_eff = float(ea)
 
@@ -423,11 +395,9 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         compress = BASE_COMPRESS * (GOALIE_UNCERTAINTY_MULT if goalie_uncertain else 1.0)
         p_home = _clamp(0.5 + compress * (p_home_raw - 0.5), 0.01, 0.99)
 
-        # Spread-ish
         elo_diff = (eh_eff - ea_eff) + HOME_ADV
         model_spread_home = _clamp(-(elo_diff / ELO_PER_GOAL), -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
 
-        # Market
         home_ml = _safe_float((oi or {}).get("home_ml"))
         away_ml = _safe_float((oi or {}).get("away_ml"))
         home_spread = _safe_float((oi or {}).get("home_spread"))
@@ -436,7 +406,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         over_price = _safe_float((oi or {}).get("over_price"))
         under_price = _safe_float((oi or {}).get("under_price"))
 
-        # Totals model (goals pace)
+        # team totals
         hs = totals_map.get(home) or {}
         as_ = totals_map.get(away) or {}
 
@@ -445,17 +415,24 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         away_gf = _safe_float(as_.get("gf_w"))
         away_ga = _safe_float(as_.get("ga_w"))
 
-        model_total = float("nan")
+        team_based_total = float("nan")
         if not np.isnan(home_gf) and not np.isnan(home_ga) and not np.isnan(away_gf) and not np.isnan(away_ga):
             exp_home = 0.5 * (home_gf + away_ga)
             exp_away = 0.5 * (away_gf + home_ga)
-            model_total = float(exp_home + exp_away)
+            team_based_total = float(exp_home + exp_away)
 
-        # Fallback to team totals weighted, with league fallback so it never becomes NaN
+        if np.isnan(team_based_total):
+            home_tot = _safe_float(hs.get("tot_w"))
+            away_tot = _safe_float(as_.get("tot_w"))
+            if not np.isnan(home_tot) and not np.isnan(away_tot):
+                team_based_total = float(0.5 * (home_tot + away_tot))
+
+        model_total = team_based_total
         if np.isnan(model_total):
-            home_tot = _safe_float(hs.get("tot_w"), default=league_tot)
-            away_tot = _safe_float(as_.get("tot_w"), default=league_tot)
-            model_total = float(0.5 * (home_tot + away_tot))
+            model_total = slate_avg_total
+        else:
+            if not np.isnan(slate_avg_total):
+                model_total = float((1.0 - TOTAL_SHRINK_TO_SLATE) * model_total + TOTAL_SHRINK_TO_SLATE * slate_avg_total)
 
         home_sd = _safe_float(hs.get("tot_sd"))
         away_sd = _safe_float(as_.get("tot_sd"))
@@ -499,12 +476,9 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "date": game_date_str,
             "home": home,
             "away": away,
-
-            # Model
             "model_home_prob": float(p_home),
             "model_spread_home": float(model_spread_home),
 
-            # Totals
             "total_points": float(total_points) if not np.isnan(total_points) else np.nan,
             "total_over_price": float(over_price) if not np.isnan(over_price) else np.nan,
             "total_under_price": float(under_price) if not np.isnan(under_price) else np.nan,
@@ -515,15 +489,12 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "total_breakeven_prob": float(total_be) if not np.isnan(total_be) else np.nan,
             "total_edge_vs_be": float(total_edge_vs_be) if not np.isnan(total_edge_vs_be) else np.nan,
             "total_pass_reason": total_pass_reason,
-            "total_sd": float(sd),
             "total_recommendation": total_reco,
 
-            # Market
             "home_ml": home_ml,
             "away_ml": away_ml,
             "home_spread": home_spread,
 
-            # Debug
             "elo_diff": float(elo_diff),
             "inj_points": float(inj_pts),
             "goalie_diff": float(goalie_diff),
@@ -534,7 +505,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# Backwards-compatible alias
 def run_daily_probs_for_date(
     game_date_str: str = None,
     *,
