@@ -77,6 +77,9 @@ TOTAL_DEFAULT_PRICE = -110.0
 TOTAL_MIN_EDGE_VS_BE = 0.02         # must beat breakeven by 2%
 TOTAL_MIN_PTS_EDGE = 3.0            # must have >= 3 points edge to play totals
 
+# Regression-to-market for totals (helps stop "UNDER everything")
+TOTAL_REGRESS_TO_MARKET_W = 0.35    # 0..1; higher = more market anchoring
+
 
 # ----------------------------
 # Helpers
@@ -103,7 +106,7 @@ def _parse_iso_date(s: str) -> Optional[date]:
     if not s:
         return None
     try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
         return dt.date()
     except Exception:
         return None
@@ -530,11 +533,15 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     totals_map = _recent_total_points(days_back=TOTAL_LOOKBACK_DAYS)
 
     rows = []
-    
-# league fallback if team totals are missing (Odds API scores gives only 1-3 days)
-league_totals = [v.get("avg_total") for v in (totals_map or {}).values() if v.get("avg_total") is not None]
-league_avg_total = float(np.mean(league_totals)) if league_totals else float("nan")
-    
+
+    # league fallback if team totals are missing (Odds API scores gives only 1-3 days)
+    league_totals = [
+        v.get("avg_total")
+        for v in (totals_map or {}).values()
+        if v.get("avg_total") is not None
+    ]
+    league_avg_total = float(np.mean(league_totals)) if league_totals else float("nan")
+
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
         away = canon_team(away_in)
@@ -561,8 +568,8 @@ league_avg_total = float(np.mean(league_totals)) if league_totals else float("na
         form_diff = float(form_home - form_away)
 
         # Effective elos (symmetric form + injuries)
-        eh_eff = eh + rest_adj + 0.5 * inj_pts + 0.5 * form_diff
-        ea_eff = ea - 0.5 * inj_pts - 0.5 * form_diff
+        eh_eff = float(eh) + float(rest_adj) + 0.5 * float(inj_pts) + 0.5 * float(form_diff)
+        ea_eff = float(ea) - 0.5 * float(inj_pts) - 0.5 * float(form_diff)
 
         # Win prob + compression
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
@@ -621,14 +628,23 @@ league_avg_total = float(np.mean(league_totals)) if league_totals else float("na
             ats_strength = _ats_strength_label(ats_edge_vs_be)
             spread_reco = _ats_reco(ats_side, ats_strength)
 
-        # TOTALS model_total from recent totals map (pace proxy)
+        # TOTALS model_total from recent totals map (pace proxy) with fallbacks
         home_avg_total = _safe_float((totals_map.get(home) or {}).get("avg_total"))
         away_avg_total = _safe_float((totals_map.get(away) or {}).get("avg_total"))
 
-        if np.isnan(home_avg_total) or np.isnan(away_avg_total):
-            model_total = np.nan
-        else:
+        if not np.isnan(home_avg_total) and not np.isnan(away_avg_total):
             model_total = float(0.5 * (home_avg_total + away_avg_total) + TOTAL_HOME_BUMP)
+        elif not np.isnan(league_avg_total):
+            model_total = float(league_avg_total + TOTAL_HOME_BUMP)
+        elif not np.isnan(total_points):
+            model_total = float(total_points)  # neutral fallback (prevents NaN gating)
+        else:
+            model_total = np.nan
+
+        # regression-to-market to reduce systematic UNDER/OVER bias
+        if not np.isnan(model_total) and not np.isnan(total_points):
+            w = float(_clamp(TOTAL_REGRESS_TO_MARKET_W, 0.0, 1.0))
+            model_total = float((1.0 - w) * model_total + w * float(total_points))
 
         total_pick = _total_pick_and_edge(model_total, total_points, total_over_price, total_under_price)
         total_pick_side = str(total_pick.get("side"))
@@ -675,7 +691,7 @@ league_avg_total = float(np.mean(league_totals)) if league_totals else float("na
             # Market processed
             "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
             "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
-            "edge_away": float(edge_away) if not np.isnan(edge_away) else np.nan,
+            "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
 
             # ATS
             "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
@@ -748,8 +764,8 @@ league_avg_total = float(np.mean(league_totals)) if league_totals else float("na
 
         # refresh primary after filtering
         for i in df.index:
-            edge_home = df.loc[i, "edge_home"]
-            ml_edge_abs = float(abs(edge_home)) if not pd.isna(edge_home) else -999.0
+            eh_ = df.loc[i, "edge_home"]
+            ml_edge_abs = float(abs(eh_)) if not pd.isna(eh_) else -999.0
 
             sr = str(df.loc[i, "spread_recommendation"])
             tr = str(df.loc[i, "total_recommendation"])
@@ -788,3 +804,4 @@ def run_daily_probs_for_date(
     if date_in is None:
         raise ValueError("Must provide game_date or game_date_str")
     return run_daily_nba(str(date_in), odds_dict=(odds_dict or {}))
+```0
