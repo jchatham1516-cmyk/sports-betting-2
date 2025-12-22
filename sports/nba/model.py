@@ -530,7 +530,11 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     totals_map = _recent_total_points(days_back=TOTAL_LOOKBACK_DAYS)
 
     rows = []
-
+    
+# league fallback if team totals are missing (Odds API scores gives only 1-3 days)
+league_totals = [v.get("avg_total") for v in (totals_map or {}).values() if v.get("avg_total") is not None]
+league_avg_total = float(np.mean(league_totals)) if league_totals else float("nan")
+    
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
         away = canon_team(away_in)
