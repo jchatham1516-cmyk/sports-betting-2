@@ -367,7 +367,7 @@ def _recent_total_stats(days_back: int = TOTAL_LOOKBACK_DAYS) -> Dict[str, Dict[
         tot_w = _weighted_mean(totals)
 
         try:
-    recent = [float(x) for x in totals[:10]]
-    sd = float(np.std(recent, ddof=1)) if len(recent) >= 2 else float("nan")
-except Exception:
-    sd = float("nan")
+            recent = [float(x) for x in totals[:10]]
+            sd = float(np.std(recent, ddof=1)) if len(recent) >= 2 else float("nan")
+        except Exception:
+            sd = float("nan")
