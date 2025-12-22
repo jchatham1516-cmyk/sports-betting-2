@@ -31,6 +31,9 @@ ELO_K = 20.0
 # Elo -> points (spread-ish)
 ELO_PER_POINT = 40.0
 
+TOTAL_LOOKBACK_DAYS = 3
+TOTAL_MIN_GAMES = 1
+
 # Injury points clamp (your injuries module returns "points-ish")
 MAX_ABS_INJ_POINTS = 6.0
 
