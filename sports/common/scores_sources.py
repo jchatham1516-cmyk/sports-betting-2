@@ -45,6 +45,10 @@ def _odds_api_get(url: str, params: dict) -> List[Dict[str, Any]]:
 
 def fetch_recent_scores(sport_key: str, days_from: int = 3) -> List[Dict[str, Any]]:
     """
+    # Odds API scores endpoint often rejects large daysFrom for some sports (422).
+# We clamp to 3 to avoid returning zero scores.
+if sport_key in ("basketball_nba", "americanfootball_nfl") and days_from > 3:
+    days_from = 3
     Fetch recent scores for a sport using The Odds API scores endpoint.
 
     IMPORTANT:
