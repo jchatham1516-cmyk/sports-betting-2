@@ -9,6 +9,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from collections import defaultdict
 from sports.common.teams import canon_team
 from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.scores_sources import fetch_recent_scores
