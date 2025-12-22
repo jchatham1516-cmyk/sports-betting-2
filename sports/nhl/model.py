@@ -5,11 +5,11 @@ import os
 import math
 from datetime import datetime, date
 from typing import Dict, Optional, Tuple
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
 
-from collections import defaultdict
 from sports.common.teams import canon_team
 from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.scores_sources import fetch_recent_scores
@@ -50,13 +50,17 @@ BASE_COMPRESS = 0.65
 GOALIE_UNCERTAINTY_MULT = 0.85
 
 # ----------------------------
-# Totals model (NEW)
+# Totals model
 # ----------------------------
 TOTAL_LOOKBACK_DAYS = 28
 TOTAL_MIN_GAMES = 3
 TOTAL_DECAY = 0.90
 
 TOTAL_SD_DEFAULT = 1.35
+TOTAL_SD_CLAMP_LO = 0.90
+TOTAL_SD_CLAMP_HI = 2.40
+
+TOTAL_DEFAULT_PRICE = -110.0
 TOTAL_MIN_EDGE_VS_BE = 0.03
 TOTAL_MIN_GOALS_EDGE = 0.35
 
@@ -94,6 +98,11 @@ def _parse_iso_date(s: str) -> Optional[date]:
 
 def _rest_adjustment_days(days_rest: Optional[int]) -> float:
     if days_rest is None:
+        return 0.0
+    # clamp weird values
+    try:
+        days_rest = int(days_rest)
+    except Exception:
         return 0.0
     if days_rest <= 0:
         return float(B2B_PENALTY_ELO)
@@ -144,6 +153,7 @@ def _weighted_mean(values: list[float], decay: float = TOTAL_DECAY) -> float:
 def _totals_prob_over(model_total: float, market_total: float, sd: float) -> float:
     if np.isnan(model_total) or np.isnan(market_total) or np.isnan(sd) or sd <= 0:
         return float("nan")
+    # P(total goals > market_total)
     z = (float(market_total) - float(model_total)) / float(sd)
     return float(_clamp(1.0 - _phi(z), 0.001, 0.999))
 
@@ -156,6 +166,10 @@ def _total_pick(
     under_price: float,
     sd: float,
 ) -> Tuple[str, float, float, float, float]:
+    """
+    Returns: (side, p_win, edge_vs_be, breakeven, edge_goals)
+    edge_goals = model_total - market_total
+    """
     if np.isnan(model_total) or np.isnan(market_total):
         return ("NONE", float("nan"), float("nan"), float("nan"), float("nan"))
 
@@ -283,7 +297,7 @@ def _recent_goal_totals(days_back: int = TOTAL_LOOKBACK_DAYS) -> Dict[str, Dict[
             sd = float("nan")
 
         out[team] = {
-            "games": float(games),
+            "games": int(games),
             "gf_w": float(gf_w) if not np.isnan(gf_w) else np.nan,
             "ga_w": float(ga_w) if not np.isnan(ga_w) else np.nan,
             "tot_w": float(tot_w) if not np.isnan(tot_w) else np.nan,
@@ -390,7 +404,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         home_goalie_cost = _goalie_cost(home_inj)
         away_goalie_cost = _goalie_cost(away_inj)
         goalie_diff = float(away_goalie_cost - home_goalie_cost)
-        goalie_elo_adj = goalie_diff * float(GOALIE_EXTRA_ELO_PER_POINT)
+        goalie_elo_adj = float(goalie_diff) * float(GOALIE_EXTRA_ELO_PER_POINT)
 
         goalie_uncertain = (home_goalie_cost == 0.0 and away_goalie_cost == 0.0)
 
@@ -412,10 +426,12 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         home_spread = _safe_float((oi or {}).get("home_spread"))
 
         total_points = _safe_float((oi or {}).get("total_points"))
-        over_price = _safe_float((oi or {}).get("over_price"))
-        under_price = _safe_float((oi or {}).get("under_price"))
+        over_price = _safe_float((oi or {}).get("over_price"), default=TOTAL_DEFAULT_PRICE)
+        under_price = _safe_float((oi or {}).get("under_price"), default=TOTAL_DEFAULT_PRICE)
 
-        # Totals model (goals pace)
+        # ----------------
+        # Totals model (goals)
+        # ----------------
         hs = totals_map.get(home) or {}
         as_ = totals_map.get(away) or {}
 
@@ -446,13 +462,13 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             sd = float(away_sd)
         else:
             sd = float(TOTAL_SD_DEFAULT)
-        sd = _clamp(sd, 0.9, 2.4)
+        sd = _clamp(sd, TOTAL_SD_CLAMP_LO, TOTAL_SD_CLAMP_HI)
 
         total_side, total_p_win, total_edge_vs_be, total_be, total_edge_goals = _total_pick(
             model_total=float(model_total) if not np.isnan(model_total) else float("nan"),
             market_total=float(total_points) if not np.isnan(total_points) else float("nan"),
-            over_price=float(over_price) if not np.isnan(over_price) else float("nan"),
-            under_price=float(under_price) if not np.isnan(under_price) else float("nan"),
+            over_price=float(over_price) if not np.isnan(over_price) else float(TOTAL_DEFAULT_PRICE),
+            under_price=float(under_price) if not np.isnan(under_price) else float(TOTAL_DEFAULT_PRICE),
             sd=float(sd),
         )
 
@@ -460,7 +476,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         total_pass_reason = ""
         if np.isnan(total_points) or np.isnan(model_total) or total_side == "NONE":
             total_allowed = False
-            total_pass_reason = "missing total/price/model"
+            total_pass_reason = "missing total/model"
         else:
             if np.isnan(total_edge_vs_be) or total_edge_vs_be < TOTAL_MIN_EDGE_VS_BE:
                 total_allowed = False
@@ -473,6 +489,9 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             total_reco = f"No total bet (gated): {total_pass_reason}" if total_pass_reason else "No total bet (gated)"
         else:
             total_reco = f"Model PICK TOTAL: {total_side} ({total_edge_goals:+.2f} goals, edge_vs_be={total_edge_vs_be:+.3f})"
+
+        # Primary recommendation: TOTALS (if pick) else ML-ish (you can expand later)
+        primary = total_reco if isinstance(total_reco, str) and total_reco.startswith("Model PICK TOTAL:") else "No primary pick"
 
         rows.append({
             "date": game_date_str,
@@ -494,11 +513,16 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "total_breakeven_prob": float(total_be) if not np.isnan(total_be) else np.nan,
             "total_edge_vs_be": float(total_edge_vs_be) if not np.isnan(total_edge_vs_be) else np.nan,
             "total_recommendation": total_reco,
+            "total_pass_reason": total_pass_reason,
+            "total_sd": float(sd),
 
             # Market
             "home_ml": home_ml,
             "away_ml": away_ml,
             "home_spread": home_spread,
+
+            # Recommendation
+            "primary_recommendation": primary,
 
             # Debug
             "elo_diff": float(elo_diff),
