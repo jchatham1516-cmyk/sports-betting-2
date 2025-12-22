@@ -100,24 +100,27 @@ def fetch_odds_for_date_from_odds_api(
     *,
     sport_key: str,
     regions: str = "us",
-    markets: str = "h2h,spreads",
+    markets: str = "h2h,spreads,totals",
     odds_format: str = "american",
     date_format: str = "iso",
     preferred_books: Optional[list[str]] = None,
 ) -> Tuple[Dict[Tuple[str, str], dict], Dict[Tuple[str, str], float]]:
     """
     Returns:
-      odds_dict[(home, away)] = {"home_ml": ..., "away_ml": ..., "home_spread": ...}
+      odds_dict[(home, away)] = {
+          "home_ml": ...,
+          "away_ml": ...,
+          "home_spread": ...,
+          "total_points": ...,
+          "over_price": ...,
+          "under_price": ...
+      }
       spreads_dict[(home, away)] = home_spread
-
-    IMPORTANT:
-      Keys (home, away) are stored using canon_team() so they match your model's team names.
     """
     api_key = get_odds_api_key()
     preferred_books = preferred_books or DEFAULT_ODDS_BOOKMAKERS
     start_iso, end_iso = _iso_wide_bounds(game_date_str)
 
-    # 1) try requested markets (h2h,spreads)
     data = _request_odds(
         api_key=api_key,
         sport_key=sport_key,
@@ -129,14 +132,13 @@ def fetch_odds_for_date_from_odds_api(
         commence_to=end_iso,
     )
 
-    # 2) if nothing useful, retry h2h only (some books omit spreads)
     if not data:
-        print("[odds_api DEBUG] retrying with markets=h2h only")
+        print("[odds_api DEBUG] retrying with markets=h2h,spreads")
         data = _request_odds(
             api_key=api_key,
             sport_key=sport_key,
             regions=regions,
-            markets="h2h",
+            markets="h2h,spreads",
             odds_format=odds_format,
             date_format=date_format,
             commence_from=start_iso,
@@ -171,12 +173,17 @@ def fetch_odds_for_date_from_odds_api(
         if not bookmaker:
             continue
 
-        # --- Moneyline (h2h) ---
+        # Initialize structure
         home_ml = np.nan
         away_ml = np.nan
+        home_spread = np.nan
+        total_points = np.nan
+        over_price = np.nan
+        under_price = np.nan
+
+        # --- Moneyline (H2H) ---
         h2h = _extract_market(bookmaker, "h2h")
         if h2h:
-            # Build canonical outcome map: canon(name) -> price
             prices = {}
             for o in (h2h.get("outcomes") or []):
                 name = o.get("name")
@@ -190,8 +197,7 @@ def fetch_odds_for_date_from_odds_api(
             if prices.get(away) is not None:
                 away_ml = float(prices[away])
 
-        # --- Spreads (optional) ---
-        home_spread = np.nan
+        # --- Spreads ---
         spreads = _extract_market(bookmaker, "spreads")
         if spreads:
             pts = {}
@@ -205,8 +211,30 @@ def fetch_odds_for_date_from_odds_api(
             if pts.get(home) is not None:
                 home_spread = float(pts[home])
 
+        # --- Totals (Over/Under) ---
+        totals = _extract_market(bookmaker, "totals")
+        if totals:
+            for o in (totals.get("outcomes") or []):
+                name = o.get("name")
+                price = o.get("price")
+                point = o.get("point")
+                if name is None or price is None or point is None:
+                    continue
+                total_points = float(point)
+                if name.lower().startswith("over"):
+                    over_price = float(price)
+                elif name.lower().startswith("under"):
+                    under_price = float(price)
+
         key = (home, away)
-        odds_dict[key] = {"home_ml": home_ml, "away_ml": away_ml, "home_spread": home_spread}
+        odds_dict[key] = {
+            "home_ml": home_ml,
+            "away_ml": away_ml,
+            "home_spread": home_spread,
+            "total_points": total_points,
+            "over_price": over_price,
+            "under_price": under_price,
+        }
         spreads_dict[key] = home_spread
 
     return odds_dict, spreads_dict
@@ -214,15 +242,9 @@ def fetch_odds_for_date_from_odds_api(
 
 def fetch_odds_for_date_from_csv(game_date_str: str, *, sport: str = "nba"):
     """
-    Tries:
-      - odds/odds_<sport>_MM-DD-YYYY.csv
-      - odds/odds_MM-DD-YYYY.csv
-
-    Required columns: home, away, home_ml, away_ml
-    Optional: home_spread
-
-    IMPORTANT:
-      Keys (home, away) are stored using canon_team() so they match your model.
+    CSV Version:
+      required: home, away, home_ml, away_ml
+      optional: home_spread, total_points, over_price, under_price
     """
     date_part = game_date_str.replace("/", "-")
     fname1 = os.path.join("odds", f"odds_{sport}_{date_part}.csv")
@@ -268,7 +290,18 @@ def fetch_odds_for_date_from_csv(game_date_str: str, *, sport: str = "nba"):
         away_ml = _parse_number(row.get("away_ml"))
         home_spread = _parse_number(row.get("home_spread")) if "home_spread" in df.columns else np.nan
 
-        odds_dict[key] = {"home_ml": home_ml, "away_ml": away_ml, "home_spread": home_spread}
+        total_points = _parse_number(row.get("total_points")) if "total_points" in df.columns else np.nan
+        over_price = _parse_number(row.get("over_price")) if "over_price" in df.columns else np.nan
+        under_price = _parse_number(row.get("under_price")) if "under_price" in df.columns else np.nan
+
+        odds_dict[key] = {
+            "home_ml": home_ml,
+            "away_ml": away_ml,
+            "home_spread": home_spread,
+            "total_points": total_points,
+            "over_price": over_price,
+            "under_price": under_price,
+        }
         spreads_dict[key] = home_spread
 
     return odds_dict, spreads_dict
