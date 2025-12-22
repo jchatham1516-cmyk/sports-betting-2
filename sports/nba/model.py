@@ -26,32 +26,30 @@ ELO_PATH = "results/elo_state_nba.json"
 # Tunables (NBA-specific)
 # ----------------------------
 
-HOME_ADV = 60.0
+HOME_ADV = 55.0
 ELO_K = 20.0
+
 ELO_PER_POINT = 40.0
 
-# Injury scaling
 MAX_ABS_INJ_ELO_ADJ = 45.0
 MAX_ABS_INJ_POINTS = 6.0
 INJ_ELO_PER_POINT = 6.0
-QB_EXTRA_ELO = 10.0  # less relevant in NBA
+QB_EXTRA_ELO = 10.0
 
-# Spread cap
 MAX_ABS_MODEL_SPREAD = 17.0
 
-# Recent form (based on scoring margin)
+SHORT_REST_PENALTY_ELO = -14.0
+NORMAL_REST_BONUS_ELO = 0.0
+BYE_BONUS_ELO = +8.0
+
 FORM_LOOKBACK_DAYS = 35
 FORM_MIN_GAMES = 2
 FORM_ELO_PER_POINT = 1.35
 FORM_ELO_CLAMP = 40.0
 
-# Prob compression
 BASE_COMPRESS = 0.75
-
-# ML threshold
 MIN_ML_EDGE = 0.02
 
-# ATS model
 ATS_SD_PTS = 13.5
 ATS_DEFAULT_PRICE = -110.0
 ATS_MIN_EDGE_VS_BE = 0.03
@@ -59,7 +57,7 @@ ATS_MIN_PTS_EDGE = 2.0
 ATS_BIG_LINE = 7.0
 ATS_TINY_MODEL = 2.0
 ATS_BIGLINE_FORCE_PASS = True
-MAX_ATS_PLAYS_PER_DAY = 3
+MAX_ATS_PLAYS_PER_DAY = 3  # None to disable
 
 # ----------------------------
 # Helpers
@@ -99,19 +97,22 @@ def _calc_days_off(target: Optional[date], last: Optional[date]) -> Optional[int
     return int(delta)
 
 def _rest_elo(days_off: Optional[int]) -> float:
-    # NBA does not penalize for rest heavily
-    return 0.0
+    if days_off is None:
+        return 0.0
+    if days_off <= 4:
+        return float(SHORT_REST_PENALTY_ELO)
+    if days_off >= 10:
+        return float(BYE_BONUS_ELO)
+    return float(NORMAL_REST_BONUS_ELO)
 
 def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, Dict[str, float]]:
     sport_key = SPORT_TO_ODDS_KEY.get("nba")
     if not sport_key:
         return {}
-
     try:
         events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 45))
     except Exception:
         return {}
-
     margins = defaultdict(list)
     for ev in events:
         home_raw = ev.get("home_team")
@@ -128,14 +129,15 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
             continue
         score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
-            hs = float(score_map.get(home_raw) or score_map.get(home))
-            aw = float(score_map.get(away_raw) or score_map.get(away))
+            hs = score_map.get(home_raw) or score_map.get(home)
+            aw = score_map.get(away_raw) or score_map.get(away)
+            hs = float(hs)
+            aw = float(aw)
         except Exception:
             continue
-        margin = hs - aw
+        margin = float(hs - aw)
         margins[home].append((d, margin))
         margins[away].append((d, -margin))
-
     out: Dict[str, Dict[str, float]] = {}
     for team, lst in margins.items():
         lst = sorted(lst, key=lambda x: x[0], reverse=True)
@@ -146,9 +148,9 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
         avg_margin = float(np.mean(margins_only))
         elo_adj = _clamp(avg_margin * FORM_ELO_PER_POINT, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
         out[team] = {
-            "avg_margin": avg_margin,
-            "games": games,
-            "elo_adj": elo_adj,
+            "avg_margin": float(avg_margin),
+            "games": int(games),
+            "elo_adj": float(elo_adj),
         }
     return out
 
@@ -194,6 +196,10 @@ def _ml_recommendation(model_p: float, market_p: float, min_edge: float = MIN_ML
         return "Model PICK: AWAY ML (strong)" if edge <= -0.06 else "Model lean: AWAY ML"
     return "No ML bet (edge too small)"
 
+# ----------------------------
+# ATS helpers
+# ----------------------------
+
 def _phi(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
@@ -225,8 +231,8 @@ def _ats_pick_and_edge(p_home_cover: float, spread_price: float) -> Tuple[str, f
     else:
         side = "AWAY"
         p_win = p_away_cover
-    edge = p_win - be
-    return side, float(p_win), float(edge), float(be)
+    edge = float(p_win - be)
+    return (side, float(p_win), float(edge), float(be))
 
 def _ats_strength_label(edge_vs_be: float) -> str:
     if np.isnan(edge_vs_be):
@@ -247,8 +253,28 @@ def _ats_reco(side: str, strength: str) -> str:
     return f"Model PICK ATS: {side} ({strength})"
 
 # ----------------------------
-# Elo updates
+# Data builders
 # ----------------------------
+
+def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
+    sport_key = SPORT_TO_ODDS_KEY["nba"]
+    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 21))
+    last_played: Dict[str, date] = {}
+    for ev in events:
+        home_raw = ev.get("home_team")
+        away_raw = ev.get("away_team")
+        if not home_raw or not away_raw:
+            continue
+        home = canon_team(home_raw)
+        away = canon_team(away_raw)
+        d = _parse_iso_date(ev.get("commence_time") or "")
+        if d is None:
+            continue
+        if (home not in last_played) or (d > last_played[home]):
+            last_played[home] = d
+        if (away not in last_played) or (d > last_played[away]):
+            last_played[away] = d
+    return last_played
 
 def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     st = EloState.load(ELO_PATH)
@@ -267,8 +293,10 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
             continue
         score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
-            hs = float(score_map.get(home_raw) or score_map.get(home))
-            aw = float(score_map.get(away_raw) or score_map.get(away))
+            hs = score_map.get(home_raw) or score_map.get(home)
+            aw = score_map.get(away_raw) or score_map.get(away)
+            hs = float(hs)
+            aw = float(aw)
         except Exception:
             continue
         eh = st.get(home)
@@ -287,7 +315,6 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
 def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=14)
-
     try:
         target_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
     except Exception:
@@ -296,9 +323,10 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     try:
         injuries_map = fetch_official_nba_injuries()
     except Exception as e:
-        print(f"[nba injuries] WARNING: failed to load NBA injuries: {e}")
+        print(f"[nba injuries] WARNING: failed to load injuries: {e}")
         injuries_map = {}
 
+    last_played = _build_last_game_date_map(days_back=21)
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
 
     rows = []
@@ -309,21 +337,24 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         eh = st.get(home)
         ea = st.get(away)
 
-        # Injuries
+        home_days_off = _calc_days_off(target_date, last_played.get(home))
+        away_days_off = _calc_days_off(target_date, last_played.get(away))
+        rest_adj = _rest_elo(home_days_off) - _rest_elo(away_days_off)
+
         home_inj = build_injury_list_for_team_nba(home, injuries_map)
         away_inj = build_injury_list_for_team_nba(away, injuries_map)
-        inj_pts_raw = injury_adjustment_points(home_inj, away_inj)
+        inj_pts_raw = float(injury_adjustment_points(home_inj, away_inj))
         inj_pts = _clamp(inj_pts_raw, -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
 
         # Recent form
         form_home = float((form_map.get(home) or {}).get("elo_adj", 0.0))
         form_away = float((form_map.get(away) or {}).get("elo_adj", 0.0))
-        form_diff = form_home - form_away
+        form_diff = float(form_home - form_away)
 
-        eh_eff = eh + 0.5 * inj_pts + 0.5 * form_diff
+        eh_eff = eh + rest_adj + 0.5 * inj_pts + 0.5 * form_diff
         ea_eff = ea - 0.5 * inj_pts - 0.5 * form_diff
 
-        p_raw = elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV)
+        p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
         p_home = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
 
         elo_diff = (eh_eff - ea_eff) + HOME_ADV
@@ -339,18 +370,18 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
 
         edge_home = float(p_home - mkt_home_p) if not np.isnan(mkt_home_p) else float("nan")
-        edge_away = -edge_home if not np.isnan(edge_home) else float("nan")
+        edge_away = float(-edge_home) if not np.isnan(edge_home) else float("nan")
 
-        ml_pick = _ml_recommendation(p_home, mkt_home_p)
+        ml_pick = _ml_recommendation(float(p_home), float(mkt_home_p), min_edge=MIN_ML_EDGE)
         value_tier = _pick_value_tier(abs(edge_home)) if not np.isnan(edge_home) else "UNKNOWN"
 
         spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
-        p_home_cover = _cover_prob_from_edge(spread_edge_home, ATS_SD_PTS)
-        ats_side, ats_p_win, ats_edge_vs_be, ats_be = _ats_pick_and_edge(p_home_cover, spread_price)
+        p_home_cover = _cover_prob_from_edge(spread_edge_home, sd_pts=ATS_SD_PTS)
+        ats_side, ats_p_win, ats_edge_vs_be, ats_be = _ats_pick_and_edge(p_home_cover, spread_price=spread_price)
 
+        # ATS gating
         ats_pass_reason = ""
         ats_allowed = True
-
         if np.isnan(home_spread) or np.isnan(model_spread_home):
             ats_allowed = False
             ats_pass_reason = "missing spread"
@@ -376,48 +407,12 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "date": game_date_str,
             "home": home,
             "away": away,
-            "model_home_prob": p_home,
-            "model_spread_home": model_spread_home,
-            "market_home_prob": mkt_home_p,
-            "edge_home": edge_home,
-            "edge_away": edge_away,
-            "ml_recommendation": ml_pick,
-            "spread_recommendation": spread_reco,
-            "value_tier": value_tier,
+            "model_home_prob": float(p_home),
+            "model_spread_home": float(model_spread_home),
+            "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
+            "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
+            "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
+            "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
+            "ats_home_cover_prob": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
             "ats_pick_side": ats_side,
-            "ats_pick_prob": ats_p_win,
-            "ats_breakeven_prob": ats_be,
-            "ats_edge_vs_be": ats_edge_vs_be,
-            "ats_strength": ats_strength,
-            "ats_pass_reason": ats_pass_reason,
-            "elo_diff": elo_diff,
-            "inj_points": inj_pts,
-            "form_home_elo": form_home,
-            "form_away_elo": form_away,
-        })
-
-    df = pd.DataFrame(rows)
-
-    # Limit ATS picks to top N per day
-    if MAX_ATS_PLAYS_PER_DAY is not None and not df.empty:
-        elig = df["spread_recommendation"].astype(str).str.contains("Model PICK ATS:", na=False)
-        df["ats_rank_score"] = np.where(elig, df["ats_edge_vs_be"].astype(float), -999.0)
-        top_idx = df.sort_values("ats_rank_score", ascending=False).head(MAX_ATS_PLAYS_PER_DAY).index
-        keep = set(top_idx.tolist())
-        for i in df.index:
-            if elig.loc[i] and i not in keep:
-                df.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
-                df.loc[i, "ats_strength"] = "pass"
-                df.loc[i, "ats_pass_reason"] = "top-N filter"
-        df.drop(columns=["ats_rank_score"], inplace=True, errors="ignore")
-
-    return df
-
-# ----------------------------
-# Backwards-compatible alias
-# ----------------------------
-def run_daily_probs_for_date(*, game_date: str, odds_dict: dict) -> pd.DataFrame:
-    """
-    Compatible with current_of_sports_betting_algorithm.py calls.
-    """
-    return run_daily_nba(game_date, odds_dict=odds_dict)
+            "ats_pick_prob": float
