@@ -567,11 +567,28 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         )
         total_edge_points = float(model_total - total_points) if (not np.isnan(model_total) and not np.isnan(total_points)) else np.nan
 
-        primary = ml_pick
-        if isinstance(spread_reco, str) and spread_reco.startswith("Model PICK ATS:"):
-            primary = spread_reco
-        elif isinstance(total_recommendation, str) and total_recommendation.startswith("Model PICK TOTAL:"):
-            primary = total_recommendation
+ # Primary recommendation (choose the largest edge across ML / ATS / Totals)
+ml_edge_abs = float(abs(edge_home)) if not np.isnan(edge_home) else -1.0
+
+ats_is_pick = isinstance(spread_reco, str) and spread_reco.startswith("Model PICK ATS:")
+ats_edge_val = float(ats_edge_vs_be) if (ats_is_pick and not np.isnan(ats_edge_vs_be)) else -1.0
+
+tot_is_pick = isinstance(total_recommendation, str) and total_recommendation.startswith("Model PICK TOTAL:")
+tot_edge_val = float(total_pick.get("edge_vs_be")) if (tot_is_pick and not np.isnan(float(total_pick.get("edge_vs_be")))) else -1.0
+
+primary = ml_pick
+why_primary = f"Primary=ML (edge={ml_edge_abs:+.3f})"
+
+best_edge = ml_edge_abs
+if ats_edge_val > best_edge:
+    best_edge = ats_edge_val
+    primary = spread_reco
+    why_primary = f"Primary=ATS (edge_vs_be={ats_edge_val:+.3f})"
+
+if tot_edge_val > best_edge:
+    best_edge = tot_edge_val
+    primary = total_recommendation
+    why_primary = f"Primary=TOTAL (edge_vs_be={tot_edge_val:+.3f})"
 
         rows.append({
             "date": game_date_str,
