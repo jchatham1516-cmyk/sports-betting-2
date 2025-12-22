@@ -31,9 +31,6 @@ ELO_K = 20.0
 # Elo -> points (spread-ish)
 ELO_PER_POINT = 40.0
 
-TOTAL_LOOKBACK_DAYS = 3
-TOTAL_MIN_GAMES = 1
-
 # Injury points clamp (your injuries module returns "points-ish")
 MAX_ABS_INJ_POINTS = 6.0
 
@@ -80,6 +77,9 @@ TOTAL_DEFAULT_PRICE = -110.0
 TOTAL_MIN_EDGE_VS_BE = 0.02         # must beat breakeven by 2%
 TOTAL_MIN_PTS_EDGE = 3.0            # must have >= 3 points edge to play totals
 
+# If score history fails entirely, use a stable NBA prior so model_total isn't NaN
+TOTAL_LEAGUE_PRIOR = 228.0
+
 
 # ----------------------------
 # Helpers
@@ -106,7 +106,7 @@ def _parse_iso_date(s: str) -> Optional[date]:
     if not s:
         return None
     try:
-        dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         return dt.date()
     except Exception:
         return None
@@ -130,6 +130,67 @@ def _rest_elo(days_off: Optional[int]) -> float:
     if days_off >= 10:
         return float(BYE_BONUS_ELO)
     return float(NORMAL_REST_BONUS_ELO)
+
+
+def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, Dict[str, float]]:
+    """
+    { team: {"avg_margin": float, "games": int, "elo_adj": float } }
+    """
+    sport_key = SPORT_TO_ODDS_KEY.get("nba")
+    if not sport_key:
+        return {}
+
+    # IMPORTANT: Odds API scores endpoint seems to 422 for large daysFrom in your logs.
+    # Use a small window to avoid 422. This makes form weaker, but prevents total failure.
+    try:
+        events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 3))
+    except Exception:
+        return {}
+
+    margins = defaultdict(list)  # team -> list[(date, margin)]
+    for ev in events:
+        home_raw = ev.get("home_team")
+        away_raw = ev.get("away_team")
+        scores = ev.get("scores")
+        if not home_raw or not away_raw or not scores:
+            continue
+
+        d = _parse_iso_date(ev.get("commence_time") or "")
+        if d is None:
+            continue
+
+        home = canon_team(home_raw)
+        away = canon_team(away_raw)
+        if not home or not away:
+            continue
+
+        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
+        try:
+            hs = score_map.get(home_raw) or score_map.get(home)
+            aw = score_map.get(away_raw) or score_map.get(away)
+            hs = float(hs)
+            aw = float(aw)
+        except Exception:
+            continue
+
+        margin = float(hs - aw)
+        margins[home].append((d, margin))
+        margins[away].append((d, -margin))
+
+    out: Dict[str, Dict[str, float]] = {}
+    for team, lst in margins.items():
+        lst = sorted(lst, key=lambda x: x[0], reverse=True)
+        margins_only = [m for _, m in lst]
+        games = len(margins_only)
+        if games < FORM_MIN_GAMES:
+            continue
+
+        avg_margin = float(np.mean(margins_only))
+        elo_adj = _clamp(avg_margin * FORM_ELO_PER_POINT, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
+
+        out[team] = {"avg_margin": avg_margin, "games": int(games), "elo_adj": float(elo_adj)}
+
+    return out
 
 
 def _american_to_prob(ml: float) -> float:
@@ -255,8 +316,9 @@ def _recent_total_points(days_back: int = TOTAL_LOOKBACK_DAYS) -> Dict[str, Dict
     if not sport_key:
         return {}
 
+    # Avoid 422: keep days_from small
     try:
-        events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 60))
+        events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 3))
     except Exception:
         return {}
 
@@ -274,27 +336,13 @@ def _recent_total_points(days_back: int = TOTAL_LOOKBACK_DAYS) -> Dict[str, Dict
 
         home = canon_team(home_raw)
         away = canon_team(away_raw)
-        if not home or not away:
-            continue
 
-        # Canonical score map so we don't miss matches
-        score_map = {}
-        for s in scores:
-            nm = s.get("name")
-            sc = s.get("score")
-            if not nm:
-                continue
-            key = canon_team(nm)
-            if not key:
-                continue
-            try:
-                score_map[key] = float(sc)
-            except Exception:
-                continue
-
+        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
-            hs = float(score_map.get(home))
-            aw = float(score_map.get(away))
+            hs = score_map.get(home_raw) or score_map.get(home)
+            aw = score_map.get(away_raw) or score_map.get(away)
+            hs = float(hs)
+            aw = float(aw)
         except Exception:
             continue
 
@@ -306,6 +354,7 @@ def _recent_total_points(days_back: int = TOTAL_LOOKBACK_DAYS) -> Dict[str, Dict
     if not per_team:
         return out
 
+    # determine "today" as max date seen, to compute ages
     max_d = max((dt for lst in per_team.values() for (dt, _) in lst), default=None)
     if max_d is None:
         return out
@@ -335,25 +384,21 @@ def _recent_total_points(days_back: int = TOTAL_LOOKBACK_DAYS) -> Dict[str, Dict
     return out
 
 
-def _total_pick_and_edge(
-    model_total: float,
-    market_total: float,
-    over_price: float,
-    under_price: float,
-) -> Dict[str, float | str]:
+def _total_pick_and_edge(model_total: float, market_total: float, over_price: float, under_price: float) -> Dict[str, float | str]:
     """
     Choose OVER or UNDER using a Normal model around model_total.
-    Returns dict with: side, p_win, be, edge_vs_be, edge_points
+    Returns dict with:
+      side, p_win, be, edge_vs_be, edge_points
     """
     if np.isnan(model_total) or np.isnan(market_total):
         return {"side": "NONE", "p_win": np.nan, "be": np.nan, "edge_vs_be": np.nan, "edge_points": np.nan}
 
-    # P(OVER) = P(actual > market) where actual ~ N(model_total, sd)
-    # If model_total is above market_total, OVER gets favored.
+    # Probability OVER = P(actual > market) given mean=model_total and sd
     z = (float(model_total) - float(market_total)) / float(TOTAL_SD_PTS)
     p_over = float(_clamp(_phi(z), 0.001, 0.999))
     p_under = 1.0 - p_over
 
+    # pick side and use its price for breakeven
     if p_over >= p_under:
         side = "OVER"
         p_win = p_over
@@ -367,32 +412,19 @@ def _total_pick_and_edge(
     edge_vs_be = float(p_win - be) if not np.isnan(be) else np.nan
     edge_points = float(model_total - market_total)
 
-    return {
-        "side": side,
-        "p_win": float(p_win),
-        "be": float(be),
-        "edge_vs_be": float(edge_vs_be),
-        "edge_points": float(edge_points),
-    }
+    return {"side": side, "p_win": float(p_win), "be": float(be), "edge_vs_be": float(edge_vs_be), "edge_points": float(edge_points)}
 
 
-def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> Tuple[str, str]:
-    """
-    Returns (recommendation, pass_reason)
-    """
+def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
     if side == "NONE":
-        return ("No total bet (gated): missing total/model", "missing total/model")
-
+        return "No total bet (missing total/model)"
     if np.isnan(edge_vs_be) or np.isnan(edge_points):
-        return ("No total bet (gated): missing price/model", "missing price/model")
-
+        return "No total bet (missing price/model)"
     if abs(edge_points) < TOTAL_MIN_PTS_EDGE:
-        return (f"No total bet (gated): |total_edge_pts|<{TOTAL_MIN_PTS_EDGE:.1f}", f"|total_edge_pts|<{TOTAL_MIN_PTS_EDGE:.1f}")
-
+        return "No total bet (edge too small)"
     if edge_vs_be < TOTAL_MIN_EDGE_VS_BE:
-        return (f"No total bet (gated): total_edge_vs_be<{TOTAL_MIN_EDGE_VS_BE:.3f}", f"total_edge_vs_be<{TOTAL_MIN_EDGE_VS_BE:.3f}")
-
-    return (f"Model PICK TOTAL: {side} ({edge_points:+.1f} pts, edge_vs_be={edge_vs_be:+.3f})", "")
+        return f"No total bet (edge_vs_be<{TOTAL_MIN_EDGE_VS_BE:.3f})"
+    return f"Model PICK TOTAL: {side}"
 
 
 # ----------------------------
@@ -400,7 +432,8 @@ def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> Tuple[str, 
 # ----------------------------
 def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
     sport_key = SPORT_TO_ODDS_KEY["nba"]
-    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 21))
+    # Avoid 422: keep days_from small
+    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 3))
 
     last_played: Dict[str, date] = {}
     for ev in events:
@@ -424,81 +457,12 @@ def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
     return last_played
 
 
-def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, Dict[str, float]]:
-    """
-    { team: {"avg_margin": float, "games": int, "elo_adj": float } }
-    """
-    sport_key = SPORT_TO_ODDS_KEY.get("nba")
-    if not sport_key:
-        return {}
-
-    try:
-        events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 45))
-    except Exception:
-        return {}
-
-    margins = defaultdict(list)  # team -> list[(date, margin)]
-    for ev in events:
-        home_raw = ev.get("home_team")
-        away_raw = ev.get("away_team")
-        scores = ev.get("scores")
-        if not home_raw or not away_raw or not scores:
-            continue
-
-        d = _parse_iso_date(ev.get("commence_time") or "")
-        if d is None:
-            continue
-
-        home = canon_team(home_raw)
-        away = canon_team(away_raw)
-        if not home or not away:
-            continue
-
-        # Canonical score map so we don't miss matches
-        score_map = {}
-        for s in scores:
-            nm = s.get("name")
-            sc = s.get("score")
-            if not nm:
-                continue
-            key = canon_team(nm)
-            if not key:
-                continue
-            try:
-                score_map[key] = float(sc)
-            except Exception:
-                continue
-
-        try:
-            hs = float(score_map.get(home))
-            aw = float(score_map.get(away))
-        except Exception:
-            continue
-
-        margin = float(hs - aw)
-        margins[home].append((d, margin))
-        margins[away].append((d, -margin))
-
-    out: Dict[str, Dict[str, float]] = {}
-    for team, lst in margins.items():
-        lst = sorted(lst, key=lambda x: x[0], reverse=True)
-        margins_only = [m for _, m in lst]
-        games = len(margins_only)
-        if games < FORM_MIN_GAMES:
-            continue
-
-        avg_margin = float(np.mean(margins_only))
-        elo_adj = _clamp(avg_margin * FORM_ELO_PER_POINT, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
-        out[team] = {"avg_margin": float(avg_margin), "games": int(games), "elo_adj": float(elo_adj)}
-
-    return out
-
-
 def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nba"]
 
-    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 21))
+    # Avoid 422: keep days_from small
+    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 3))
 
     for ev in events:
         home_raw = ev.get("home_team")
@@ -509,31 +473,17 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
         home = canon_team(home_raw)
         away = canon_team(away_raw)
-        if not home or not away:
-            continue
 
         game_key = f"{ev.get('id','')}|{ev.get('commence_time','')}|{home}|{away}"
         if st.is_processed(game_key):
             continue
 
-        # Canonical score map so we don't miss matches
-        score_map = {}
-        for s in scores:
-            nm = s.get("name")
-            sc = s.get("score")
-            if not nm:
-                continue
-            key = canon_team(nm)
-            if not key:
-                continue
-            try:
-                score_map[key] = float(sc)
-            except Exception:
-                continue
-
+        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
-            hs = float(score_map.get(home))
-            aw = float(score_map.get(away))
+            hs = score_map.get(home_raw) or score_map.get(home)
+            aw = score_map.get(away_raw) or score_map.get(away)
+            hs = float(hs)
+            aw = float(aw)
         except Exception:
             continue
 
@@ -572,13 +522,28 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
     totals_map = _recent_total_points(days_back=TOTAL_LOOKBACK_DAYS)
 
+    # League average fallback (so totals never go missing)
+    league_avg_total = np.nan
+    if totals_map:
+        vals = []
+        for v in totals_map.values():
+            if isinstance(v, dict) and v.get("avg_total") is not None:
+                try:
+                    x = float(v.get("avg_total"))
+                    if not np.isnan(x):
+                        vals.append(x)
+                except Exception:
+                    pass
+        if vals:
+            league_avg_total = float(np.mean(vals))
+    if np.isnan(league_avg_total):
+        league_avg_total = float(TOTAL_LEAGUE_PRIOR)
+
     rows = []
 
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
         away = canon_team(away_in)
-        if not home or not away:
-            continue
 
         eh = st.get(home)
         ea = st.get(away)
@@ -600,8 +565,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         form_diff = float(form_home - form_away)
 
         # Effective elos (symmetric form + injuries)
-        eh_eff = float(eh) + float(rest_adj) + 0.5 * float(inj_pts) + 0.5 * float(form_diff)
-        ea_eff = float(ea) - 0.5 * float(inj_pts) - 0.5 * float(form_diff)
+        eh_eff = eh + rest_adj + 0.5 * inj_pts + 0.5 * form_diff
+        ea_eff = ea - 0.5 * inj_pts - 0.5 * form_diff
 
         # Win prob + compression
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
@@ -660,34 +625,20 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             ats_strength = _ats_strength_label(ats_edge_vs_be)
             spread_reco = _ats_reco(ats_side, ats_strength)
 
-        # TOTALS model_total from recent totals map (pace proxy)
-        home_avg_total = _safe_float((totals_map.get(home) or {}).get("avg_total"))
-        away_avg_total = _safe_float((totals_map.get(away) or {}).get("avg_total"))
-        if np.isnan(home_avg_total) or np.isnan(away_avg_total):
-            model_total = np.nan
-        else:
-            model_total = float(0.5 * (home_avg_total + away_avg_total) + TOTAL_HOME_BUMP)
+        # TOTALS model_total from recent totals map (pace proxy) with league fallback
+        home_avg_total = _safe_float((totals_map.get(home) or {}).get("avg_total"), default=league_avg_total)
+        away_avg_total = _safe_float((totals_map.get(away) or {}).get("avg_total"), default=league_avg_total)
+        model_total = float(0.5 * (home_avg_total + away_avg_total) + TOTAL_HOME_BUMP)
 
-        total_pick = _total_pick_and_edge(
-            float(model_total) if not np.isnan(model_total) else float("nan"),
-            float(total_points) if not np.isnan(total_points) else float("nan"),
-            float(total_over_price) if not np.isnan(total_over_price) else float("nan"),
-            float(total_under_price) if not np.isnan(total_under_price) else float("nan"),
+        total_pick = _total_pick_and_edge(model_total, total_points, total_over_price, total_under_price)
+        total_recommendation = _total_reco(
+            str(total_pick.get("side")),
+            float(total_pick.get("edge_vs_be")) if total_pick.get("edge_vs_be") is not None else np.nan,
+            float(total_pick.get("edge_points")) if total_pick.get("edge_points") is not None else np.nan,
         )
-
         total_edge_points = float(model_total - total_points) if (not np.isnan(model_total) and not np.isnan(total_points)) else np.nan
-        total_side = str(total_pick.get("side"))
-        total_p_win = float(total_pick.get("p_win")) if total_pick.get("p_win") is not None else np.nan
-        total_be = float(total_pick.get("be")) if total_pick.get("be") is not None else np.nan
-        total_edge_vs_be = float(total_pick.get("edge_vs_be")) if total_pick.get("edge_vs_be") is not None else np.nan
 
-        total_recommendation, total_pass_reason = _total_reco(
-            total_side,
-            total_edge_vs_be,
-            total_edge_points,
-        )
-
-        # Primary recommendation preference order: ATS pick > totals pick > ML
+        # Primary recommendation preference order: ATS strong > totals > ML
         primary = ml_pick
         if isinstance(spread_reco, str) and spread_reco.startswith("Model PICK ATS:"):
             primary = spread_reco
@@ -724,11 +675,11 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             "total_under_price": float(total_under_price) if not np.isnan(total_under_price) else np.nan,
             "model_total": float(model_total) if not np.isnan(model_total) else np.nan,
             "total_edge_points": float(total_edge_points) if not np.isnan(total_edge_points) else np.nan,
-            "total_pick_side": total_side,
-            "total_pick_prob": float(total_p_win) if not np.isnan(total_p_win) else np.nan,
-            "total_breakeven_prob": float(total_be) if not np.isnan(total_be) else np.nan,
-            "total_edge_vs_be": float(total_edge_vs_be) if not np.isnan(total_edge_vs_be) else np.nan,
-            "total_pass_reason": total_pass_reason,
+            "total_pick_side": str(total_pick.get("side")),
+            "total_pick_prob": float(total_pick.get("p_win")) if total_pick.get("p_win") is not None else np.nan,
+            "total_breakeven_prob": float(total_pick.get("be")) if total_pick.get("be") is not None else np.nan,
+            "total_edge_vs_be": float(total_pick.get("edge_vs_be")) if total_pick.get("edge_vs_be") is not None else np.nan,
+            "total_pass_reason": "" if str(total_pick.get("side")) != "NONE" else "missing total/model",
             "total_recommendation": total_recommendation,
 
             # Recos
@@ -769,7 +720,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         keep = set(top_idx.tolist())
 
         for i in df.index:
-            if bool(elig.loc[i]) and i not in keep:
+            if elig.loc[i] and i not in keep:
                 df.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
                 df.loc[i, "ats_strength"] = "pass"
                 df.loc[i, "ats_pass_reason"] = "top-N filter"
