@@ -256,7 +256,6 @@ def _total_pick_and_edge(
     be_over = _breakeven_prob_from_american(over_price)
     be_under = _breakeven_prob_from_american(under_price)
 
-    # pick the better edge vs its breakeven
     edge_over = (p_over - be_over) if not np.isnan(be_over) else float("nan")
     edge_under = (p_under - be_under) if not np.isnan(be_under) else float("nan")
 
@@ -285,6 +284,53 @@ def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
     if reason:
         return f"No total bet ({reason})"
     return f"Model PICK TOTAL: {side}"
+
+
+def _choose_primary_from_fields(
+    *,
+    ml_reco: str,
+    spread_reco: str,
+    total_reco: str,
+    edge_home: float,
+    ats_edge_vs_be: float,
+    total_edge_vs_be: float,
+    total_edge_points: float,
+) -> Tuple[str, str]:
+    """
+    Primary selection rule:
+      - ML score: abs(edge_home)  (no-vig win-prob edge)
+      - ATS score: ats_edge_vs_be (only if spread_reco is a real pick)
+      - TOTAL score: max(total_edge_vs_be, abs(total_edge_points)/10) (only if total_reco is a real pick)
+        (this makes big point edges win more often, which is what you asked for)
+    """
+    ml_score = float(abs(edge_home)) if edge_home is not None and not np.isnan(edge_home) else -999.0
+
+    ats_score = -999.0
+    if isinstance(spread_reco, str) and spread_reco.startswith("Model PICK ATS:"):
+        if ats_edge_vs_be is not None and not np.isnan(ats_edge_vs_be):
+            ats_score = float(ats_edge_vs_be)
+
+    tot_score = -999.0
+    if isinstance(total_reco, str) and total_reco.startswith("Model PICK TOTAL:"):
+        a = float(total_edge_vs_be) if total_edge_vs_be is not None and not np.isnan(total_edge_vs_be) else -999.0
+        b = float(abs(total_edge_points) / 10.0) if total_edge_points is not None and not np.isnan(total_edge_points) else -999.0
+        tot_score = float(max(a, b))
+
+    primary = str(ml_reco)
+    why = f"Primary=ML (score={ml_score:+.3f})"
+    best = ml_score
+
+    if ats_score > best:
+        best = ats_score
+        primary = str(spread_reco)
+        why = f"Primary=ATS (edge_vs_be={ats_score:+.3f})"
+
+    if tot_score > best:
+        best = tot_score
+        primary = str(total_reco)
+        why = f"Primary=TOTAL (score={tot_score:+.3f}; edge_vs_be={float(total_edge_vs_be):+.3f})"
+
+    return primary, why
 
 
 # ----------------------------
@@ -423,9 +469,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     last_played = _build_last_game_date_map(days_back=21)
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
 
-    # Historical MARKET totals lines (paid plans) — this fixes "totals missing"
+    # Historical MARKET totals lines (paid plans)
     sport_key = SPORT_TO_ODDS_KEY.get("nba")
-    team_total_lines = {}
+    team_total_lines: Dict[str, Dict[str, float]] = {}
     if sport_key:
         try:
             team_total_lines = build_team_historical_total_lines(
@@ -451,6 +497,28 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     league_avg_total = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 14.0
+
+    def _team_line_avg_sd(team_canon: str, team_raw: str) -> Tuple[float, float]:
+        """
+        Try multiple keys because historical_totals may store raw odds-api names.
+        Return (avg, sd) or (nan, nan).
+        """
+        candidates = []
+        if team_raw:
+            candidates.append(str(team_raw))
+            candidates.append(str(team_raw).strip())
+        if team_canon:
+            candidates.append(str(team_canon))
+            candidates.append(str(team_canon).strip())
+
+        for k in candidates:
+            v = (team_total_lines or {}).get(k)
+            if isinstance(v, dict) and v.get("avg") is not None:
+                avg = _safe_float(v.get("avg"))
+                sd = _safe_float(v.get("sd"), default=np.nan)
+                return (avg, sd)
+
+        return (float("nan"), float("nan"))
 
     rows = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
@@ -540,39 +608,20 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             spread_reco = _ats_reco(ats_side, ats_strength)
 
         # TOTALS (from historical MARKET total lines)
-        # IMPORTANT: this is NOT the same as using today's market_total.
-        def _team_line_avg_sd(team_name: str) -> Tuple[float, float]:
-            # historical_totals keys come from Odds API team strings, so try both raw+canon
-            cand = [
-                team_name,
-                home_in,
-                away_in,
-            ]
-            for k in cand:
-                v = (team_total_lines or {}).get(k)
-                if isinstance(v, dict) and v.get("avg") is not None:
-                    avg = _safe_float(v.get("avg"))
-                    sd = _safe_float(v.get("sd"), default=np.nan)
-                    return (avg, sd)
-            return (float("nan"), float("nan"))
+        home_avg, home_sd = _team_line_avg_sd(home, home_in)
+        away_avg, away_sd = _team_line_avg_sd(away, away_in)
 
-        home_avg, home_sd = _team_line_avg_sd(home)
-        away_avg, away_sd = _team_line_avg_sd(away)
-
-        # Base: average of team historical totals lines
         base_total = float("nan")
         if not np.isnan(home_avg) and not np.isnan(away_avg):
             base_total = 0.5 * (home_avg + away_avg)
         elif not np.isnan(league_avg_total):
             base_total = float(league_avg_total)
 
-        # Regression to league mean (prevents “all under” / too extreme)
         if not np.isnan(base_total) and not np.isnan(league_avg_total):
             model_total = float((1.0 - TOTAL_REGRESS_WEIGHT) * base_total + TOTAL_REGRESS_WEIGHT * league_avg_total)
         else:
             model_total = float("nan")
 
-        # SD: average team SDs or league SD, clamped
         sd = float("nan")
         if not np.isnan(home_sd) and not np.isnan(away_sd):
             sd = 0.5 * (home_sd + away_sd)
@@ -596,23 +645,16 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         total_pass_reason = _total_gate_reason(total_side, total_edge_vs_be, total_edge_pts)
         total_recommendation = _total_reco(total_side, total_edge_vs_be, total_edge_pts)
 
-        # Primary choice: strongest allowed edge
-        ml_edge_abs = float(abs(edge_home)) if not np.isnan(edge_home) else -999.0
-        ats_edge_val = float(ats_edge_vs_be) if str(spread_reco).startswith("Model PICK ATS:") else -999.0
-        tot_edge_val = float(total_edge_vs_be) if str(total_recommendation).startswith("Model PICK TOTAL:") else -999.0
-
-        primary = ml_pick
-        why_primary = f"Primary=ML (abs_edge={ml_edge_abs:+.3f})"
-        best_edge = ml_edge_abs
-
-        if ats_edge_val > best_edge:
-            best_edge = ats_edge_val
-            primary = spread_reco
-            why_primary = f"Primary=ATS (edge_vs_be={ats_edge_val:+.3f})"
-        if tot_edge_val > best_edge:
-            best_edge = tot_edge_val
-            primary = total_recommendation
-            why_primary = f"Primary=TOTAL (edge_vs_be={tot_edge_val:+.3f})"
+        # Primary (DO NOT finalize until after ATS top-N filter)
+        primary_pre, why_pre = _choose_primary_from_fields(
+            ml_reco=ml_pick,
+            spread_reco=spread_reco,
+            total_reco=total_recommendation,
+            edge_home=edge_home,
+            ats_edge_vs_be=ats_edge_vs_be,
+            total_edge_vs_be=total_edge_vs_be,
+            total_edge_points=total_edge_pts,
+        )
 
         rows.append(
             {
@@ -645,8 +687,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "total_recommendation": str(total_recommendation),
                 "ml_recommendation": ml_pick,
                 "spread_recommendation": spread_reco,
-                "primary_recommendation": primary,
-                "why_primary": why_primary,
+                "primary_recommendation": primary_pre,
+                "why_primary": why_pre,
                 "value_tier": value_tier,
                 "elo_diff": float(elo_diff),
                 "inj_points_raw": float(inj_pts_raw),
@@ -671,12 +713,37 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         df["ats_rank_score"] = np.where(elig, df["ats_edge_vs_be"].astype(float), -999.0)
         top_idx = df.sort_values("ats_rank_score", ascending=False).head(MAX_ATS_PLAYS_PER_DAY).index
         keep = set(top_idx.tolist())
+
         for i in df.index:
             if bool(elig.loc[i]) and i not in keep:
                 df.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
                 df.loc[i, "ats_strength"] = "pass"
                 df.loc[i, "ats_pass_reason"] = "top-N filter"
+
         df.drop(columns=["ats_rank_score"], inplace=True, errors="ignore")
+
+        # IMPORTANT: recompute PRIMARY after ATS filter so totals can become primary
+        for i in df.index:
+            ml_pick = str(df.loc[i, "ml_recommendation"])
+            spread_reco = str(df.loc[i, "spread_recommendation"])
+            total_reco = str(df.loc[i, "total_recommendation"])
+
+            edge_home = float(df.loc[i, "edge_home"]) if not pd.isna(df.loc[i, "edge_home"]) else float("nan")
+            ats_edge_vs_be = float(df.loc[i, "ats_edge_vs_be"]) if not pd.isna(df.loc[i, "ats_edge_vs_be"]) else float("nan")
+            total_edge_vs_be = float(df.loc[i, "total_edge_vs_be"]) if not pd.isna(df.loc[i, "total_edge_vs_be"]) else float("nan")
+            total_edge_pts = float(df.loc[i, "total_edge_points"]) if not pd.isna(df.loc[i, "total_edge_points"]) else float("nan")
+
+            primary, why = _choose_primary_from_fields(
+                ml_reco=ml_pick,
+                spread_reco=spread_reco,
+                total_reco=total_reco,
+                edge_home=edge_home,
+                ats_edge_vs_be=ats_edge_vs_be,
+                total_edge_vs_be=total_edge_vs_be,
+                total_edge_points=total_edge_pts,
+            )
+            df.loc[i, "primary_recommendation"] = primary
+            df.loc[i, "why_primary"] = why
 
     return df
 
