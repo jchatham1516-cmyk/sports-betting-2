@@ -721,4 +721,4 @@ def run_daily_probs_for_date(
     date_in = game_date if game_date is not None else game_date_str
     if date_in is None:
         raise ValueError("Must provide game_date or game_date_str")
-    return run_daily_nfl(str(date_in), odds_dict=(odds_dict or {}))⁹
+    return run_daily_nfl(str(date_in), odds_dict=(odds_dict or {}))
