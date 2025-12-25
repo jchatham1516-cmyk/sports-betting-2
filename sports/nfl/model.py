@@ -22,7 +22,13 @@ from sports.nfl.injuries import (
     injury_adjustment_points,
 )
 
+# NEW: probability + margin calibrators
+from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
+from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
+
 ELO_PATH = "results/elo_state_nfl.json"
+PLATT_PATH = "results/prob_cal_nfl.json"
+MARGIN_CAL_PATH = "results/margin_cal_nfl.json"
 
 # ----------------------------
 # Tunables (NFL-specific)
@@ -30,7 +36,7 @@ ELO_PATH = "results/elo_state_nfl.json"
 HOME_ADV = 55.0
 ELO_K = 20.0
 
-# Elo -> points (spread-ish)
+# Elo -> points (spread-ish) (fallback only once margin calibrator is trained)
 ELO_PER_POINT = 40.0
 
 # Injury scaling
@@ -58,6 +64,9 @@ BASE_COMPRESS = 0.75
 
 # ML threshold
 MIN_ML_EDGE = 0.02
+
+# Calibration minimum games
+CAL_MIN_GAMES = 60
 
 # ATS model
 ATS_SD_PTS = 13.5
@@ -376,9 +385,20 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
 
 
 def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
+    """
+    Updates Elo from recent completed games.
+    ALSO trains:
+      - Platt probability calibrator (raw Elo prob -> calibrated prob)
+      - Margin calibrator (elo_diff -> expected score margin)
+    """
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
-    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 21))
+    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 60))
+
+    train_ps: list = []
+    train_ys: list = []
+    train_xs: list = []
+    train_margins: list = []
 
     for ev in events:
         home_raw = ev.get("home_team")
@@ -403,6 +423,17 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
         eh = st.get(home)
         ea = st.get(away)
+
+        # ---- collect calibration signal BEFORE updating Elo ----
+        p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
+        train_ps.append(p_raw)
+        train_ys.append(1.0 if hs > aw else 0.0)
+
+        elo_diff = (float(eh) + float(HOME_ADV)) - float(ea)
+        train_xs.append(elo_diff)
+        train_margins.append(float(hs - aw))
+
+        # ---- update Elo (MOV if your elo_update supports it; safe either way) ----
         nh, na = elo_update(eh, ea, hs, aw, k=ELO_K, home_adv=HOME_ADV)
         st.set(home, nh)
         st.set(away, na)
@@ -410,6 +441,18 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
     os.makedirs("results", exist_ok=True)
     st.save(ELO_PATH)
+
+    # ---- fit + save calibrators when enough samples ----
+    try:
+        if len(train_ps) >= CAL_MIN_GAMES:
+            cal = fit_platt(np.array(train_ps, dtype=float), np.array(train_ys, dtype=float))
+            save_platt(PLATT_PATH, cal)
+
+            mcal = fit_margin(np.array(train_xs, dtype=float), np.array(train_margins, dtype=float))
+            save_margin_cal(MARGIN_CAL_PATH, mcal)
+    except Exception as e:
+        print(f"[nfl calibration] WARNING: calibration fit failed: {e}")
+
     return st
 
 
@@ -418,6 +461,23 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 # ----------------------------
 def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=14)
+
+    # Load calibrators (safe defaults if files not present yet)
+    platt = load_platt(PLATT_PATH)
+    margin_cal = load_margin_cal(MARGIN_CAL_PATH)
+
+    def _margin_model_spread_from_elo_diff(elo_diff: float) -> float:
+        """
+        Uses trained margin calibrator if available; falls back to ELO_PER_POINT mapping.
+        Returns model_spread_home (negative if home favored).
+        """
+        try:
+            if abs(getattr(margin_cal, "a", 0.0)) < 1e-9 and abs(getattr(margin_cal, "b", 0.0)) < 1e-9:
+                return float(-(elo_diff / ELO_PER_POINT))
+            pred_margin = float(margin_cal.predict(float(elo_diff)))  # home_score - away_score
+            return float(-pred_margin)
+        except Exception:
+            return float(-(elo_diff / ELO_PER_POINT))
 
     try:
         target_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
@@ -525,13 +585,17 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         eh_eff = float(eh) + float(rest_adj) + 0.5 * float(inj_total_elo) + 0.5 * float(form_diff)
         ea_eff = float(ea) - 0.5 * float(inj_total_elo) - 0.5 * float(form_diff)
 
-        # Win prob
+        # Win prob (raw -> compressed -> calibrated)
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
-        p_home = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
+        p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
+        try:
+            p_home = _clamp(float(platt.predict(float(p_comp))), 0.01, 0.99)
+        except Exception:
+            p_home = p_comp
 
-        # Spread
+        # Spread (use margin calibrator if trained; else fallback)
         elo_diff = (eh_eff - ea_eff) + HOME_ADV
-        model_spread_home = _clamp(-(elo_diff / ELO_PER_POINT), -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
+        model_spread_home = _clamp(_margin_model_spread_from_elo_diff(float(elo_diff)), -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
 
         # Market
         home_ml = _safe_float((oi or {}).get("home_ml"))
