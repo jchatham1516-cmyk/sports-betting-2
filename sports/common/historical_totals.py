@@ -15,10 +15,13 @@ import requests
 ODDS_API_HOST = "https://api.the-odds-api.com"
 DEFAULT_TIMEOUT = 20
 
-# OPTION C: hard cap + small sleep + cache
+# OPTION C: hard cap on total calls
 HIST_MAX_REQUESTS = int(os.getenv("ODDS_HIST_TOTALS_MAX_REQUESTS", "60"))
 HIST_SLEEP_S = float(os.getenv("ODDS_HIST_TOTALS_SLEEP_S", "0.15"))
 HIST_BOOKMAKERS = os.getenv("ODDS_HIST_TOTALS_BOOKMAKERS", "draftkings")
+
+# NEW: keep totals from going empty by sampling per day
+HIST_MAX_EVENTS_PER_DAY = int(os.getenv("ODDS_HIST_TOTALS_MAX_EVENTS_PER_DAY", "6"))
 
 
 @dataclass
@@ -31,6 +34,9 @@ class _HistBudget:
         self.used += 1
         if self.used > self.limit:
             raise RuntimeError(f"[hist_totals] Request budget exceeded: {self.used}>{self.limit}")
+
+    def remaining(self) -> int:
+        return max(0, int(self.limit) - int(self.used))
 
 
 def _get_api_key() -> Optional[str]:
@@ -53,43 +59,9 @@ def _iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _unwrap_data_list(payload: Any) -> List[dict]:
-    """
-    Odds API historical endpoints sometimes return:
-      - list[...]
-      - {"data": list[...], ...}
-    This normalizes to list[dict].
-    """
-    if payload is None:
-        return []
-    if isinstance(payload, list):
-        return [x for x in payload if isinstance(x, dict)]
-    if isinstance(payload, dict):
-        d = payload.get("data")
-        if isinstance(d, list):
-            return [x for x in d if isinstance(x, dict)]
-    return []
-
-
-def _unwrap_event_dict(payload: Any) -> Optional[dict]:
-    """
-    Odds API historical odds endpoint sometimes returns:
-      - {"data": {...event...}, ...}
-      - {...event...}
-    """
-    if payload is None:
-        return None
-    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
-        return payload["data"]
-    if isinstance(payload, dict):
-        return payload
-    return None
-
-
 def _get_json(url: str, params: dict, budget: _HistBudget) -> Any:
     if budget.hard_stop:
         return None
-
     budget.bump()
     r = requests.get(url, params=params, timeout=DEFAULT_TIMEOUT)
     _debug_headers(r)
@@ -133,10 +105,14 @@ def _save_cache(sport_key: str, payload: dict) -> None:
         pass
 
 
-def _extract_total_from_event(ev: dict) -> Optional[float]:
-    """
-    Pull a totals 'point' from an event-like dict (bookmakers->markets->outcomes->point).
-    """
+def _extract_total_from_hist_odds_payload(payload: dict) -> Optional[float]:
+    if payload is None:
+        return None
+
+    ev = payload.get("data") if isinstance(payload, dict) else None
+    if ev is None and isinstance(payload, dict):
+        ev = payload
+
     books = (ev or {}).get("bookmakers") or []
     for b in books:
         markets = b.get("markets") or []
@@ -161,12 +137,12 @@ def build_team_historical_total_lines(
     minutes_before_commence: int = 10,
 ) -> Dict[str, Dict[str, float]]:
     """
-    Returns:
-      { team_name: {"avg": float, "sd": float, "n": int} }
+    Returns: { team_name: {"avg": float, "sd": float, "n": int} }
 
     OPTION C behavior:
-      - uses cache if already computed today
-      - caps total HTTP requests (events list + per-event odds) via HIST_MAX_REQUESTS
+      - cache per day
+      - hard cap total HTTP calls
+      - sample limited events/day so results are not empty
     """
     api_key = _get_api_key()
     if not api_key:
@@ -182,28 +158,40 @@ def build_team_historical_total_lines(
     totals_by_team: Dict[str, List[float]] = defaultdict(list)
 
     for d in range(int(days_back)):
+        if budget.hard_stop or budget.remaining() <= 1:
+            break
+
         query_dt = datetime.now(timezone.utc) - timedelta(days=d)
         query_dt = query_dt.replace(hour=12, minute=0, second=0, microsecond=0)
 
-        # 1) list events for that date
+        # 1) list events (costs 1 request)
         events_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events"
         events_params = {"apiKey": api_key, "date": _iso_z(query_dt), "dateFormat": "iso"}
 
         try:
-            events_payload = _get_json(events_url, events_params, budget)
+            events = _get_json(events_url, events_params, budget)
         except Exception as e:
             print(f"[hist_totals] WARNING: events list failed for {query_dt.date()}: {e}")
             break
 
-        if events_payload is None:
+        if events is None:
             break
-
-        events = _unwrap_data_list(events_payload)
-        if not events:
+        if not isinstance(events, list) or not events:
             continue
 
-        # 2) for each event, fetch totals odds ONCE (cap enforced by budget)
+        # 2) sample events/day AND respect remaining budget
+        # Need 1 request per event odds call
+        per_day_cap = max(1, int(HIST_MAX_EVENTS_PER_DAY))
+        max_by_budget = max(0, budget.remaining() - 1)  # keep at least 1 request buffer
+        take_n = min(per_day_cap, len(events), max_by_budget)
+        if take_n <= 0:
+            break
+
+        events = events[:take_n]
+
         for ev in events:
+            if budget.hard_stop:
+                break
             try:
                 event_id = ev.get("id")
                 home = ev.get("home_team")
@@ -229,12 +217,12 @@ def build_team_historical_total_lines(
                     "bookmakers": HIST_BOOKMAKERS,
                 }
 
-                odds_payload = _get_json(odds_url, odds_params, budget)
-                if odds_payload is None:
+                payload = _get_json(odds_url, odds_params, budget)
+                if payload is None:
+                    budget.hard_stop = True
                     break
 
-                ev2 = _unwrap_event_dict(odds_payload)
-                total_line = _extract_total_from_event(ev2 or {})
+                total_line = _extract_total_from_hist_odds_payload(payload)
                 if total_line is None:
                     continue
 
@@ -242,14 +230,12 @@ def build_team_historical_total_lines(
                 totals_by_team[str(away)].append(float(total_line))
 
             except Exception as e:
-                if "Request budget exceeded" in str(e):
-                    print(f"[hist_totals] {e} -> stopping.")
+                msg = str(e)
+                if "Request budget exceeded" in msg:
+                    print(f"[hist_totals] {msg} -> stopping.")
                     budget.hard_stop = True
                     break
                 continue
-
-        if budget.hard_stop:
-            break
 
     out: Dict[str, Dict[str, float]] = {}
     for team, lines in totals_by_team.items():
