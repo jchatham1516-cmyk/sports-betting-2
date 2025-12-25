@@ -2,280 +2,206 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from sports.common.confidence import compute_confidence_score, confidence_bucket, value_tier_from_edges
-from sports.common.sanity import sanity_check
+# -------------------------------------------------------------------
+# Betting / sizing rules shared across sports
+# -------------------------------------------------------------------
 
+# Default stake sizing assumptions
+DEFAULT_UNIT_DOLLARS = 10.0
 
-# ----------------------------
-# ATS-only config
-# ----------------------------
-# Weekday: Monday=0 ... Sunday=6
-ATS_ONLY_DAYS = {
-    "nba": set(),      # e.g. {1, 3} for Tue/Thu
-    "nfl": set(),      # e.g. {6} for Sundays
-    "nhl": set(),      # e.g. {2} for Wednesdays
-}
+# Value tiers based on absolute edge (prob edge vs market)
+TIER_HIGH = 0.08
+TIER_MED = 0.04
+TIER_LOW = 0.02
+
+# If you want to be stricter/looser globally, change these:
+MIN_PLAY_EDGE_ABS = 0.02  # minimum absolute edge to consider a "PLAY"
+MIN_PRIMARY_EDGE_ABS = 0.04  # primary recommendation should usually exceed this
 
 
 @dataclass
-class Thresholds:
-    # ML thresholds (probability points)
-    ml_play: float = 0.07
-    ml_strong: float = 0.10
-
-    # ATS thresholds (spread points)
-    ats_play: float = 2.0
-    ats_strong: float = 3.0
-
-    # When ATS-only day, use ATS thresholds only
-    ats_only_play: float = 2.0
-    ats_only_strong: float = 3.0
+class BetDecision:
+    play_pass: str  # "PLAY" or "PASS"
+    bet_size: float  # dollars (or arbitrary)
+    unit_dollars: float
+    units: float
+    reason: str
 
 
-SPORT_THRESHOLDS = {
-    "nba": Thresholds(ml_play=0.07, ml_strong=0.10, ats_play=2.0, ats_strong=3.0, ats_only_play=2.0, ats_only_strong=3.0),
-    "nfl": Thresholds(ml_play=0.06, ml_strong=0.09, ats_play=1.5, ats_strong=2.5, ats_only_play=1.5, ats_only_strong=2.5),
-    "nhl": Thresholds(ml_play=0.06, ml_strong=0.09, ats_play=0.6, ats_strong=1.0, ats_only_play=0.6, ats_only_strong=1.0),
-}
+def value_tier_from_edge(abs_edge: float) -> str:
+    """
+    abs_edge is absolute probability edge (e.g., 0.06 = 6%).
+    """
+    if abs_edge is None or (isinstance(abs_edge, float) and np.isnan(abs_edge)):
+        return "UNKNOWN"
+    abs_edge = float(abs_edge)
+    if abs_edge >= TIER_HIGH:
+        return "HIGH VALUE"
+    if abs_edge >= TIER_MED:
+        return "MEDIUM VALUE"
+    if abs_edge >= TIER_LOW:
+        return "LOW VALUE"
+    return "NO EDGE"
 
 
-def american_to_prob(odds: Optional[float]) -> Optional[float]:
-    if odds is None:
-        return None
-    try:
-        o = float(odds)
-    except Exception:
-        return None
-    if np.isnan(o):
-        return None
-    if o == 0:
-        return None
-    if o > 0:
-        return 100.0 / (o + 100.0)
-    return (-o) / ((-o) + 100.0)
+def default_bet_units_from_tier(tier: str) -> float:
+    """
+    Map a tier label to default unit sizing.
+    """
+    t = (tier or "").upper()
+    if "HIGH" in t:
+        return 1.0
+    if "MED" in t:
+        return 0.5
+    if "LOW" in t:
+        return 0.25
+    return 0.0
 
 
-def _weekday_from_date_str(mmddyyyy: str) -> Optional[int]:
-    try:
-        d = datetime.strptime(mmddyyyy, "%m/%d/%Y")
-        return d.weekday()
-    except Exception:
-        return None
+def decide_play_pass(
+    abs_edge: float,
+    *,
+    min_edge: float = MIN_PLAY_EDGE_ABS,
+    unit_dollars: float = DEFAULT_UNIT_DOLLARS,
+    tier: Optional[str] = None,
+    max_units: float = 1.0,
+    reason_prefix: str = "",
+) -> BetDecision:
+    """
+    Generic play/pass + sizing.
+    - abs_edge: absolute probability edge vs market (e.g., 0.05)
+    - min_edge: minimum edge to PLAY
+    - tier: optional precomputed tier; if None we compute from abs_edge
+    - max_units: cap sizing
+    """
+    if abs_edge is None or (isinstance(abs_edge, float) and np.isnan(abs_edge)):
+        return BetDecision("PASS", 0.0, float(unit_dollars), 0.0, f"{reason_prefix}missing edge")
+
+    abs_edge = float(abs_edge)
+
+    if abs_edge < float(min_edge):
+        return BetDecision("PASS", 0.0, float(unit_dollars), 0.0, f"{reason_prefix}edge<{min_edge:.3f}")
+
+    tier = tier or value_tier_from_edge(abs_edge)
+    units = default_bet_units_from_tier(tier)
+    units = float(min(units, float(max_units)))
+
+    bet_size = float(units * float(unit_dollars))
+    return BetDecision("PLAY", bet_size, float(unit_dollars), units, f"{reason_prefix}edge={abs_edge:.3f} tier={tier}")
 
 
-def apply_bet_rules(
+def choose_primary_recommendation(
+    *,
+    ml_reco: str,
+    spread_reco: str,
+    total_reco: str,
+    ml_edge_abs: float,
+    ats_edge_vs_be: float,
+    total_edge_vs_be: float,
+) -> Tuple[str, str]:
+    """
+    Pick the strongest allowed recommendation among ML/ATS/TOTAL.
+
+    Returns:
+      (primary_recommendation, why_primary)
+    """
+    # Default = ML
+    best_edge = float(ml_edge_abs) if ml_edge_abs is not None and not np.isnan(ml_edge_abs) else -999.0
+    primary = str(ml_reco)
+    why = f"Primary=ML (abs_edge={best_edge:+.3f})" if best_edge > -900 else "Primary=ML (missing edge)"
+
+    # ATS only counts if it's an actual pick string
+    ats_ok = isinstance(spread_reco, str) and spread_reco.startswith("Model PICK ATS:")
+    ats_val = float(ats_edge_vs_be) if ats_ok and ats_edge_vs_be is not None and not np.isnan(ats_edge_vs_be) else -999.0
+    if ats_val > best_edge:
+        best_edge = ats_val
+        primary = str(spread_reco)
+        why = f"Primary=ATS (edge_vs_be={ats_val:+.3f})"
+
+    # TOTAL only counts if it's an actual pick string
+    tot_ok = isinstance(total_reco, str) and total_reco.startswith("Model PICK TOTAL:")
+    tot_val = float(total_edge_vs_be) if tot_ok and total_edge_vs_be is not None and not np.isnan(total_edge_vs_be) else -999.0
+    if tot_val > best_edge:
+        best_edge = tot_val
+        primary = str(total_reco)
+        why = f"Primary=TOTAL (edge_vs_be={tot_val:+.3f})"
+
+    return primary, why
+
+
+def add_betting_outputs(
     df: pd.DataFrame,
     *,
-    sport: str,
-    bankroll: float = 250.0,
-    unit_pct: float = 0.04,
+    unit_dollars: float = DEFAULT_UNIT_DOLLARS,
+    min_play_edge_abs: float = MIN_PLAY_EDGE_ABS,
 ) -> pd.DataFrame:
     """
-    Adds:
-      market_home_prob, edge_home/away, spread_edge_home,
-      ml_recommendation, spread_recommendation, primary_recommendation,
-      confidence, value_tier, why_bet, play_pass, bet_size, unit_dollars, units,
-      sanity_flag, sanity_reason
+    Adds standardized columns:
+      - play_pass, bet_size, unit_dollars, units
+    using the best available "edge" signal (prefers primary edge when present).
+
+    This function is intentionally conservative: if the row doesn't have a clear
+    edge metric, it will PASS.
     """
     if df is None or df.empty:
         return df
 
-    th = SPORT_THRESHOLDS.get(sport, SPORT_THRESHOLDS["nba"])
+    out = df.copy()
 
-    # Unit sizing
-    unit_dollars = round(float(bankroll) * float(unit_pct), 2)
-    if unit_dollars <= 0:
-        unit_dollars = 10.0
+    # Prefer the model's "why_primary" / "primary_recommendation" if present,
+    # but size based on the most relevant edge:
+    # - if primary is TOTAL -> use total_edge_vs_be (or total_edge_points fallback)
+    # - if primary is ATS -> use ats_edge_vs_be
+    # - else -> use abs(edge_home) (ML)
+    def _row_abs_edge(r) -> float:
+        try:
+            # if we have primary strings, route based on them
+            primary = str(r.get("primary_recommendation", ""))
+            if primary.startswith("Model PICK TOTAL:"):
+                v = r.get("total_edge_vs_be", np.nan)
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    v = r.get("total_edge_points", np.nan)
+                    # total_edge_points is in points; convert roughly to prob-edge
+                    # using a soft scale (not perfect, but avoids always PASS)
+                    if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                        v = float(abs(v)) * 0.02
+                return float(abs(v)) if v is not None else np.nan
 
-    # Determine ATS-only day (based on first row date)
-    weekday = _weekday_from_date_str(str(df.iloc[0].get("date", "")).strip())
-    ats_only = (weekday is not None) and (weekday in ATS_ONLY_DAYS.get(sport, set()))
+            if primary.startswith("Model PICK ATS:"):
+                v = r.get("ats_edge_vs_be", np.nan)
+                return float(abs(v)) if v is not None else np.nan
 
-    # Ensure columns exist
-    for col in ["home_ml", "away_ml", "home_spread", "model_home_prob", "model_spread_home"]:
-        if col not in df.columns:
-            df[col] = np.nan
+            # ML fallback
+            v = r.get("edge_home", np.nan)
+            return float(abs(v)) if v is not None else np.nan
+        except Exception:
+            return np.nan
 
-    market_home_probs = []
-    edge_homes = []
-    edge_aways = []
-    spread_edges = []
-    sanity_flags = []
-    sanity_reasons = []
+    abs_edges = out.apply(_row_abs_edge, axis=1)
 
-    ml_recs = []
-    ats_recs = []
-    primary_recs = []
-    confs = []
-    tiers = []
-    whys = []
-    play_passes = []
-    bet_sizes = []
-    units = []
+    tiers = [value_tier_from_edge(x) for x in abs_edges]
 
-    for _, r in df.iterrows():
-        model_p = float(r.get("model_home_prob")) if r.get("model_home_prob") is not None else 0.5
-        model_sp = r.get("model_spread_home")
-        model_sp = None if (model_sp is None or (isinstance(model_sp, float) and np.isnan(model_sp))) else float(model_sp)
+    decisions = [
+        decide_play_pass(
+            x,
+            min_edge=min_play_edge_abs,
+            unit_dollars=unit_dollars,
+            tier=t,
+            max_units=1.0,
+        )
+        for x, t in zip(abs_edges, tiers)
+    ]
 
-        home_ml = r.get("home_ml")
-        away_ml = r.get("away_ml")
-        home_spread = r.get("home_spread")
-        home_spread = None if (home_spread is None or (isinstance(home_spread, float) and np.isnan(home_spread))) else float(home_spread)
+    out["value_tier"] = out.get("value_tier", pd.Series(tiers, index=out.index))
+    out["play_pass"] = [d.play_pass for d in decisions]
+    out["bet_size"] = [d.bet_size for d in decisions]
+    out["unit_dollars"] = [d.unit_dollars for d in decisions]
+    out["units"] = [d.units for d in decisions]
+    out["why_bet"] = [d.reason for d in decisions]
 
-        mkt_p = american_to_prob(home_ml)
-        if mkt_p is None:
-            mkt_p = 0.5
-
-        edge_home = float(model_p - mkt_p)
-        edge_away = float(-edge_home)
-
-        # Spread edge: positive means value on HOME ATS (market less negative than model)
-        # Example: market -6.5 vs model -9.0 => spread_edge_home = +2.5
-        spread_edge_home = None
-        if home_spread is not None and model_sp is not None:
-            spread_edge_home = float(home_spread - model_sp)
-
-        ok, reason = sanity_check(sport=sport, model_spread_home=model_sp, market_spread_home=home_spread)
-        sanity_flags.append("OK" if ok else "REJECT")
-        sanity_reasons.append(reason)
-
-        # Recommendations
-        ml_rec = "No ML bet (edge too small)"
-        ats_rec = "Too close to call ATS (edge too small)"
-        primary = "NO BET — edges too small"
-
-        # If ATS-only day: ignore ML recs (still compute/display edges)
-        if ats_only:
-            ml_rec = "ATS-ONLY DAY (ML disabled)"
-
-        # ML recommendation
-        if not ats_only and ok:
-            if edge_home >= th.ml_strong:
-                ml_rec = "Model PICK: HOME ML (strong)"
-            elif edge_home >= th.ml_play:
-                ml_rec = "Model lean: HOME ML"
-            elif edge_home <= -th.ml_strong:
-                ml_rec = "Model PICK: AWAY ML (strong)"
-            elif edge_home <= -th.ml_play:
-                ml_rec = "Model lean: AWAY ML"
-
-        # ATS recommendation
-        if ok and spread_edge_home is not None:
-            # choose thresholds (ATS-only uses ats_only thresholds)
-            play_t = th.ats_only_play if ats_only else th.ats_play
-            strong_t = th.ats_only_strong if ats_only else th.ats_strong
-
-            if spread_edge_home >= strong_t:
-                ats_rec = "Model PICK ATS: HOME (strong)"
-            elif spread_edge_home >= play_t:
-                ats_rec = "Model lean ATS: HOME"
-            elif spread_edge_home <= -strong_t:
-                ats_rec = "Model PICK ATS: AWAY (strong)"
-            elif spread_edge_home <= -play_t:
-                ats_rec = "Model lean ATS: AWAY"
-
-        # Decide primary recommendation (prefer strongest signal)
-        if not ok:
-            primary = "NO BET — sanity reject"
-        else:
-            ml_strength = abs(edge_home)
-            ats_strength = abs(spread_edge_home) if spread_edge_home is not None else 0.0
-
-            if ats_only:
-                # ATS-only: primary is ATS if it qualifies
-                if spread_edge_home is not None and ats_strength >= th.ats_only_play:
-                    primary = ats_rec
-                else:
-                    primary = "NO BET — edges too small"
-            else:
-                # Normal: pick the stronger of ML vs ATS if it qualifies
-                best = None
-                if ml_strength >= th.ml_play:
-                    best = ("ML", ml_strength)
-                if spread_edge_home is not None and ats_strength >= th.ats_play:
-                    if (best is None) or (ats_strength > best[1]):
-                        best = ("ATS", ats_strength)
-
-                if best is None:
-                    primary = "NO BET — edges too small"
-                else:
-                    primary = ml_rec if best[0] == "ML" else ats_rec
-
-        # Confidence + value tier (normalized)
-        score = compute_confidence_score(sport=sport, edge_home=edge_home, spread_edge_home=spread_edge_home)
-        conf = confidence_bucket(score)
-        tier = value_tier_from_edges(edge_home=edge_home, spread_edge_home=(spread_edge_home or 0.0))
-
-        # Play/pass logic: only PLAY on HIGH confidence and qualifying edge
-        play = "PASS"
-        bet_size = 0.0
-        u = 0.0
-
-        if ok:
-            if ats_only:
-                if spread_edge_home is not None and abs(spread_edge_home) >= th.ats_only_strong and conf in {"MEDIUM", "HIGH"}:
-                    play = "PLAY"
-            else:
-                if (abs(edge_home) >= th.ml_strong or (spread_edge_home is not None and abs(spread_edge_home) >= th.ats_strong)) and conf in {"MEDIUM", "HIGH"}:
-                    play = "PLAY"
-
-        if play == "PLAY":
-            bet_size = float(unit_dollars)
-            u = 1.0
-
-        # why_bet summary
-        ats_txt = ""
-        if home_spread is not None and model_sp is not None and spread_edge_home is not None:
-            ats_txt = f" | ATS edge={spread_edge_home:+.1f}pts (mkt {home_spread:+.1f} vs model {model_sp:+.1f})"
-        why = f"ML edge={edge_home:+.3f} (model {model_p:.3f} vs mkt {mkt_p:.3f}){ats_txt}"
-        if ats_only:
-            why = "[ATS-ONLY DAY] " + why
-        if not ok and reason:
-            why = why + f" | {reason}"
-
-        # collect
-        market_home_probs.append(float(mkt_p))
-        edge_homes.append(float(edge_home))
-        edge_aways.append(float(edge_away))
-        spread_edges.append(np.nan if spread_edge_home is None else float(spread_edge_home))
-
-        ml_recs.append(ml_rec)
-        ats_recs.append(ats_rec)
-        primary_recs.append(primary)
-        confs.append(conf)
-        tiers.append(tier)
-        whys.append(why)
-        play_passes.append(play)
-        bet_sizes.append(float(bet_size))
-        units.append(float(u))
-
-    df = df.copy()
-    df["market_home_prob"] = market_home_probs
-    df["edge_home"] = edge_homes
-    df["edge_away"] = edge_aways
-    df["spread_edge_home"] = spread_edges
-    df["ml_recommendation"] = ml_recs
-    df["spread_recommendation"] = ats_recs
-    df["primary_recommendation"] = primary_recs
-    df["confidence"] = confs
-    df["value_tier"] = tiers
-    df["why_bet"] = whys
-    df["play_pass"] = play_passes
-    df["bet_size"] = bet_sizes
-    df["unit_dollars"] = float(unit_dollars)
-    df["units"] = units
-    df["sanity_flag"] = sanity_flags
-    df["sanity_reason"] = sanity_reasons
-
-    # normalize model_spread_home_norm column if your pipeline expects it
-    if "model_spread_home_norm" not in df.columns and "model_spread_home" in df.columns:
-        df["model_spread_home_norm"] = df["model_spread_home"]
-
-    return df
+    return out
