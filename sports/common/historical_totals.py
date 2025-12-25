@@ -15,9 +15,10 @@ import requests
 ODDS_API_HOST = "https://api.the-odds-api.com"
 DEFAULT_TIMEOUT = 20
 
-HIST_MAX_REQUESTS = int(os.getenv("ODDS_HIST_TOTALS_MAX_REQUESTS", "60"))  # OPTION C cap
+# OPTION C: hard cap + small sleep + cache
+HIST_MAX_REQUESTS = int(os.getenv("ODDS_HIST_TOTALS_MAX_REQUESTS", "60"))
 HIST_SLEEP_S = float(os.getenv("ODDS_HIST_TOTALS_SLEEP_S", "0.15"))
-HIST_BOOKMAKERS = os.getenv("ODDS_HIST_TOTALS_BOOKMAKERS", "draftkings")  # can be ""
+HIST_BOOKMAKERS = os.getenv("ODDS_HIST_TOTALS_BOOKMAKERS", "draftkings")
 
 
 @dataclass
@@ -52,9 +53,43 @@ def _iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _unwrap_data_list(payload: Any) -> List[dict]:
+    """
+    Odds API historical endpoints sometimes return:
+      - list[...]
+      - {"data": list[...], ...}
+    This normalizes to list[dict].
+    """
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    if isinstance(payload, dict):
+        d = payload.get("data")
+        if isinstance(d, list):
+            return [x for x in d if isinstance(x, dict)]
+    return []
+
+
+def _unwrap_event_dict(payload: Any) -> Optional[dict]:
+    """
+    Odds API historical odds endpoint sometimes returns:
+      - {"data": {...event...}, ...}
+      - {...event...}
+    """
+    if payload is None:
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+        return payload["data"]
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
 def _get_json(url: str, params: dict, budget: _HistBudget) -> Any:
     if budget.hard_stop:
         return None
+
     budget.bump()
     r = requests.get(url, params=params, timeout=DEFAULT_TIMEOUT)
     _debug_headers(r)
@@ -98,15 +133,10 @@ def _save_cache(sport_key: str, payload: dict) -> None:
         pass
 
 
-def _extract_total_from_hist_odds_payload(payload: Any) -> Optional[float]:
-    if payload is None:
-        return None
-
-    if isinstance(payload, dict):
-        ev = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    else:
-        return None
-
+def _extract_total_from_event(ev: dict) -> Optional[float]:
+    """
+    Pull a totals 'point' from an event-like dict (bookmakers->markets->outcomes->point).
+    """
     books = (ev or {}).get("bookmakers") or []
     for b in books:
         markets = b.get("markets") or []
@@ -131,10 +161,12 @@ def build_team_historical_total_lines(
     minutes_before_commence: int = 10,
 ) -> Dict[str, Dict[str, float]]:
     """
-    OPTION C:
-      - cache per UTC day
-      - hard cap HTTP calls via HIST_MAX_REQUESTS
-      - tries bookmaker filter first; if totals missing, retries once without filter (if budget allows)
+    Returns:
+      { team_name: {"avg": float, "sd": float, "n": int} }
+
+    OPTION C behavior:
+      - uses cache if already computed today
+      - caps total HTTP requests (events list + per-event odds) via HIST_MAX_REQUESTS
     """
     api_key = _get_api_key()
     if not api_key:
@@ -153,20 +185,24 @@ def build_team_historical_total_lines(
         query_dt = datetime.now(timezone.utc) - timedelta(days=d)
         query_dt = query_dt.replace(hour=12, minute=0, second=0, microsecond=0)
 
+        # 1) list events for that date
         events_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events"
         events_params = {"apiKey": api_key, "date": _iso_z(query_dt), "dateFormat": "iso"}
 
         try:
-            events = _get_json(events_url, events_params, budget)
+            events_payload = _get_json(events_url, events_params, budget)
         except Exception as e:
             print(f"[hist_totals] WARNING: events list failed for {query_dt.date()}: {e}")
             break
 
-        if events is None:
+        if events_payload is None:
             break
-        if not isinstance(events, list) or not events:
+
+        events = _unwrap_data_list(events_payload)
+        if not events:
             continue
 
+        # 2) for each event, fetch totals odds ONCE (cap enforced by budget)
         for ev in events:
             try:
                 event_id = ev.get("id")
@@ -180,38 +216,25 @@ def build_team_historical_total_lines(
                     cdt = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
                 except Exception:
                     cdt = query_dt
-
                 hist_dt = cdt - timedelta(minutes=int(minutes_before_commence))
 
                 odds_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events/{event_id}/odds"
+                odds_params = {
+                    "apiKey": api_key,
+                    "date": _iso_z(hist_dt),
+                    "regions": "us",
+                    "markets": "totals",
+                    "oddsFormat": "american",
+                    "dateFormat": "iso",
+                    "bookmakers": HIST_BOOKMAKERS,
+                }
 
-                def _odds_params(bookmakers: Optional[str]) -> dict:
-                    p = {
-                        "apiKey": api_key,
-                        "date": _iso_z(hist_dt),
-                        "regions": "us",
-                        "markets": "totals",
-                        "oddsFormat": "american",
-                        "dateFormat": "iso",
-                    }
-                    if bookmakers:
-                        p["bookmakers"] = bookmakers
-                    return p
-
-                # Try with bookmaker filter first (cheaper payload)
-                payload = _get_json(odds_url, _odds_params(HIST_BOOKMAKERS or None), budget)
-                if payload is None:
+                odds_payload = _get_json(odds_url, odds_params, budget)
+                if odds_payload is None:
                     break
 
-                total_line = _extract_total_from_hist_odds_payload(payload)
-
-                # If missing and we still have budget, retry once with NO bookmaker filter
-                if total_line is None and not budget.hard_stop and (budget.used + 1) <= budget.limit:
-                    payload2 = _get_json(odds_url, _odds_params(None), budget)
-                    if payload2 is None:
-                        break
-                    total_line = _extract_total_from_hist_odds_payload(payload2)
-
+                ev2 = _unwrap_event_dict(odds_payload)
+                total_line = _extract_total_from_event(ev2 or {})
                 if total_line is None:
                     continue
 
