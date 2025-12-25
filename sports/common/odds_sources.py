@@ -4,7 +4,7 @@ from __future__ import annotations
 import csv
 import os
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -189,9 +189,7 @@ def load_odds_for_date_from_api(
     }
 
     data = _odds_api_get(url, params=params)
-    if data is None:
-        return {}
-    if not data:
+    if data is None or not data:
         return {}
 
     out: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -214,7 +212,6 @@ def load_odds_for_date_from_api(
             "over_price": over_price,
             "under_price": under_price,
         }
-
     return out
 
 
@@ -233,8 +230,6 @@ def load_odds_for_date_from_csv(csv_path: str) -> Dict[Tuple[str, str], Dict[str
 
             def sf(x):
                 try:
-                    if x is None or x == "":
-                        return None
                     return float(x)
                 except Exception:
                     return None
@@ -251,33 +246,35 @@ def load_odds_for_date_from_csv(csv_path: str) -> Dict[Tuple[str, str], Dict[str
     return out
 
 
-# -------------------------------------------------------------------
-# Compatibility wrappers (your runner imports THESE names)
-# -------------------------------------------------------------------
+# ----------------------------
+# COMPAT WRAPPERS (what your runner imports)
+# ----------------------------
 def fetch_odds_for_date_from_odds_api(
     game_date_str: str,
     *,
     sport_key: str,
-    days_padding: int = 2,
+    regions: str = "us",
+    markets: str = "h2h,spreads,totals",
+    odds_format: str = "american",
+    date_format: str = "iso",
 ) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], Dict]:
     """
-    Returns (odds_dict, spreads_dict).
-    spreads_dict is kept only for backward compatibility; odds_dict contains spreads/totals inside each row.
+    Runner expects: (odds_dict, spreads_dict)
+    We store spreads inside odds_dict; spreads_dict returned empty for backwards compat.
     """
-    try:
-        target = datetime.strptime(game_date_str, "%m/%d/%Y")
-    except Exception:
-        # fallback: today UTC
-        target = datetime.utcnow()
-
-    # wide window so UTC doesn’t hide games
-    commence_from = (target - timedelta(days=int(days_padding))).replace(tzinfo=timezone.utc)
-    commence_to = (target + timedelta(days=int(days_padding) + 1)).replace(tzinfo=timezone.utc)
+    dt = datetime.strptime(game_date_str, "%m/%d/%Y")
+    # Wide window to avoid timezone “no games found”
+    commence_from = dt.replace(tzinfo=timezone.utc) - timedelta(days=1)
+    commence_to = dt.replace(tzinfo=timezone.utc) + timedelta(days=2)
 
     odds_dict = load_odds_for_date_from_api(
         sport_key=sport_key,
         commence_from=commence_from,
         commence_to=commence_to,
+        regions=regions,
+        markets=markets,
+        odds_format=odds_format,
+        date_format=date_format,
     )
     return odds_dict, {}
 
@@ -286,11 +283,12 @@ def fetch_odds_for_date_from_csv(
     game_date_str: str,
     *,
     sport: str,
+    odds_folder: str = "odds",
 ) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], Dict]:
     """
-    Your runner calls this with (game_date_str, sport=...).
-    We map that to odds/odds_MM-DD-YYYY.csv.
+    Looks for odds/odds_MM-DD-YYYY.csv
     """
-    csv_path = f"odds/odds_{str(game_date_str).replace('/', '-')}.csv"
-    odds_dict = load_odds_for_date_from_csv(csv_path=csv_path)
+    mmddyyyy = game_date_str.replace("/", "-")
+    csv_path = os.path.join(odds_folder, f"odds_{mmddyyyy}.csv")
+    odds_dict = load_odds_for_date_from_csv(csv_path)
     return odds_dict, {}
