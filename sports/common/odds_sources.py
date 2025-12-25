@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-
 SPORT_TO_ODDS_KEY: Dict[str, str] = {
     "nba": "basketball_nba",
     "nfl": "americanfootball_nfl",
@@ -19,6 +18,7 @@ SPORT_TO_ODDS_KEY: Dict[str, str] = {
 ODDS_API_HOST = "https://api.the-odds-api.com"
 DEFAULT_TIMEOUT = 20
 
+# ---- Budget / safety knobs ----
 ODDS_MAX_REQUESTS = int(os.getenv("ODDS_MAX_REQUESTS", "40"))
 ODDS_MIN_REMAINING = int(os.getenv("ODDS_MIN_REMAINING", "10"))
 ODDS_HARD_STOP_ON_401 = os.getenv("ODDS_HARD_STOP_ON_401", "1") == "1"
@@ -65,6 +65,12 @@ def _remaining_credits(r: requests.Response) -> Optional[int]:
 
 
 def _odds_api_get(url: str, params: dict, *, timeout: int = DEFAULT_TIMEOUT) -> Optional[List[Dict[str, Any]]]:
+    """
+    Returns:
+      - list[...] on success
+      - [] if valid but empty
+      - None if we should STOP this run (401 or hard stop)
+    """
     if _BUDGET.hard_stopped:
         return None
 
@@ -73,7 +79,7 @@ def _odds_api_get(url: str, params: dict, *, timeout: int = DEFAULT_TIMEOUT) -> 
     _debug_headers(r)
 
     if r.status_code == 401:
-        print("[odds_api] WARNING: 401 unauthorized (often means credits exhausted).")
+        print("[odds_api] WARNING: 401 unauthorized (often credits exhausted).")
         if ODDS_HARD_STOP_ON_401:
             _BUDGET.hard_stopped = True
             print("[odds_api] HARD STOP enabled -> no more Odds API calls this run.")
@@ -212,6 +218,7 @@ def load_odds_for_date_from_api(
             "over_price": over_price,
             "under_price": under_price,
         }
+
     return out
 
 
@@ -230,6 +237,8 @@ def load_odds_for_date_from_csv(csv_path: str) -> Dict[Tuple[str, str], Dict[str
 
             def sf(x):
                 try:
+                    if x is None or str(x).strip() == "":
+                        return None
                     return float(x)
                 except Exception:
                     return None
@@ -246,49 +255,48 @@ def load_odds_for_date_from_csv(csv_path: str) -> Dict[Tuple[str, str], Dict[str
     return out
 
 
-# ----------------------------
+# -------------------------------------------------------------------
 # COMPAT WRAPPERS (what your runner imports)
-# ----------------------------
+# -------------------------------------------------------------------
 def fetch_odds_for_date_from_odds_api(
     game_date_str: str,
     *,
     sport_key: str,
-    regions: str = "us",
-    markets: str = "h2h,spreads,totals",
-    odds_format: str = "american",
-    date_format: str = "iso",
+    days_padding: int = 1,
 ) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], Dict]:
     """
-    Runner expects: (odds_dict, spreads_dict)
-    We store spreads inside odds_dict; spreads_dict returned empty for backwards compat.
+    Returns: (odds_dict, spreads_dict)
+    spreads_dict kept for backwards-compat; we return {} because your models read from odds_dict now.
     """
-    dt = datetime.strptime(game_date_str, "%m/%d/%Y")
-    # Wide window to avoid timezone “no games found”
-    commence_from = dt.replace(tzinfo=timezone.utc) - timedelta(days=1)
-    commence_to = dt.replace(tzinfo=timezone.utc) + timedelta(days=2)
+    # Parse MM/DD/YYYY
+    d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
 
-    odds_dict = load_odds_for_date_from_api(
+    # Window: whole day UTC + padding (prevents “no games found”)
+    start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc) - timedelta(days=int(days_padding))
+    end = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc) + timedelta(days=int(days_padding))
+
+    odds = load_odds_for_date_from_api(
         sport_key=sport_key,
-        commence_from=commence_from,
-        commence_to=commence_to,
-        regions=regions,
-        markets=markets,
-        odds_format=odds_format,
-        date_format=date_format,
+        commence_from=start,
+        commence_to=end,
+        regions="us",
+        markets="h2h,spreads,totals",
+        odds_format="american",
+        date_format="iso",
     )
-    return odds_dict, {}
+    return odds, {}
 
 
 def fetch_odds_for_date_from_csv(
     game_date_str: str,
     *,
     sport: str,
-    odds_folder: str = "odds",
 ) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], Dict]:
     """
-    Looks for odds/odds_MM-DD-YYYY.csv
+    Looks for: odds/odds_MM-DD-YYYY.csv
     """
-    mmddyyyy = game_date_str.replace("/", "-")
-    csv_path = os.path.join(odds_folder, f"odds_{mmddyyyy}.csv")
-    odds_dict = load_odds_for_date_from_csv(csv_path)
-    return odds_dict, {}
+    d = datetime.strptime(game_date_str, "%m/%d/%Y").strftime("%m-%d-%Y")
+    csv_path = os.path.join("odds", f"odds_{d}.csv")
+    odds = load_odds_for_date_from_csv(csv_path)
+    print(f"[odds_csv] games found: {len(odds)} (path={csv_path})")
+    return odds, {}
