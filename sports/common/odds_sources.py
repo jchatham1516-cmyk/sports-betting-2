@@ -18,7 +18,11 @@ SPORT_TO_ODDS_KEY = {
     "nhl": "icehockey_nhl",
 }
 
+import os, hashlib
 
+k = os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY") or os.getenv("ODDSAPI_KEY") or ""
+print("[DEBUG] key_present:", bool(k), "len:", len(k))
+print("[DEBUG] key_fingerprint:", hashlib.sha256(k.encode()).hexdigest()[:10])
 def get_odds_api_key() -> str:
     k = (os.environ.get("ODDS_API_KEY") or "").strip()
     print("[odds_api] key present:", bool(k))
