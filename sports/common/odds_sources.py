@@ -250,52 +250,45 @@ def load_odds_for_date_from_csv(csv_path: str) -> Dict[Tuple[str, str], Dict[str
     return out
 
 
-# -------------------------------------------------------------------
-# BACKWARDS-COMPAT WRAPPERS (what your runner imports)
-# -------------------------------------------------------------------
+# ----------------------------
+# Compatibility wrappers (what your runner imports)
+# ----------------------------
 def fetch_odds_for_date_from_odds_api(
     game_date_str: str,
     *,
     sport_key: str,
-    days_padding: int = 1,
-) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], Dict]:
+    regions: str = "us",
+    markets: str = "h2h,spreads,totals",
+    days_padding: int = 1,  # accept it even if caller passes it
+) -> Tuple[dict, dict]:
     """
-    Backwards compatible signature.
-    Returns (odds_dict, spreads_dict). spreads_dict not used anymore -> {}.
-    days_padding widens the commence window so you don't miss games due to UTC cutoffs.
+    Returns (odds_dict, spreads_dict). spreads_dict is kept for legacy; we just return {}.
     """
     try:
-        dt = datetime.strptime(game_date_str, "%m/%d/%Y")
+        d = datetime.strptime(game_date_str, "%m/%d/%Y").date()
     except Exception:
-        dt = datetime.utcnow()
+        d = datetime.now(timezone.utc).date()
 
-    # Window is [date - pad, date + pad] in UTC
-    start = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc) - timedelta(days=int(days_padding))
-    end = start + timedelta(days=1 + 2 * int(days_padding))
+    start = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc) - timedelta(days=int(days_padding))
+    end = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc) + timedelta(days=int(days_padding))
 
-    odds = load_odds_for_date_from_api(
+    odds_dict = load_odds_for_date_from_api(
         sport_key=sport_key,
         commence_from=start,
         commence_to=end,
+        regions=regions,
+        markets=markets,
     )
-    return odds, {}
+    return odds_dict, {}
 
 
 def fetch_odds_for_date_from_csv(
     game_date_str: str,
     *,
     sport: str,
-    odds_dir: str = "odds",
-) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], Dict]:
-    """
-    Backwards compatible signature.
-    Expects odds/odds_MM-DD-YYYY.csv
-    """
-    try:
-        mmddyyyy = datetime.strptime(game_date_str, "%m/%d/%Y").strftime("%m-%d-%Y")
-    except Exception:
-        mmddyyyy = datetime.utcnow().strftime("%m-%d-%Y")
-
-    csv_path = os.path.join(odds_dir, f"odds_{mmddyyyy}.csv")
-    odds = load_odds_for_date_from_csv(csv_path)
-    return odds, {}
+) -> Tuple[dict, dict]:
+    mmddyyyy = str(game_date_str).replace("/", "-")
+    csv_path = os.path.join("odds", f"odds_{mmddyyyy}.csv")
+    odds_dict = load_odds_for_date_from_csv(csv_path)
+    print(f"[odds_csv] games found: {len(odds_dict)}")
+    return odds_dict, {}
