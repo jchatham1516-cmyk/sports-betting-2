@@ -53,7 +53,7 @@ def main(argv=None):
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
     parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
-    
+
     args = parser.parse_args(argv)
 
     # Date
@@ -64,40 +64,52 @@ def main(argv=None):
 
     print(f"Running {args.sport.upper()} model for {game_date}...")
 
-       # Odds (API first, fallback CSV)
-    odds_dict, spreads_dict = {}, {}
+    # -------------------------
+    # Odds (API first, fallback CSV)
+    # -------------------------
+    odds_dict = {}
+    spreads_dict = {}  # kept for backward compatibility (some models accept it)
 
+    # 1) Odds API
     try:
-        odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
-            game_date,
+        odds_dict = fetch_odds_for_date_from_odds_api(
             sport_key=SPORT_TO_ODDS_KEY[args.sport],
+            game_date_str=game_date,
+            days_padding=2,  # ✅ critical: avoids missing games due to UTC timing
         )
 
-        if odds_dict:
-            print(f"[odds_api] Loaded odds for {len(odds_dict)} games.")
-        else:
+        print(f"[odds_api] odds_dict games found: {len(odds_dict)}")
+        if not odds_dict:
             print("[odds_api] No odds returned; will try CSV fallback.")
 
     except Exception as e:
         print(f"[odds_api] WARNING: failed to load odds from API: {e}")
+        odds_dict = {}
 
+    # 2) CSV fallback
     if not odds_dict:
         try:
-            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(
-                game_date,
-                sport=args.sport,
-            )
+            csv_path = f"odds/odds_{game_date.replace('/', '-')}.csv"
+            odds_dict = fetch_odds_for_date_from_csv(csv_path=csv_path)
+            print(f"[odds_csv] loaded from {csv_path} | games={len(odds_dict)}")
         except Exception as e:
             print(f"[odds_csv] WARNING: failed to load odds from CSV: {e}")
-            odds_dict, spreads_dict = {}, {}
+            odds_dict = {}
 
+    # -------------------------
     # Run sport model
+    # -------------------------
     if args.sport == "nba":
         api_key = get_bdl_api_key()
         game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
         season_year = season_start_year_for_date(game_date_obj)
         end_date_iso = game_date_obj.strftime("%Y-%m-%d")
-        stats_df = fetch_team_ratings_bdl(season_year=season_year, end_date_iso=end_date_iso, api_key=api_key)
+
+        stats_df = fetch_team_ratings_bdl(
+            season_year=season_year,
+            end_date_iso=end_date_iso,
+            api_key=api_key,
+        )
 
         results_df = run_nba_daily(
             game_date=game_date,
@@ -109,7 +121,6 @@ def main(argv=None):
         )
 
     elif args.sport == "nfl":
-        # NFL model fetches scores + updates Elo internally; we pass odds for today
         results_df = run_daily_nfl(game_date, odds_dict=odds_dict)
 
     elif args.sport == "nhl":
@@ -118,68 +129,82 @@ def main(argv=None):
     else:
         raise RuntimeError("Unsupported sport")
 
-    if results_df is None or results_df.empty:
-        print("[model] No games returned.")
-        return 0
+    if results_df is None:
+        results_df = pd.DataFrame()
 
-    # Recommendations
-    results_df, debug_df = add_recommendations_to_df(
-        results_df,
-        thresholds=Thresholds(
-            ml_edge_strong=0.06,
-            ml_edge_lean=0.035,
-            ats_edge_strong_pts=3.0,
-            ats_edge_lean_pts=1.5,
-            conf_high=0.18,
-            conf_med=0.10,
-        ),
-        model_spread_home_col="model_spread_home" if "model_spread_home" in results_df.columns else None,
-        model_margin_home_col=None,
-    )
+    print(f"[model] rows returned: {len(results_df)}")
 
-    # Play/pass + sizing
-    play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
+    # -------------------------
+    # Recommendations (only if we have rows)
+    # -------------------------
+    debug_df = pd.DataFrame()
 
-    results_df["play_pass"] = results_df.apply(
-        lambda r: play_pass_rule(
-            r,
-            require_pick=args.play_require_pick,
-            require_value_tier=args.play_value_tier,
-            min_confidence=args.play_min_conf,
-            max_abs_moneyline=play_max_abs_ml,
-        ),
-        axis=1,
-    )
+    if not results_df.empty:
+        results_df, debug_df = add_recommendations_to_df(
+            results_df,
+            thresholds=Thresholds(
+                ml_edge_strong=0.06,
+                ml_edge_lean=0.035,
+                ats_edge_strong_pts=3.0,
+                ats_edge_lean_pts=1.5,
+                conf_high=0.18,
+                conf_med=0.10,
+            ),
+            model_spread_home_col="model_spread_home" if "model_spread_home" in results_df.columns else None,
+            model_margin_home_col=None,
+        )
 
-    results_df["bet_size"] = results_df.apply(
-        lambda r: compute_bet_size(
-            r,
-            args.bankroll,
-            sizing_mode=args.sizing,
-            flat_pct=args.flat_pct,
-            kelly_mult=args.kelly_mult,
-            kelly_max_pct=args.kelly_max_pct,
-        ),
-        axis=1,
-    )
+        # Play/pass + sizing
+        play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
 
-    unit_dollars = float(args.bankroll) * UNIT_PCT
-    results_df["unit_dollars"] = unit_dollars
-    results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
+        results_df["play_pass"] = results_df.apply(
+            lambda r: play_pass_rule(
+                r,
+                require_pick=args.play_require_pick,
+                require_value_tier=args.play_value_tier,
+                min_confidence=args.play_min_conf,
+                max_abs_moneyline=play_max_abs_ml,
+            ),
+            axis=1,
+        )
 
+        results_df["bet_size"] = results_df.apply(
+            lambda r: compute_bet_size(
+                r,
+                args.bankroll,
+                sizing_mode=args.sizing,
+                flat_pct=args.flat_pct,
+                kelly_mult=args.kelly_mult,
+                kelly_max_pct=args.kelly_max_pct,
+            ),
+            axis=1,
+        )
+
+        unit_dollars = float(args.bankroll) * UNIT_PCT
+        results_df["unit_dollars"] = unit_dollars
+        results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
+
+    # -------------------------
+    # ALWAYS SAVE OUTPUT (even if empty)
+    # -------------------------
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
+    print(f"[save] writing {len(results_df)} rows -> {out_name}")
     results_df.to_csv(out_name, index=False)
 
     if debug_df is not None and not debug_df.empty:
         dbg_name = f"results/debug_why_ml_vs_ats_{args.sport}_{game_date.replace('/', '-')}.csv"
         debug_df.to_csv(dbg_name, index=False)
+        print(f"[save] wrote debug -> {dbg_name}")
 
-    with pd.option_context("display.max_columns", None):
-        print(results_df)
+    if not results_df.empty:
+        with pd.option_context("display.max_columns", None):
+            print(results_df.head(25))
+    else:
+        print("[model] No games returned (still saved an empty CSV for visibility).")
 
     print(f"\nSaved predictions to {out_name}")
-    print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
+    print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}%")
     return 0
 
 
