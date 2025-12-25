@@ -23,28 +23,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Ensure results dir exists
+        run: |
+          mkdir -p results
+          echo "[debug] pwd=$(pwd)"
+          echo "[debug] repo contents:"
+          ls -la
+          echo "[debug] results contents BEFORE runs:"
+          ls -la results || true
+
       - name: Run NBA
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
         run: |
           python current_of_sports_betting_algorithm.py --sport nba
+          echo "[debug] results contents AFTER NBA:"
+          ls -la results || true
 
       - name: Run NFL
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
           python current_of_sports_betting_algorithm.py --sport nfl
+          echo "[debug] results contents AFTER NFL:"
+          ls -la results || true
 
       - name: Run NHL
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
         run: |
           python current_of_sports_betting_algorithm.py --sport nhl
+          echo "[debug] results contents AFTER NHL:"
+          ls -la results || true
 
       - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: predictions
-          path: results/
-          if-no-files-found: ignore
+          path: results/**
+          if-no-files-found: warn
