@@ -46,41 +46,36 @@ def main(argv=None):
     parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
-    parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
+
+    # IMPORTANT: keep this name because your logs show you used it before
+    parser.add_argument("--days_padding", type=int, default=1, help="Padding days around date for odds window (0-2 recommended).")
+
+    parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run (NBA only).")
 
     args = parser.parse_args(argv)
 
     # Date
-    if args.date is None:
-        game_date = datetime.utcnow().strftime("%m/%d/%Y")
-    else:
-        game_date = args.date
-
+    game_date = args.date or datetime.utcnow().strftime("%m/%d/%Y")
     print(f"Running {args.sport.upper()} model for {game_date}...")
 
     # Odds (API first, fallback CSV)
     odds_dict, spreads_dict = {}, {}
-
     try:
         odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
             game_date,
             sport_key=SPORT_TO_ODDS_KEY[args.sport],
-            days_padding=2,  # ✅ key fix
+            days_padding=int(args.days_padding),
         )
-        print(f"[odds_api] games found: {len(odds_dict)}")
-        if not odds_dict:
+        if odds_dict:
+            print(f"[odds_api] Loaded odds for {len(odds_dict)} games.")
+        else:
             print("[odds_api] No odds returned; will try CSV fallback.")
     except Exception as e:
         print(f"[odds_api] WARNING: failed to load odds from API: {e}")
-        odds_dict, spreads_dict = {}, {}
 
     if not odds_dict:
         try:
-            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(
-                game_date,
-                sport=args.sport,
-            )
-            print(f"[odds_csv] games found: {len(odds_dict)}")
+            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date, sport=args.sport)
         except Exception as e:
             print(f"[odds_csv] WARNING: failed to load odds from CSV: {e}")
             odds_dict, spreads_dict = {}, {}
@@ -101,22 +96,24 @@ def main(argv=None):
             api_key=api_key,
             force_full_rebuild=args.force_full_rebuild,
         )
+
     elif args.sport == "nfl":
         results_df = run_daily_nfl(game_date, odds_dict=odds_dict)
+
     elif args.sport == "nhl":
         results_df = run_daily_nhl(game_date, odds_dict=odds_dict)
+
     else:
         raise RuntimeError("Unsupported sport")
 
     if results_df is None:
-        results_df = pd.DataFrame()
+        print("[model] No dataframe returned.")
+        return 0
 
     print(f"[model] rows returned: {len(results_df)}")
 
-    debug_df = pd.DataFrame()
-
+    # Recommendations
     if not results_df.empty:
-        # Recommendations
         results_df, debug_df = add_recommendations_to_df(
             results_df,
             thresholds=Thresholds(
@@ -130,10 +127,13 @@ def main(argv=None):
             model_spread_home_col="model_spread_home" if "model_spread_home" in results_df.columns else None,
             model_margin_home_col=None,
         )
+    else:
+        debug_df = pd.DataFrame()
 
-        # Play/pass + sizing
-        play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
+    # Play/pass + sizing
+    play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
 
+    if not results_df.empty:
         results_df["play_pass"] = results_df.apply(
             lambda r: play_pass_rule(
                 r,
@@ -160,19 +160,27 @@ def main(argv=None):
         unit_dollars = float(args.bankroll) * UNIT_PCT
         results_df["unit_dollars"] = unit_dollars
         results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
+    else:
+        unit_dollars = float(args.bankroll) * UNIT_PCT
 
-    # ALWAYS SAVE (even empty)
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
-    print(f"[save] writing {len(results_df)} rows -> {out_name}")
     results_df.to_csv(out_name, index=False)
+    print(f"[save] writing {len(results_df)} rows -> {out_name}")
 
     if debug_df is not None and not debug_df.empty:
         dbg_name = f"results/debug_why_ml_vs_ats_{args.sport}_{game_date.replace('/', '-')}.csv"
         debug_df.to_csv(dbg_name, index=False)
-        print(f"[save] wrote debug -> {dbg_name}")
+
+    # Helpful for GitHub Actions logs
+    try:
+        print("[debug] results dir contents:")
+        os.system("ls -la results || true")
+    except Exception:
+        pass
 
     print(f"\nSaved predictions to {out_name}")
+    print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
     return 0
 
 
