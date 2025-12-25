@@ -1,10 +1,4 @@
 # current_of_sports_betting_algorithm.py
-#
-# Thin runner:
-# - Loads odds (Odds API with CSV fallback)
-# - Runs per-sport model (NBA: BallDontLie; NFL/NHL: Elo from Odds API scores)
-# - Applies recommendations + play/pass + sizing
-# - Saves results to results/predictions_<sport>_<MM-DD-YYYY>.csv
 
 import os
 import argparse
@@ -64,52 +58,40 @@ def main(argv=None):
 
     print(f"Running {args.sport.upper()} model for {game_date}...")
 
-    # -------------------------
     # Odds (API first, fallback CSV)
-    # -------------------------
-    odds_dict = {}
-    spreads_dict = {}  # kept for backward compatibility (some models accept it)
+    odds_dict, spreads_dict = {}, {}
 
-    # 1) Odds API
     try:
-        odds_dict = fetch_odds_for_date_from_odds_api(
+        odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
+            game_date,
             sport_key=SPORT_TO_ODDS_KEY[args.sport],
-            game_date_str=game_date,
-            days_padding=2,  # ✅ critical: avoids missing games due to UTC timing
+            days_padding=2,  # ✅ key fix
         )
-
-        print(f"[odds_api] odds_dict games found: {len(odds_dict)}")
+        print(f"[odds_api] games found: {len(odds_dict)}")
         if not odds_dict:
             print("[odds_api] No odds returned; will try CSV fallback.")
-
     except Exception as e:
         print(f"[odds_api] WARNING: failed to load odds from API: {e}")
-        odds_dict = {}
+        odds_dict, spreads_dict = {}, {}
 
-    # 2) CSV fallback
     if not odds_dict:
         try:
-            csv_path = f"odds/odds_{game_date.replace('/', '-')}.csv"
-            odds_dict = fetch_odds_for_date_from_csv(csv_path=csv_path)
-            print(f"[odds_csv] loaded from {csv_path} | games={len(odds_dict)}")
+            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(
+                game_date,
+                sport=args.sport,
+            )
+            print(f"[odds_csv] games found: {len(odds_dict)}")
         except Exception as e:
             print(f"[odds_csv] WARNING: failed to load odds from CSV: {e}")
-            odds_dict = {}
+            odds_dict, spreads_dict = {}, {}
 
-    # -------------------------
     # Run sport model
-    # -------------------------
     if args.sport == "nba":
         api_key = get_bdl_api_key()
         game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
         season_year = season_start_year_for_date(game_date_obj)
         end_date_iso = game_date_obj.strftime("%Y-%m-%d")
-
-        stats_df = fetch_team_ratings_bdl(
-            season_year=season_year,
-            end_date_iso=end_date_iso,
-            api_key=api_key,
-        )
+        stats_df = fetch_team_ratings_bdl(season_year=season_year, end_date_iso=end_date_iso, api_key=api_key)
 
         results_df = run_nba_daily(
             game_date=game_date,
@@ -119,13 +101,10 @@ def main(argv=None):
             api_key=api_key,
             force_full_rebuild=args.force_full_rebuild,
         )
-
     elif args.sport == "nfl":
         results_df = run_daily_nfl(game_date, odds_dict=odds_dict)
-
     elif args.sport == "nhl":
         results_df = run_daily_nhl(game_date, odds_dict=odds_dict)
-
     else:
         raise RuntimeError("Unsupported sport")
 
@@ -134,12 +113,10 @@ def main(argv=None):
 
     print(f"[model] rows returned: {len(results_df)}")
 
-    # -------------------------
-    # Recommendations (only if we have rows)
-    # -------------------------
     debug_df = pd.DataFrame()
 
     if not results_df.empty:
+        # Recommendations
         results_df, debug_df = add_recommendations_to_df(
             results_df,
             thresholds=Thresholds(
@@ -184,9 +161,7 @@ def main(argv=None):
         results_df["unit_dollars"] = unit_dollars
         results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
 
-    # -------------------------
-    # ALWAYS SAVE OUTPUT (even if empty)
-    # -------------------------
+    # ALWAYS SAVE (even empty)
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
     print(f"[save] writing {len(results_df)} rows -> {out_name}")
@@ -197,14 +172,7 @@ def main(argv=None):
         debug_df.to_csv(dbg_name, index=False)
         print(f"[save] wrote debug -> {dbg_name}")
 
-    if not results_df.empty:
-        with pd.option_context("display.max_columns", None):
-            print(results_df.head(25))
-    else:
-        print("[model] No games returned (still saved an empty CSV for visibility).")
-
     print(f"\nSaved predictions to {out_name}")
-    print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}%")
     return 0
 
 
