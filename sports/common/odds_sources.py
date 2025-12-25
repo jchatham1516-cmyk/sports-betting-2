@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
-# Map your CLI sport names -> Odds API keys
 SPORT_TO_ODDS_KEY: Dict[str, str] = {
     "nba": "basketball_nba",
     "nfl": "americanfootball_nfl",
@@ -20,12 +19,8 @@ SPORT_TO_ODDS_KEY: Dict[str, str] = {
 ODDS_API_HOST = "https://api.the-odds-api.com"
 DEFAULT_TIMEOUT = 20
 
-# ---- Budget / safety knobs ----
-# Max number of Odds API HTTP calls allowed from THIS FILE per run
 ODDS_MAX_REQUESTS = int(os.getenv("ODDS_MAX_REQUESTS", "40"))
-# If remaining credits drop below this, stop calling API
 ODDS_MIN_REMAINING = int(os.getenv("ODDS_MIN_REMAINING", "10"))
-# If we hit 401 once, stop further calls this run
 ODDS_HARD_STOP_ON_401 = os.getenv("ODDS_HARD_STOP_ON_401", "1") == "1"
 
 
@@ -33,7 +28,7 @@ class _OddsBudget:
     def __init__(self, limit: int):
         self.limit = int(limit)
         self.count = 0
-        self.hard_stopped = False  # e.g., after a 401
+        self.hard_stopped = False
 
     def bump(self):
         self.count += 1
@@ -70,12 +65,6 @@ def _remaining_credits(r: requests.Response) -> Optional[int]:
 
 
 def _odds_api_get(url: str, params: dict, *, timeout: int = DEFAULT_TIMEOUT) -> Optional[List[Dict[str, Any]]]:
-    """
-    Returns:
-      - list[...] on success
-      - [] if valid but empty
-      - None if we should STOP this run (401 or low credits)
-    """
     if _BUDGET.hard_stopped:
         return None
 
@@ -83,7 +72,6 @@ def _odds_api_get(url: str, params: dict, *, timeout: int = DEFAULT_TIMEOUT) -> 
     r = requests.get(url, params=params, timeout=timeout)
     _debug_headers(r)
 
-    # Hard stop on auth/credits
     if r.status_code == 401:
         print("[odds_api] WARNING: 401 unauthorized (often means credits exhausted).")
         if ODDS_HARD_STOP_ON_401:
@@ -92,7 +80,6 @@ def _odds_api_get(url: str, params: dict, *, timeout: int = DEFAULT_TIMEOUT) -> 
             return None
         return []
 
-    # Soft stop on low remaining
     rem = _remaining_credits(r)
     if rem is not None and rem < ODDS_MIN_REMAINING:
         print(f"[odds_api] WARNING: low remaining credits ({rem}<{ODDS_MIN_REMAINING}). Stopping further calls.")
@@ -115,9 +102,6 @@ def _iso_z(dt: datetime) -> str:
 
 
 def _extract_best_bookmaker_market(event: dict, market_key: str) -> Optional[dict]:
-    """
-    Picks the first bookmaker that has the desired market.
-    """
     books = event.get("bookmakers") or []
     for b in books:
         markets = b.get("markets") or []
@@ -188,11 +172,6 @@ def load_odds_for_date_from_api(
     odds_format: str = "american",
     date_format: str = "iso",
 ) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    """
-    Returns odds_dict keyed by (home_team, away_team)
-    values include:
-      home_ml, away_ml, home_spread, spread_price, total_points, over_price, under_price
-    """
     api_key = _get_api_key()
     if not api_key:
         print("[odds_api] WARNING: ODDS_API_KEY missing.")
@@ -210,9 +189,7 @@ def load_odds_for_date_from_api(
     }
 
     data = _odds_api_get(url, params=params)
-    if data is None:
-        return {}
-    if not data:
+    if data is None or not data:
         return {}
 
     out: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -240,29 +217,26 @@ def load_odds_for_date_from_api(
 
 
 def load_odds_for_date_from_csv(csv_path: str) -> Dict[Tuple[str, str], Dict[str, Any]]:
-    """
-    CSV columns expected (minimum):
-      date, home, away, home_ml, away_ml, home_spread
-    Optional:
-      spread_price, total_points, over_price, under_price
-    """
     if not csv_path or not os.path.exists(csv_path):
         return {}
 
     out: Dict[Tuple[str, str], Dict[str, Any]] = {}
     with open(csv_path, "r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+
+        def sf(x):
+            try:
+                if x is None or str(x).strip() == "":
+                    return None
+                return float(x)
+            except Exception:
+                return None
+
         for row in reader:
             home = (row.get("home") or "").strip()
             away = (row.get("away") or "").strip()
             if not home or not away:
                 continue
-
-            def sf(x):
-                try:
-                    return float(x)
-                except Exception:
-                    return None
 
             out[(home, away)] = {
                 "home_ml": sf(row.get("home_ml")),
@@ -277,45 +251,34 @@ def load_odds_for_date_from_csv(csv_path: str) -> Dict[Tuple[str, str], Dict[str
 
 
 # -------------------------------------------------------------------
-# COMPATIBILITY LAYER (what your runner imports)
+# BACKWARDS-COMPAT WRAPPERS (what your runner imports)
 # -------------------------------------------------------------------
 def fetch_odds_for_date_from_odds_api(
     game_date_str: str,
     *,
     sport_key: str,
     days_padding: int = 1,
-    regions: str = "us",
-    markets: str = "h2h,spreads,totals",
 ) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], Dict]:
     """
-    Runner-compatible wrapper.
-
-    - Accepts game_date_str as "MM/DD/YYYY"
-    - Fetches Odds API odds for a window around that date (days_padding)
-    - Returns (odds_dict, spreads_dict) where spreads_dict is kept for compatibility
+    Backwards compatible signature.
+    Returns (odds_dict, spreads_dict). spreads_dict not used anymore -> {}.
+    days_padding widens the commence window so you don't miss games due to UTC cutoffs.
     """
     try:
-        d = datetime.strptime(game_date_str, "%m/%d/%Y").replace(tzinfo=timezone.utc)
+        dt = datetime.strptime(game_date_str, "%m/%d/%Y")
     except Exception:
-        d = datetime.now(timezone.utc)
+        dt = datetime.utcnow()
 
-    pad = int(days_padding) if days_padding is not None else 1
-    pad = max(0, min(pad, 3))  # keep sane
+    # Window is [date - pad, date + pad] in UTC
+    start = datetime(dt.year, dt.month, dt.day, tzinfo=timezone.utc) - timedelta(days=int(days_padding))
+    end = start + timedelta(days=1 + 2 * int(days_padding))
 
-    commence_from = (d - timedelta(days=pad)).replace(hour=0, minute=0, second=0, microsecond=0)
-    commence_to = (d + timedelta(days=pad)).replace(hour=23, minute=59, second=59, microsecond=0)
-
-    odds_dict = load_odds_for_date_from_api(
+    odds = load_odds_for_date_from_api(
         sport_key=sport_key,
-        commence_from=commence_from,
-        commence_to=commence_to,
-        regions=regions,
-        markets=markets,
+        commence_from=start,
+        commence_to=end,
     )
-
-    # spreads_dict is legacy; we keep it empty because your newer models read from odds_dict directly.
-    spreads_dict: Dict = {}
-    return odds_dict, spreads_dict
+    return odds, {}
 
 
 def fetch_odds_for_date_from_csv(
@@ -325,17 +288,14 @@ def fetch_odds_for_date_from_csv(
     odds_dir: str = "odds",
 ) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], Dict]:
     """
-    Runner-compatible wrapper:
-      odds/odds_MM-DD-YYYY.csv
+    Backwards compatible signature.
+    Expects odds/odds_MM-DD-YYYY.csv
     """
     try:
-        dt = datetime.strptime(game_date_str, "%m/%d/%Y")
+        mmddyyyy = datetime.strptime(game_date_str, "%m/%d/%Y").strftime("%m-%d-%Y")
     except Exception:
-        dt = datetime.utcnow()
+        mmddyyyy = datetime.utcnow().strftime("%m-%d-%Y")
 
-    fname = f"odds_{dt.strftime('%m-%d-%Y')}.csv"
-    csv_path = os.path.join(odds_dir, fname)
-    odds_dict = load_odds_for_date_from_csv(csv_path)
-    spreads_dict: Dict = {}
-    print(f"[odds_csv] games found: {len(odds_dict)} ({csv_path})")
-    return odds_dict, spreads_dict
+    csv_path = os.path.join(odds_dir, f"odds_{mmddyyyy}.csv")
+    odds = load_odds_for_date_from_csv(csv_path)
+    return odds, {}
