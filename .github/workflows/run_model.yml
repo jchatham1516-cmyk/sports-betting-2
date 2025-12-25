@@ -48,4 +48,3 @@ jobs:
           name: predictions
           path: results/
           if-no-files-found: ignore
-          curl -i "https://api.the-odds-api.com/v4/sports/basketball_nba/odds?apiKey=$ODDS_API_KEY&regions=us&markets=h2h&oddsFormat=american"
