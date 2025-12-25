@@ -1,5 +1,4 @@
 # current_of_sports_betting_algorithm.py
-
 import os
 import argparse
 from datetime import datetime
@@ -26,7 +25,6 @@ from sports.nba.bdl_client import (
     fetch_team_ratings_bdl,
 )
 from sports.nba.model import run_daily_probs_for_date as run_nba_daily
-
 from sports.nfl.model import run_daily_nfl
 from sports.nhl.model import run_daily_nhl
 
@@ -46,10 +44,10 @@ def main(argv=None):
     parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
-    parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
+    parser.add_argument("--force_full_rebuild", action="store_true")
 
-    # IMPORTANT: odds window padding so you don't miss games due to timezone/commence time
-    parser.add_argument("--days_padding", type=int, default=1, help="Odds API date window padding in days (0..3)")
+    # IMPORTANT: widen odds window so you don't miss games due to UTC boundaries
+    parser.add_argument("--odds_days_padding", type=int, default=1)
 
     args = parser.parse_args(argv)
 
@@ -61,30 +59,26 @@ def main(argv=None):
 
     print(f"Running {args.sport.upper()} model for {game_date}...")
 
-    # Odds (API first, fallback CSV)
     odds_dict, spreads_dict = {}, {}
 
+    # Odds (API -> CSV fallback)
     try:
         odds_dict, spreads_dict = fetch_odds_for_date_from_odds_api(
             game_date,
             sport_key=SPORT_TO_ODDS_KEY[args.sport],
-            days_padding=args.days_padding,
+            days_padding=int(args.odds_days_padding),
         )
-
         if odds_dict:
             print(f"[odds_api] Loaded odds for {len(odds_dict)} games.")
         else:
             print("[odds_api] No odds returned; will try CSV fallback.")
-
     except Exception as e:
         print(f"[odds_api] WARNING: failed to load odds from API: {e}")
 
     if not odds_dict:
         try:
-            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(
-                game_date,
-                sport=args.sport,
-            )
+            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date, sport=args.sport)
+            print(f"[odds_csv] games found: {len(odds_dict)}")
         except Exception as e:
             print(f"[odds_csv] WARNING: failed to load odds from CSV: {e}")
             odds_dict, spreads_dict = {}, {}
@@ -116,12 +110,7 @@ def main(argv=None):
         raise RuntimeError("Unsupported sport")
 
     if results_df is None or results_df.empty:
-        print("[model] No games returned (likely no odds came back for that date/window).")
-        # still write an empty file so workflow artifact exists
-        os.makedirs("results", exist_ok=True)
-        out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
-        pd.DataFrame([]).to_csv(out_name, index=False)
-        print(f"[save] writing 0 rows -> {out_name}")
+        print("[model] rows returned: 0 (nothing to save).")
         return 0
 
     # Recommendations
@@ -139,7 +128,6 @@ def main(argv=None):
         model_margin_home_col=None,
     )
 
-    # Play/pass + sizing
     play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
 
     results_df["play_pass"] = results_df.apply(
@@ -177,10 +165,7 @@ def main(argv=None):
         dbg_name = f"results/debug_why_ml_vs_ats_{args.sport}_{game_date.replace('/', '-')}.csv"
         debug_df.to_csv(dbg_name, index=False)
 
-    with pd.option_context("display.max_columns", None):
-        print(results_df)
-
-    print(f"\nSaved predictions to {out_name}")
+    print(f"[save] writing {len(results_df)} rows -> {out_name}")
     print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
     return 0
 
