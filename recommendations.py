@@ -1,6 +1,8 @@
+# recommendations.py
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -14,7 +16,7 @@ class Thresholds:
     ml_edge_strong: float = 0.06
     ml_edge_lean: float = 0.035
 
-    # ATS (in points)
+    # ATS
     ats_edge_strong_pts: float = 3.0
     ats_edge_lean_pts: float = 1.5
 
@@ -28,15 +30,6 @@ def _clamp(x: float, lo: float, hi: float) -> float:
         return float(max(lo, min(hi, float(x))))
     except Exception:
         return float("nan")
-
-
-def _fmt(x) -> str:
-    try:
-        if x is None or (isinstance(x, float) and np.isnan(x)):
-            return "nan"
-        return f"{float(x):.3f}"
-    except Exception:
-        return "nan"
 
 
 def american_to_prob(ml: float) -> float:
@@ -95,15 +88,6 @@ def _ml_pick(model_p: float, market_p: float, th: Thresholds) -> str:
 
 
 def _ats_pick(model_spread_home: float, market_home_spread: float, th: Thresholds) -> str:
-    """
-    Convention:
-      - model_spread_home: negative means home favored by that many
-      - market_home_spread: sportsbook home spread (e.g., -6.5)
-
-    spread_edge_home = market_home_spread - model_spread_home
-      Positive => HOME side value
-      Negative => AWAY side value
-    """
     if np.isnan(model_spread_home) or np.isnan(market_home_spread):
         return "No ATS bet (missing spread)"
 
@@ -120,6 +104,15 @@ def _ats_pick(model_spread_home: float, market_home_spread: float, th: Threshold
     return "Too close to call ATS (edge too small)"
 
 
+def _fmt(x) -> str:
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return "nan"
+        return f"{float(x):.3f}"
+    except Exception:
+        return "nan"
+
+
 def add_recommendations_to_df(
     df: pd.DataFrame,
     thresholds: Thresholds = Thresholds(),
@@ -127,19 +120,9 @@ def add_recommendations_to_df(
     model_spread_home_col: Optional[str] = "model_spread_home",
     model_margin_home_col: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Adds:
-      - market_home_prob (no-vig from MLs if possible)
-      - edge_home/edge_away if possible
-      - ml_recommendation, spread_recommendation, total_recommendation (if present)
-      - primary_recommendation, confidence, value_tier, why_bet
-      - pick_type, pick_score (used for top-N daily filtering)
-
-    Returns: (df, debug_df)
-    """
     out = df.copy()
 
-    # Ensure market_home_prob exists if MLs exist
+    # market_home_prob from MLs if needed
     if "market_home_prob" not in out.columns:
         out["market_home_prob"] = np.nan
         if "home_ml" in out.columns and "away_ml" in out.columns:
@@ -153,7 +136,7 @@ def add_recommendations_to_df(
                 except Exception:
                     continue
 
-    # Ensure edge columns
+    # edges
     if "edge_home" not in out.columns:
         out["edge_home"] = np.nan
     if "edge_away" not in out.columns:
@@ -184,7 +167,6 @@ def add_recommendations_to_df(
             hs = float(out.loc[i, "home_spread"]) if not pd.isna(out.loc[i, "home_spread"]) else float("nan")
             out.loc[i, "spread_recommendation"] = _ats_pick(ms, hs, thresholds)
 
-        # numeric edge for debugging
         if "spread_edge_home" not in out.columns:
             out["spread_edge_home"] = np.nan
         for i in out.index:
@@ -194,11 +176,11 @@ def add_recommendations_to_df(
                 continue
             out.loc[i, "spread_edge_home"] = float(hs - ms)
 
-    # Totals recommendation (per-sport models fill this; we keep it if present)
+    # Totals recommendation: pass-through (models fill total_* fields)
     if "total_recommendation" not in out.columns:
         out["total_recommendation"] = out.get("total_recommendation", "")
 
-    # Confidence & value tier from abs(edge_home)
+    # Confidence & value tier
     out["abs_edge_home"] = out.get("abs_edge_home", np.nan)
     for i in out.index:
         eh = out.loc[i, "edge_home"]
@@ -212,7 +194,7 @@ def add_recommendations_to_df(
         out.loc[i, "confidence"] = _confidence_from_abs_edge(ae, thresholds)
         out.loc[i, "value_tier"] = _value_tier(ae)
 
-    # Primary recommendation (simple priority; models may override with their own "primary")
+    # Primary
     out["primary_recommendation"] = out.get("primary_recommendation", "")
     out["why_primary"] = out.get("why_primary", "")
 
@@ -225,24 +207,25 @@ def add_recommendations_to_df(
 
         ats_score = -999.0
         if atr.startswith("Model PICK ATS:"):
-            # prefer ats_edge_vs_be if present, else use spread_edge scaled
-            if "ats_edge_vs_be" in out.columns and not pd.isna(out.loc[i, "ats_edge_vs_be"]):
-                ats_score = float(out.loc[i, "ats_edge_vs_be"])
-            elif "spread_edge_home" in out.columns and not pd.isna(out.loc[i, "spread_edge_home"]):
-                ats_score = float(abs(float(out.loc[i, "spread_edge_home"]))) / 10.0
+            se = out.loc[i, "spread_edge_home"] if "spread_edge_home" in out.columns else np.nan
+            if not pd.isna(se):
+                ats_score = float(abs(float(se))) / 10.0
 
         tot_score = -999.0
-        if tor.startswith("Model PICK TOTAL:"):
-            if "total_edge_vs_be" in out.columns and not pd.isna(out.loc[i, "total_edge_vs_be"]):
-                tot_score = float(out.loc[i, "total_edge_vs_be"])
+        if tor.startswith("Model PICK TOTAL:") and "total_edge_vs_be" in out.columns:
+            tev = out.loc[i, "total_edge_vs_be"]
+            if not pd.isna(tev):
+                tot_score = float(tev)
 
         primary = mlr
         why = f"Primary=ML (score={ml_score:+.3f})"
         best = ml_score
+
         if ats_score > best:
             best = ats_score
             primary = atr
             why = f"Primary=ATS (score={ats_score:+.3f})"
+
         if tot_score > best:
             best = tot_score
             primary = tor
@@ -263,46 +246,28 @@ def add_recommendations_to_df(
             + (f" | ATS edge={_fmt(se)}pts" if not pd.isna(se) else "")
         )
 
-    # ---- NEW: pick_type + pick_score for top-N daily filtering ----
-    out["pick_type"] = "NONE"
+    # A unified score column the runner can use for top-N
+    # (prefer primary type score; safe if missing)
     out["pick_score"] = -999.0
     for i in out.index:
-        primary = str(out.loc[i, "primary_recommendation"])
-
-        if primary.startswith("Model PICK TOTAL:"):
-            out.loc[i, "pick_type"] = "TOTAL"
-            if "total_edge_vs_be" in out.columns and not pd.isna(out.loc[i, "total_edge_vs_be"]):
-                out.loc[i, "pick_score"] = float(out.loc[i, "total_edge_vs_be"])
-            else:
-                out.loc[i, "pick_score"] = -999.0
-
-        elif primary.startswith("Model PICK ATS:"):
-            out.loc[i, "pick_type"] = "ATS"
-            if "ats_edge_vs_be" in out.columns and not pd.isna(out.loc[i, "ats_edge_vs_be"]):
-                out.loc[i, "pick_score"] = float(out.loc[i, "ats_edge_vs_be"])
-            elif "spread_edge_home" in out.columns and not pd.isna(out.loc[i, "spread_edge_home"]):
-                out.loc[i, "pick_score"] = float(abs(float(out.loc[i, "spread_edge_home"]))) / 10.0
-            else:
-                out.loc[i, "pick_score"] = -999.0
-
-        elif primary.startswith("Model PICK:") or primary.startswith("Model lean:"):
-            out.loc[i, "pick_type"] = "ML"
-            if "abs_edge_home" in out.columns and not pd.isna(out.loc[i, "abs_edge_home"]):
-                out.loc[i, "pick_score"] = float(out.loc[i, "abs_edge_home"])
-            else:
-                out.loc[i, "pick_score"] = -999.0
-
+        prim = str(out.loc[i, "primary_recommendation"])
+        if prim.startswith("Model PICK TOTAL:"):
+            tev = out.loc[i, "total_edge_vs_be"] if "total_edge_vs_be" in out.columns else np.nan
+            if not pd.isna(tev):
+                out.loc[i, "pick_score"] = float(tev)
+        elif prim.startswith("Model PICK ATS:"):
+            se = out.loc[i, "spread_edge_home"] if "spread_edge_home" in out.columns else np.nan
+            if not pd.isna(se):
+                out.loc[i, "pick_score"] = float(abs(float(se))) / 10.0
         else:
-            out.loc[i, "pick_type"] = "NONE"
-            out.loc[i, "pick_score"] = -999.0
+            ae = out.loc[i, "abs_edge_home"]
+            if not pd.isna(ae):
+                out.loc[i, "pick_score"] = float(ae)
 
     debug_df = pd.DataFrame()
     return out, debug_df
 
 
-# -----------------------------
-# OPTIONAL: attach CLV fields to predictions
-# -----------------------------
 def attach_clv_from_log(
     preds_df: pd.DataFrame,
     *,
