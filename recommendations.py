@@ -1,4 +1,3 @@
-# recommendations.py
 from __future__ import annotations
 
 import os
@@ -8,13 +7,6 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from sports.common.clv_tracker import (
-    american_to_prob,
-    make_bet_id,
-    markets_to_stop,
-    MarketStopRule,
-)
-
 
 @dataclass
 class Thresholds:
@@ -22,7 +14,7 @@ class Thresholds:
     ml_edge_strong: float = 0.06
     ml_edge_lean: float = 0.035
 
-    # ATS
+    # ATS (in points)
     ats_edge_strong_pts: float = 3.0
     ats_edge_lean_pts: float = 1.5
 
@@ -38,21 +30,25 @@ def _clamp(x: float, lo: float, hi: float) -> float:
         return float("nan")
 
 
-def _safe_float(x, default=np.nan) -> float:
+def _fmt(x) -> str:
     try:
-        if x is None:
-            return default
-        if isinstance(x, float) and np.isnan(x):
-            return default
-        return float(x)
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return "nan"
+        return f"{float(x):.3f}"
     except Exception:
-        return default
+        return "nan"
+
+
+def american_to_prob(ml: float) -> float:
+    ml = float(ml)
+    if ml == 0:
+        return float("nan")
+    if ml > 0:
+        return 100.0 / (ml + 100.0)
+    return (-ml) / ((-ml) + 100.0)
 
 
 def no_vig_probs(home_ml: float, away_ml: float) -> Tuple[float, float]:
-    """
-    Classic no-vig from two american prices.
-    """
     hp = american_to_prob(home_ml)
     ap = american_to_prob(away_ml)
     if np.isnan(hp) or np.isnan(ap) or (hp + ap) <= 0:
@@ -103,8 +99,10 @@ def _ats_pick(model_spread_home: float, market_home_spread: float, th: Threshold
     Convention:
       - model_spread_home: negative means home favored by that many
       - market_home_spread: sportsbook home spread (e.g., -6.5)
+
     spread_edge_home = market_home_spread - model_spread_home
-      Positive => HOME ATS value, Negative => AWAY ATS value
+      Positive => HOME side value
+      Negative => AWAY side value
     """
     if np.isnan(model_spread_home) or np.isnan(market_home_spread):
         return "No ATS bet (missing spread)"
@@ -122,75 +120,22 @@ def _ats_pick(model_spread_home: float, market_home_spread: float, th: Threshold
     return "Too close to call ATS (edge too small)"
 
 
-def _infer_bet_fields(row: pd.Series) -> Tuple[str, str, float, float]:
-    """
-    Return market, side, line, price based on primary_recommendation (fallbacks).
-    market: "ML"|"ATS"|"TOTAL"
-    side: "HOME"|"AWAY"|"OVER"|"UNDER"
-    """
-    primary = str(row.get("primary_recommendation", "") or "")
-    mlr = str(row.get("ml_recommendation", "") or "")
-    sr = str(row.get("spread_recommendation", "") or "")
-    tr = str(row.get("total_recommendation", "") or "")
-
-    s = primary
-    if not s.startswith("Model"):
-        if mlr.startswith("Model"):
-            s = mlr
-        elif sr.startswith("Model"):
-            s = sr
-        elif tr.startswith("Model"):
-            s = tr
-
-    # TOTAL
-    if "TOTAL" in s:
-        market = "TOTAL"
-        line = _safe_float(row.get("total_points"))
-        if "OVER" in s:
-            return market, "OVER", line, _safe_float(row.get("total_over_price"))
-        if "UNDER" in s:
-            return market, "UNDER", line, _safe_float(row.get("total_under_price"))
-        return market, "NONE", line, np.nan
-
-    # ATS
-    if "ATS" in s:
-        market = "ATS"
-        hs = _safe_float(row.get("home_spread"))
-        price = _safe_float(row.get("spread_price"))
-        if "HOME" in s:
-            return market, "HOME", hs, price
-        if "AWAY" in s:
-            return market, "AWAY", (-hs if not np.isnan(hs) else np.nan), price
-        return market, "NONE", np.nan, price
-
-    # ML
-    market = "ML"
-    if "AWAY" in s:
-        return market, "AWAY", np.nan, _safe_float(row.get("away_ml"))
-    return market, "HOME", np.nan, _safe_float(row.get("home_ml"))
-
-
 def add_recommendations_to_df(
     df: pd.DataFrame,
     thresholds: Thresholds = Thresholds(),
     *,
-    sport: Optional[str] = None,                 # NEW (recommended for bet_id)
-    game_date: Optional[str] = None,             # NEW (recommended for bet_id)
     model_spread_home_col: Optional[str] = "model_spread_home",
     model_margin_home_col: Optional[str] = None,
-    clv_log_path: str = "results/clv_log.csv",
-    use_clv_gating: bool = True,
-    clv_stop_rule: MarketStopRule = MarketStopRule(),
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Adds:
       - market_home_prob (no-vig from MLs if possible)
-      - edge_home/edge_away
-      - ml_recommendation, spread_recommendation
-      - bet_id + bet fields for CLV tracking
-      - (optional) joins CLV from clv_log.csv and gates markets with consistently bad CLV
+      - edge_home/edge_away if possible
+      - ml_recommendation, spread_recommendation, total_recommendation (if present)
+      - primary_recommendation, confidence, value_tier, why_bet
+      - pick_type, pick_score (used for top-N daily filtering)
 
-    Returns: (out_df, debug_df)
+    Returns: (df, debug_df)
     """
     out = df.copy()
 
@@ -231,7 +176,7 @@ def add_recommendations_to_df(
             mk = float(out.loc[i, "market_home_prob"]) if not pd.isna(out.loc[i, "market_home_prob"]) else float("nan")
             out.loc[i, "ml_recommendation"] = _ml_pick(mp, mk, thresholds)
 
-    # Spread recommendation + numeric spread_edge_home
+    # Spread recommendation
     out["spread_recommendation"] = out.get("spread_recommendation", "")
     if model_spread_home_col and model_spread_home_col in out.columns and "home_spread" in out.columns:
         for i in out.index:
@@ -239,6 +184,7 @@ def add_recommendations_to_df(
             hs = float(out.loc[i, "home_spread"]) if not pd.isna(out.loc[i, "home_spread"]) else float("nan")
             out.loc[i, "spread_recommendation"] = _ats_pick(ms, hs, thresholds)
 
+        # numeric edge for debugging
         if "spread_edge_home" not in out.columns:
             out["spread_edge_home"] = np.nan
         for i in out.index:
@@ -248,13 +194,12 @@ def add_recommendations_to_df(
                 continue
             out.loc[i, "spread_edge_home"] = float(hs - ms)
 
-    # Totals recommendation: leave to sport models (pass-through)
+    # Totals recommendation (per-sport models fill this; we keep it if present)
     if "total_recommendation" not in out.columns:
         out["total_recommendation"] = out.get("total_recommendation", "")
 
-    # Confidence & value tier from abs edge
-    if "abs_edge_home" not in out.columns:
-        out["abs_edge_home"] = np.nan
+    # Confidence & value tier from abs(edge_home)
+    out["abs_edge_home"] = out.get("abs_edge_home", np.nan)
     for i in out.index:
         eh = out.loc[i, "edge_home"]
         if not pd.isna(eh):
@@ -267,7 +212,7 @@ def add_recommendations_to_df(
         out.loc[i, "confidence"] = _confidence_from_abs_edge(ae, thresholds)
         out.loc[i, "value_tier"] = _value_tier(ae)
 
-    # Primary recommendation score logic (ML vs ATS vs TOTAL)
+    # Primary recommendation (simple priority; models may override with their own "primary")
     out["primary_recommendation"] = out.get("primary_recommendation", "")
     out["why_primary"] = out.get("why_primary", "")
 
@@ -280,25 +225,24 @@ def add_recommendations_to_df(
 
         ats_score = -999.0
         if atr.startswith("Model PICK ATS:"):
-            se = out.loc[i, "spread_edge_home"] if "spread_edge_home" in out.columns else np.nan
-            if not pd.isna(se):
-                ats_score = float(abs(float(se))) / 10.0
+            # prefer ats_edge_vs_be if present, else use spread_edge scaled
+            if "ats_edge_vs_be" in out.columns and not pd.isna(out.loc[i, "ats_edge_vs_be"]):
+                ats_score = float(out.loc[i, "ats_edge_vs_be"])
+            elif "spread_edge_home" in out.columns and not pd.isna(out.loc[i, "spread_edge_home"]):
+                ats_score = float(abs(float(out.loc[i, "spread_edge_home"]))) / 10.0
 
         tot_score = -999.0
-        if tor.startswith("Model PICK TOTAL:") and "total_edge_vs_be" in out.columns:
-            tev = out.loc[i, "total_edge_vs_be"]
-            if not pd.isna(tev):
-                tot_score = float(tev)
+        if tor.startswith("Model PICK TOTAL:"):
+            if "total_edge_vs_be" in out.columns and not pd.isna(out.loc[i, "total_edge_vs_be"]):
+                tot_score = float(out.loc[i, "total_edge_vs_be"])
 
         primary = mlr
         why = f"Primary=ML (score={ml_score:+.3f})"
         best = ml_score
-
         if ats_score > best:
             best = ats_score
             primary = atr
             why = f"Primary=ATS (score={ats_score:+.3f})"
-
         if tot_score > best:
             best = tot_score
             primary = tor
@@ -319,83 +263,75 @@ def add_recommendations_to_df(
             + (f" | ATS edge={_fmt(se)}pts" if not pd.isna(se) else "")
         )
 
-    # -----------------------------
-    # CLV integration (NEW)
-    # -----------------------------
-    # add bet fields
-    out["bet_market"] = out.get("bet_market", "")
-    out["bet_side"] = out.get("bet_side", "")
-    out["bet_line"] = out.get("bet_line", np.nan)
-    out["bet_price"] = out.get("bet_price", np.nan)
-    out["bet_id"] = out.get("bet_id", "")
-
-    # market stop switches from CLV history
-    stop_map = {"ML": False, "ATS": False, "TOTAL": False}
-    if use_clv_gating and os.path.exists(clv_log_path):
-        try:
-            stop_map = markets_to_stop(clv_log_path=clv_log_path, rule=clv_stop_rule)
-        except Exception:
-            stop_map = {"ML": False, "ATS": False, "TOTAL": False}
-
+    # ---- NEW: pick_type + pick_score for top-N daily filtering ----
+    out["pick_type"] = "NONE"
+    out["pick_score"] = -999.0
     for i in out.index:
-        market, side, line, price = _infer_bet_fields(out.loc[i])
-
-        out.loc[i, "bet_market"] = market
-        out.loc[i, "bet_side"] = side
-        out.loc[i, "bet_line"] = (np.nan if np.isnan(_safe_float(line)) else float(line))
-        out.loc[i, "bet_price"] = (np.nan if np.isnan(_safe_float(price)) else float(price))
-
-        if sport and game_date and ("home" in out.columns) and ("away" in out.columns):
-            out.loc[i, "bet_id"] = make_bet_id(
-                sport=str(sport),
-                game_date=str(game_date),
-                home=str(out.loc[i, "home"]),
-                away=str(out.loc[i, "away"]),
-                market=str(market),
-                side=str(side),
-                line=None if np.isnan(_safe_float(line)) else float(line),
-            )
-
-        # Gate by CLV market health (only gates "Model PICK..." style recos)
         primary = str(out.loc[i, "primary_recommendation"])
-        if use_clv_gating and primary.startswith("Model"):
-            if stop_map.get(market, False):
-                out.loc[i, "primary_recommendation"] = "NO BET (market failing CLV)"
-                out.loc[i, "why_primary"] = f"CLV gate: STOP {market} (see results/clv_log.csv)"
-                # don't lie about value tier; mark clearly
-                out.loc[i, "value_tier"] = "CLV STOP"
 
-    # Join CLV fields (if bet_id exists and log exists)
-    if os.path.exists(clv_log_path) and "bet_id" in out.columns:
-        try:
-            clv = pd.read_csv(clv_log_path)
-            if not clv.empty and "bet_id" in clv.columns:
-                keep = [
-                    c
-                    for c in [
-                        "bet_id",
-                        "close_price",
-                        "close_line",
-                        "clv_imp_prob",
-                        "clv_line",
-                        "ts_open_utc",
-                        "ts_close_utc",
-                    ]
-                    if c in clv.columns
-                ]
-                if keep:
-                    out = out.merge(clv[keep].drop_duplicates("bet_id"), on="bet_id", how="left")
-        except Exception:
-            pass
+        if primary.startswith("Model PICK TOTAL:"):
+            out.loc[i, "pick_type"] = "TOTAL"
+            if "total_edge_vs_be" in out.columns and not pd.isna(out.loc[i, "total_edge_vs_be"]):
+                out.loc[i, "pick_score"] = float(out.loc[i, "total_edge_vs_be"])
+            else:
+                out.loc[i, "pick_score"] = -999.0
+
+        elif primary.startswith("Model PICK ATS:"):
+            out.loc[i, "pick_type"] = "ATS"
+            if "ats_edge_vs_be" in out.columns and not pd.isna(out.loc[i, "ats_edge_vs_be"]):
+                out.loc[i, "pick_score"] = float(out.loc[i, "ats_edge_vs_be"])
+            elif "spread_edge_home" in out.columns and not pd.isna(out.loc[i, "spread_edge_home"]):
+                out.loc[i, "pick_score"] = float(abs(float(out.loc[i, "spread_edge_home"]))) / 10.0
+            else:
+                out.loc[i, "pick_score"] = -999.0
+
+        elif primary.startswith("Model PICK:") or primary.startswith("Model lean:"):
+            out.loc[i, "pick_type"] = "ML"
+            if "abs_edge_home" in out.columns and not pd.isna(out.loc[i, "abs_edge_home"]):
+                out.loc[i, "pick_score"] = float(out.loc[i, "abs_edge_home"])
+            else:
+                out.loc[i, "pick_score"] = -999.0
+
+        else:
+            out.loc[i, "pick_type"] = "NONE"
+            out.loc[i, "pick_score"] = -999.0
 
     debug_df = pd.DataFrame()
     return out, debug_df
 
 
-def _fmt(x) -> str:
+# -----------------------------
+# OPTIONAL: attach CLV fields to predictions
+# -----------------------------
+def attach_clv_from_log(
+    preds_df: pd.DataFrame,
+    *,
+    clv_log_path: str = "results/clv_log.csv",
+) -> pd.DataFrame:
+    """
+    Left-join predictions with CLV log if present.
+    Adds: close_price, close_line, clv_prob_no_vig, clv_price_american
+    """
+    if preds_df is None or preds_df.empty:
+        return preds_df
+
+    if not os.path.exists(clv_log_path):
+        return preds_df
+
     try:
-        if x is None or (isinstance(x, float) and np.isnan(x)):
-            return "nan"
-        return f"{float(x):.3f}"
+        clv = pd.read_csv(clv_log_path)
     except Exception:
-        return "nan"
+        return preds_df
+
+    if clv.empty or "bet_id" not in clv.columns:
+        return preds_df
+
+    if "bet_id" not in preds_df.columns:
+        return preds_df
+
+    keep_cols = [c for c in ["bet_id", "close_price", "close_line", "clv_prob_no_vig", "clv_price_american"] if c in clv.columns]
+    if not keep_cols:
+        return preds_df
+
+    out = preds_df.merge(clv[keep_cols].drop_duplicates("bet_id"), on="bet_id", how="left")
+    return out
