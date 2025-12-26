@@ -1,11 +1,3 @@
-# current_of_sports_betting_algorithm.py
-#
-# Thin runner:
-# - Loads odds (Odds API with CSV fallback)
-# - Runs per-sport model (NBA/NFL/NHL)
-# - Applies recommendations + play/pass + sizing
-# - Saves results to results/predictions_<sport>_<MM-DD-YYYY>.csv
-
 from __future__ import annotations
 
 import os
@@ -39,6 +31,44 @@ from sports.nfl.model import run_daily_nfl
 from sports.nhl.model import run_daily_nhl
 
 
+def _apply_top_n_play_cap(df: pd.DataFrame, *, max_plays: int) -> pd.DataFrame:
+    """
+    Enforce max_plays by keeping the top pick_score among rows marked PLAY.
+    Requires recommendations.py to have created pick_score.
+    """
+    if df is None or df.empty:
+        return df
+    if max_plays is None or int(max_plays) <= 0:
+        return df
+
+    if "play_pass" not in df.columns:
+        return df
+    if "pick_score" not in df.columns:
+        # fallback: don't cap if scoring missing
+        return df
+
+    plays = df["play_pass"].astype(str).str.upper().eq("PLAY")
+    if plays.sum() <= int(max_plays):
+        return df
+
+    # rank PLAYs by pick_score
+    tmp = df.copy()
+    tmp["_rank_score"] = pd.to_numeric(tmp["pick_score"], errors="coerce").fillna(-999.0)
+    keep_idx = tmp.loc[plays].sort_values("_rank_score", ascending=False).head(int(max_plays)).index
+    keep_set = set(keep_idx.tolist())
+
+    # flip other PLAYs to PASS
+    for i in tmp.index:
+        if bool(plays.loc[i]) and i not in keep_set:
+            tmp.loc[i, "play_pass"] = "PASS"
+            tmp.loc[i, "bet_size"] = 0.0
+            tmp.loc[i, "units"] = 0.0
+            tmp.loc[i, "why_bet"] = "top-N cap (kept best 1–3 only)"
+
+    tmp.drop(columns=["_rank_score"], inplace=True, errors="ignore")
+    return tmp
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run sports betting model (NBA/NFL/NHL).")
     parser.add_argument("--sport", type=str, default="nba", choices=["nba", "nfl", "nhl"])
@@ -46,6 +76,9 @@ def main(argv=None):
 
     # Odds API window padding (days)
     parser.add_argument("--days_padding", type=int, default=int(os.getenv("ODDS_DAYS_PADDING", "1")))
+
+    # Target 1–3 bets/day (cap). Set 0 to disable.
+    parser.add_argument("--max_plays", type=int, default=int(os.getenv("MAX_PLAYS_PER_SPORT_PER_DAY", "3")))
 
     # Sizing
     parser.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL)
@@ -154,6 +187,8 @@ def main(argv=None):
     # Play/pass + sizing
     play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
 
+    unit_dollars = float(args.bankroll) * UNIT_PCT
+
     if not results_df.empty:
         results_df["play_pass"] = results_df.apply(
             lambda r: play_pass_rule(
@@ -178,13 +213,21 @@ def main(argv=None):
             axis=1,
         )
 
-        unit_dollars = float(args.bankroll) * UNIT_PCT
         results_df["unit_dollars"] = unit_dollars
         results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
-    else:
-        unit_dollars = float(args.bankroll) * UNIT_PCT
 
-    # Save (even if empty, so Actions artifact exists)
+        # ---- NEW: Cap to 1–3 bets/day (max_plays) ----
+        if int(args.max_plays) > 0:
+            before = int((results_df["play_pass"].astype(str).str.upper() == "PLAY").sum())
+            results_df = _apply_top_n_play_cap(results_df, max_plays=int(args.max_plays))
+            after = int((results_df["play_pass"].astype(str).str.upper() == "PLAY").sum())
+            print(f"[topN] max_plays={int(args.max_plays)} | PLAY before={before} after={after}")
+
+    else:
+        # still set these so CSV has columns if empty
+        results_df["unit_dollars"] = unit_dollars
+
+    # Save
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
     print(f"[save] writing {len(results_df)} rows -> {out_name}")
