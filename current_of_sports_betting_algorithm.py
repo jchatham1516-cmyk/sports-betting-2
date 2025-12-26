@@ -1,3 +1,4 @@
+# current_of_sports_betting_algorithm.py
 from __future__ import annotations
 
 import os
@@ -31,42 +32,46 @@ from sports.nfl.model import run_daily_nfl
 from sports.nhl.model import run_daily_nhl
 
 
-def _apply_top_n_play_cap(df: pd.DataFrame, *, max_plays: int) -> pd.DataFrame:
+def _apply_top_n_plays_filter(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
     """
-    Enforce max_plays by keeping the top pick_score among rows marked PLAY.
-    Requires recommendations.py to have created pick_score.
+    Keeps only top-N rows that are currently PLAY by pick_score.
+    Converts the rest to PASS and zeros bet_size/units.
     """
     if df is None or df.empty:
         return df
-    if max_plays is None or int(max_plays) <= 0:
+    if max_plays is None:
         return df
 
     if "play_pass" not in df.columns:
         return df
-    if "pick_score" not in df.columns:
-        # fallback: don't cap if scoring missing
-        return df
 
-    plays = df["play_pass"].astype(str).str.upper().eq("PLAY")
-    if plays.sum() <= int(max_plays):
-        return df
+    d = df.copy()
 
-    # rank PLAYs by pick_score
-    tmp = df.copy()
-    tmp["_rank_score"] = pd.to_numeric(tmp["pick_score"], errors="coerce").fillna(-999.0)
-    keep_idx = tmp.loc[plays].sort_values("_rank_score", ascending=False).head(int(max_plays)).index
-    keep_set = set(keep_idx.tolist())
+    elig = d["play_pass"].astype(str).str.upper().eq("PLAY")
+    if not elig.any():
+        return d
 
-    # flip other PLAYs to PASS
-    for i in tmp.index:
-        if bool(plays.loc[i]) and i not in keep_set:
-            tmp.loc[i, "play_pass"] = "PASS"
-            tmp.loc[i, "bet_size"] = 0.0
-            tmp.loc[i, "units"] = 0.0
-            tmp.loc[i, "why_bet"] = "top-N cap (kept best 1–3 only)"
+    if "pick_score" in d.columns:
+        score = pd.to_numeric(d["pick_score"], errors="coerce").fillna(-999.0)
+    else:
+        # fallback
+        score = pd.to_numeric(d.get("abs_edge_home", -999.0), errors="coerce").fillna(-999.0)
 
-    tmp.drop(columns=["_rank_score"], inplace=True, errors="ignore")
-    return tmp
+    d["_rank_score"] = score.where(elig, -999.0)
+    keep_idx = d.sort_values("_rank_score", ascending=False).head(int(max_plays)).index
+
+    for i in d.index:
+        if bool(elig.loc[i]) and i not in keep_idx:
+            d.loc[i, "play_pass"] = "PASS"
+            if "why_bet" in d.columns:
+                d.loc[i, "why_bet"] = str(d.loc[i, "why_bet"]) + " | filtered: top-N plays"
+            if "bet_size" in d.columns:
+                d.loc[i, "bet_size"] = 0.0
+            if "units" in d.columns:
+                d.loc[i, "units"] = 0.0
+
+    d.drop(columns=["_rank_score"], inplace=True, errors="ignore")
+    return d
 
 
 def main(argv=None):
@@ -76,9 +81,6 @@ def main(argv=None):
 
     # Odds API window padding (days)
     parser.add_argument("--days_padding", type=int, default=int(os.getenv("ODDS_DAYS_PADDING", "1")))
-
-    # Target 1–3 bets/day (cap). Set 0 to disable.
-    parser.add_argument("--max_plays", type=int, default=int(os.getenv("MAX_PLAYS_PER_SPORT_PER_DAY", "3")))
 
     # Sizing
     parser.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL)
@@ -92,6 +94,9 @@ def main(argv=None):
     parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
+
+    # NEW: target 1–3 plays/day by enforcing a max
+    parser.add_argument("--max_plays_per_day", type=int, default=int(os.getenv("MAX_PLAYS_PER_DAY", "3")))
 
     # Elo rebuild for NBA (if your NBA model supports it)
     parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
@@ -187,8 +192,6 @@ def main(argv=None):
     # Play/pass + sizing
     play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
 
-    unit_dollars = float(args.bankroll) * UNIT_PCT
-
     if not results_df.empty:
         results_df["play_pass"] = results_df.apply(
             lambda r: play_pass_rule(
@@ -213,19 +216,15 @@ def main(argv=None):
             axis=1,
         )
 
+        unit_dollars = float(args.bankroll) * UNIT_PCT
         results_df["unit_dollars"] = unit_dollars
         results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
 
-        # ---- NEW: Cap to 1–3 bets/day (max_plays) ----
-        if int(args.max_plays) > 0:
-            before = int((results_df["play_pass"].astype(str).str.upper() == "PLAY").sum())
-            results_df = _apply_top_n_play_cap(results_df, max_plays=int(args.max_plays))
-            after = int((results_df["play_pass"].astype(str).str.upper() == "PLAY").sum())
-            print(f"[topN] max_plays={int(args.max_plays)} | PLAY before={before} after={after}")
+        # NEW: enforce max plays/day (top-N by pick_score)
+        results_df = _apply_top_n_plays_filter(results_df, max_plays=int(args.max_plays_per_day))
 
     else:
-        # still set these so CSV has columns if empty
-        results_df["unit_dollars"] = unit_dollars
+        unit_dollars = float(args.bankroll) * UNIT_PCT
 
     # Save
     os.makedirs("results", exist_ok=True)
@@ -242,6 +241,7 @@ def main(argv=None):
 
     print(f"\nSaved predictions to {out_name}")
     print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
+    print(f"Max plays/day={int(args.max_plays_per_day)} (per sport run)")
     return 0
 
 
