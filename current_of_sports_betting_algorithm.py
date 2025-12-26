@@ -2,9 +2,11 @@
 #
 # Thin runner:
 # - Loads odds (Odds API with CSV fallback)
-# - Runs per-sport model
+# - Runs per-sport model (NBA/NFL/NHL)
 # - Applies recommendations + play/pass + sizing
 # - Saves results to results/predictions_<sport>_<MM-DD-YYYY>.csv
+
+from __future__ import annotations
 
 import os
 import argparse
@@ -42,19 +44,23 @@ def main(argv=None):
     parser.add_argument("--sport", type=str, default="nba", choices=["nba", "nfl", "nhl"])
     parser.add_argument("--date", type=str, default=None, help="Game date in MM/DD/YYYY (default: today UTC).")
 
-    # Odds window padding (fixes “no games found” when timezone edges happen)
-    parser.add_argument("--days_padding", type=int, default=1, help="Query odds +/- N days around target date.")
+    # Odds API window padding (days)
+    parser.add_argument("--days_padding", type=int, default=int(os.getenv("ODDS_DAYS_PADDING", "1")))
 
+    # Sizing
     parser.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL)
     parser.add_argument("--sizing", type=str, default="flat", choices=["flat", "kelly"])
     parser.add_argument("--flat_pct", type=float, default=UNIT_PCT)
     parser.add_argument("--kelly_mult", type=float, default=0.5)
     parser.add_argument("--kelly_max_pct", type=float, default=0.03)
 
+    # Play/pass
     parser.add_argument("--play_require_pick", action="store_true")
     parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
+
+    # Elo rebuild for NBA (if your NBA model supports it)
     parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
 
     args = parser.parse_args(argv)
@@ -90,6 +96,7 @@ def main(argv=None):
                 game_date,
                 sport=args.sport,
             )
+            print(f"[odds_csv] games found: {len(odds_dict)}")
         except Exception as e:
             print(f"[odds_csv] WARNING: failed to load odds from CSV: {e}")
             odds_dict, spreads_dict = {}, {}
@@ -122,12 +129,11 @@ def main(argv=None):
 
     if results_df is None:
         print("[model] No dataframe returned.")
-        return 0
+        results_df = pd.DataFrame([])
 
     print(f"[model] rows returned: {len(results_df)}")
 
-    # Recommendations (only if results exist)
-    debug_df = None
+    # Recommendations
     if not results_df.empty:
         results_df, debug_df = add_recommendations_to_df(
             results_df,
@@ -142,10 +148,13 @@ def main(argv=None):
             model_spread_home_col="model_spread_home" if "model_spread_home" in results_df.columns else None,
             model_margin_home_col=None,
         )
+    else:
+        debug_df = pd.DataFrame([])
 
-        # Play/pass + sizing
-        play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
+    # Play/pass + sizing
+    play_max_abs_ml = None if args.play_max_abs_ml == 0 else args.play_max_abs_ml
 
+    if not results_df.empty:
         results_df["play_pass"] = results_df.apply(
             lambda r: play_pass_rule(
                 r,
@@ -172,8 +181,10 @@ def main(argv=None):
         unit_dollars = float(args.bankroll) * UNIT_PCT
         results_df["unit_dollars"] = unit_dollars
         results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
+    else:
+        unit_dollars = float(args.bankroll) * UNIT_PCT
 
-    # Always save (even if empty) so artifacts exist
+    # Save (even if empty, so Actions artifact exists)
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
     print(f"[save] writing {len(results_df)} rows -> {out_name}")
@@ -183,13 +194,11 @@ def main(argv=None):
         dbg_name = f"results/debug_why_ml_vs_ats_{args.sport}_{game_date.replace('/', '-')}.csv"
         debug_df.to_csv(dbg_name, index=False)
 
-    if not results_df.empty:
-        with pd.option_context("display.max_columns", None):
-            print(results_df)
+    with pd.option_context("display.max_columns", None):
+        print(results_df)
 
     print(f"\nSaved predictions to {out_name}")
-    if not results_df.empty:
-        print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${float(args.bankroll) * UNIT_PCT:.2f}")
+    print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
     return 0
 
 
