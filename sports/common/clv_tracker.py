@@ -1,223 +1,31 @@
 # sports/common/clv_tracker.py
 from __future__ import annotations
 
-import csv
 import os
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-
-CLV_LOG_PATH = os.getenv("CLV_LOG_PATH", "results/clv_log.csv")
-
-
-# -----------------------------
-# Odds helpers
-# -----------------------------
-def american_to_prob(ml: float) -> float:
-    ml = float(ml)
-    if ml == 0:
-        return float("nan")
-    if ml > 0:
-        return 100.0 / (ml + 100.0)
-    return (-ml) / ((-ml) + 100.0)
-
-
-def no_vig_two_way_probs(price_a: float, price_b: float) -> Tuple[float, float]:
-    """
-    Convert two American prices into no-vig implied probabilities.
-    Returns (p_a, p_b) that sum to 1.
-    """
-    pa = american_to_prob(price_a)
-    pb = american_to_prob(price_b)
-    if np.isnan(pa) or np.isnan(pb) or (pa + pb) <= 0:
-        return (float("nan"), float("nan"))
-    s = pa + pb
-    return (pa / s, pb / s)
-
-
-def normalize_team(s: str) -> str:
-    return " ".join(str(s or "").strip().split())
-
-
-def bet_id(
-    sport: str,
-    date_str: str,
-    home: str,
-    away: str,
-    market: str,
-    side: str,
-) -> str:
-    """
-    Stable identifier for a specific bet.
-    """
-    return f"{sport}|{date_str}|{normalize_team(home)}|{normalize_team(away)}|{market}|{side}"
+from sports.common.odds_sources import load_odds_for_date_from_api, SPORT_TO_ODDS_KEY
 
 
 # -----------------------------
-# Core CLV logging
+# Basic pricing helpers
 # -----------------------------
-@dataclass
-class BetSnapshot:
-    sport: str
-    date: str
-    home: str
-    away: str
-    market: str  # ML / ATS / TOTAL
-    side: str    # HOME/AWAY or OVER/UNDER
-    open_price: float
-    close_price: Optional[float] = None
-    open_line: Optional[float] = None   # spread or total
-    close_line: Optional[float] = None  # spread or total
-
-
-def _ensure_parent(path: str) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-
-
-def _read_existing_log(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame()
+def american_to_prob(price: float) -> float:
     try:
-        return pd.read_csv(path)
+        price = float(price)
+        if price == 0:
+            return float("nan")
+        if price > 0:
+            return 100.0 / (price + 100.0)
+        return (-price) / ((-price) + 100.0)
     except Exception:
-        return pd.DataFrame()
-
-
-def append_open_snapshot(
-    *,
-    predictions_csv: str,
-    sport: str,
-    out_path: str = CLV_LOG_PATH,
-    only_play_pass: bool = True,
-) -> int:
-    """
-    Reads your predictions CSV and logs OPEN snapshots for bets you plan to take.
-    You should run this at the time you place bets (the "open").
-    """
-    df = pd.read_csv(predictions_csv)
-
-    if only_play_pass and "play_pass" in df.columns:
-        df = df[df["play_pass"].astype(str).str.upper().eq("PLAY")].copy()
-
-    if df.empty:
-        _ensure_parent(out_path)
-        # still create file if missing
-        if not os.path.exists(out_path):
-            pd.DataFrame().to_csv(out_path, index=False)
-        return 0
-
-    rows = []
-    for _, r in df.iterrows():
-        date_str = str(r.get("date", ""))
-        home = str(r.get("home", ""))
-        away = str(r.get("away", ""))
-
-        primary = str(r.get("primary_recommendation", ""))
-        # Decide market/side/price/line from your columns
-        market, side, price, line = _extract_bet_from_prediction_row(r)
-
-        if market is None:
-            continue
-
-        bid = bet_id(sport, date_str, home, away, market, side)
-
-        rows.append(
-            {
-                "bet_id": bid,
-                "sport": sport,
-                "date": date_str,
-                "home": home,
-                "away": away,
-                "market": market,
-                "side": side,
-                "open_price": price,
-                "open_line": line,
-                "open_ts_utc": datetime.utcnow().isoformat(timespec="seconds"),
-                "close_price": np.nan,
-                "close_line": np.nan,
-                "close_ts_utc": "",
-                "clv_price_american": np.nan,
-                "clv_prob_no_vig": np.nan,
-                "clv_notes": "",
-                "primary_recommendation": primary,
-            }
-        )
-
-    if not rows:
-        return 0
-
-    _ensure_parent(out_path)
-    old = _read_existing_log(out_path)
-
-    new = pd.DataFrame(rows)
-
-    # Dedup: don't re-add an open snapshot if bet_id already exists
-    if not old.empty and "bet_id" in old.columns:
-        existing = set(old["bet_id"].astype(str).tolist())
-        new = new[~new["bet_id"].astype(str).isin(existing)].copy()
-
-    if new.empty:
-        return 0
-
-    combined = pd.concat([old, new], ignore_index=True) if not old.empty else new
-    combined.to_csv(out_path, index=False)
-    return int(len(new))
-
-
-def update_close_snapshot_from_predictions(
-    *,
-    predictions_csv_close: str,
-    sport: str,
-    out_path: str = CLV_LOG_PATH,
-) -> int:
-    """
-    Update the CLV log with "close" prices/lines using a later predictions CSV
-    (i.e., rerun your script near game time to capture near-close odds).
-    """
-    close_df = pd.read_csv(predictions_csv_close)
-    log = _read_existing_log(out_path)
-    if log.empty:
-        return 0
-    if "bet_id" not in log.columns:
-        return 0
-
-    # Index log by bet_id for updates
-    log_idx = {str(b): i for i, b in enumerate(log["bet_id"].astype(str).tolist())}
-
-    updated = 0
-    for _, r in close_df.iterrows():
-        date_str = str(r.get("date", ""))
-        home = str(r.get("home", ""))
-        away = str(r.get("away", ""))
-
-        market, side, close_price, close_line = _extract_bet_from_prediction_row(r)
-        if market is None:
-            continue
-
-        bid = bet_id(sport, date_str, home, away, market, side)
-        i = log_idx.get(bid)
-        if i is None:
-            continue
-
-        # Only update if close not already set (or if you want to overwrite blanks)
-        open_price = _safe_float(log.loc[i, "open_price"])
-        open_line = _safe_float(log.loc[i, "open_line"])
-
-        log.loc[i, "close_price"] = close_price
-        log.loc[i, "close_line"] = close_line
-        log.loc[i, "close_ts_utc"] = datetime.utcnow().isoformat(timespec="seconds")
-
-        # CLV metrics
-        log.loc[i, "clv_price_american"] = _american_clv(open_price, close_price)
-        log.loc[i, "clv_prob_no_vig"] = _prob_clv_proxy(market, side, r, open_price, close_price)
-        updated += 1
-
-    log.to_csv(out_path, index=False)
-    return int(updated)
+        return float("nan")
 
 
 def _safe_float(x, default=np.nan) -> float:
@@ -231,85 +39,475 @@ def _safe_float(x, default=np.nan) -> float:
         return default
 
 
-def _american_clv(open_price: float, close_price: float) -> float:
-    """
-    Positive is "better for you" if you got a better number than close.
-    For American odds: For favorites (negative), getting closer to 0 is better.
-    For underdogs (positive), getting bigger is better.
-    A simple way: compare implied prob (no-vig is better, but we often only have one price).
-    Here we just do: open_implied - close_implied (positive means you beat the close).
-    """
-    op = american_to_prob(open_price)
-    cp = american_to_prob(close_price)
-    if np.isnan(op) or np.isnan(cp):
-        return float("nan")
-    return float(cp - op)  # close_prob - open_prob; if you took lower implied prob, you beat close
+def _canon_str(x) -> str:
+    return str(x).strip().lower().replace("  ", " ")
 
 
-def _prob_clv_proxy(market: str, side: str, row: pd.Series, open_price: float, close_price: float) -> float:
+def make_bet_id(
+    *,
+    sport: str,
+    game_date: str,   # "MM/DD/YYYY"
+    home: str,
+    away: str,
+    market: str,      # "ML" | "ATS" | "TOTAL"
+    side: str,        # "HOME"|"AWAY"|"OVER"|"UNDER"
+    line: Optional[float],
+) -> str:
     """
-    If you can provide both sides at open/close you can do true no-vig CLV.
-    With just one side, we do implied prob delta.
+    Deterministic ID so we can match open <-> close even across separate runs.
+
+    IMPORTANT: do NOT include price in the bet_id — price can change between open/close.
     """
-    op = american_to_prob(open_price)
-    cp = american_to_prob(close_price)
-    if np.isnan(op) or np.isnan(cp):
-        return float("nan")
-    # Positive means you beat close (you got a better price)
-    return float(cp - op)
+    line_s = "na" if line is None or (isinstance(line, float) and np.isnan(line)) else f"{float(line):.3f}"
+    return "|".join(
+        [
+            _canon_str(game_date),
+            _canon_str(sport),
+            _canon_str(home),
+            _canon_str(away),
+            _canon_str(market),
+            _canon_str(side),
+            line_s,
+        ]
+    )
 
 
-def _extract_bet_from_prediction_row(r: pd.Series) -> Tuple[Optional[str], Optional[str], Optional[float], Optional[float]]:
+# -----------------------------
+# CLV log schema
+# -----------------------------
+CLV_COLUMNS = [
+    "ts_open_utc",
+    "ts_close_utc",
+    "sport",
+    "game_date",
+    "home",
+    "away",
+    "market",
+    "side",
+    "bet_id",
+
+    # open
+    "open_price",
+    "open_line",
+
+    # close
+    "close_price",
+    "close_line",
+
+    # CLV metrics
+    "open_imp_prob",
+    "close_imp_prob",
+    "clv_imp_prob",     # close_imp_prob - open_imp_prob (positive = good)
+
+    "clv_line",         # favorable line movement in points/goals
+    "notes",
+]
+
+
+def _ensure_dir(path: str) -> None:
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+
+
+def _read_log(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=CLV_COLUMNS)
+    try:
+        df = pd.read_csv(path)
+        if df is None or df.empty:
+            return pd.DataFrame(columns=CLV_COLUMNS)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=CLV_COLUMNS)
+
+
+def _append_rows(path: str, rows: list[dict]) -> None:
+    _ensure_dir(path)
+    df_old = _read_log(path)
+    df_new = pd.DataFrame(rows)
+    df = pd.concat([df_old, df_new], ignore_index=True)
+    # de-dupe on bet_id + ts_open_utc (keep first)
+    if "bet_id" in df.columns and "ts_open_utc" in df.columns:
+        df = df.drop_duplicates(subset=["bet_id", "ts_open_utc"], keep="first")
+    df.to_csv(path, index=False)
+
+
+# -----------------------------
+# Extract "what did we bet?"
+# -----------------------------
+def _extract_bet_fields(row: pd.Series) -> Tuple[str, str, float, float]:
     """
-    Convert your prediction row to a canonical bet:
-      - market: "ML" | "ATS" | "TOTAL"
-      - side: "HOME" | "AWAY" | "OVER" | "UNDER"
-      - price: American odds
-      - line: spread or total number (optional)
-    Requires your CSV to include:
-      ML: home_ml, away_ml
-      ATS: home_spread, spread_price
-      TOTAL: total_points, total_over_price, total_under_price
-    and a usable primary_recommendation (or ml/spread/total recommendation).
+    Returns:
+      market, side, line, price
     """
-    # Prefer explicit columns if present
-    primary = str(r.get("primary_recommendation", "")).upper()
+    primary = str(row.get("primary_recommendation", "") or "")
+    mlr = str(row.get("ml_recommendation", "") or "")
+    sr = str(row.get("spread_recommendation", "") or "")
+    tr = str(row.get("total_recommendation", "") or "")
+
+    # Prefer primary; fallback to any "Model PICK ..."
+    s = primary
+    if not s.startswith("Model"):
+        if mlr.startswith("Model"):
+            s = mlr
+        elif sr.startswith("Model"):
+            s = sr
+        elif tr.startswith("Model"):
+            s = tr
+
+    # Defaults
+    market = "ML"
+    side = "HOME"
+    line = np.nan
+    price = np.nan
 
     # TOTAL
-    if "TOTAL" in primary or "PICK TOTAL" in primary:
-        side = "OVER" if "OVER" in primary else ("UNDER" if "UNDER" in primary else None)
-        if side is None:
-            return (None, None, None, None)
-        total = _safe_float(r.get("total_points"))
-        price = _safe_float(r.get("total_over_price" if side == "OVER" else "total_under_price"))
-        return ("TOTAL", side, price, total)
+    if "TOTAL" in s or "Model PICK TOTAL" in s:
+        market = "TOTAL"
+        if "OVER" in s:
+            side = "OVER"
+            line = _safe_float(row.get("total_points"))
+            price = _safe_float(row.get("total_over_price"))
+        elif "UNDER" in s:
+            side = "UNDER"
+            line = _safe_float(row.get("total_points"))
+            price = _safe_float(row.get("total_under_price"))
+        return market, side, line, price
 
     # ATS
-    if "ATS" in primary:
-        # your model uses "Model PICK ATS: HOME/AWAY"
-        if "HOME" in primary:
+    if "ATS" in s:
+        market = "ATS"
+        if "HOME" in s:
             side = "HOME"
-        elif "AWAY" in primary:
+            line = _safe_float(row.get("home_spread"))
+            price = _safe_float(row.get("spread_price"))
+        elif "AWAY" in s:
             side = "AWAY"
-        else:
-            return (None, None, None, None)
-        line = _safe_float(r.get("home_spread"))
-        price = _safe_float(r.get("spread_price"))
-        return ("ATS", side, price, line)
+            # away line is the negative of home_spread
+            hs = _safe_float(row.get("home_spread"))
+            line = -hs if not np.isnan(hs) else np.nan
+            price = _safe_float(row.get("spread_price"))
+        return market, side, line, price
 
-    # ML default
-    # If primary doesn't mention, fall back to ml_recommendation / spread_recommendation / total_recommendation
-    mlr = str(r.get("ml_recommendation", "")).upper()
-    if "HOME" in mlr:
-        side = "HOME"
-    elif "AWAY" in mlr:
+    # ML
+    market = "ML"
+    if "AWAY" in s:
         side = "AWAY"
-    elif "HOME" in primary:
-        side = "HOME"
-    elif "AWAY" in primary:
-        side = "AWAY"
+        price = _safe_float(row.get("away_ml"))
     else:
-        return (None, None, None, None)
+        side = "HOME"
+        price = _safe_float(row.get("home_ml"))
+    line = np.nan
+    return market, side, line, price
 
-    price = _safe_float(r.get("home_ml" if side == "HOME" else "away_ml"))
-    return ("ML", side, price, None)
+
+# -----------------------------
+# Public API: log "open" lines
+# -----------------------------
+def log_open_from_predictions(
+    preds_df: pd.DataFrame,
+    *,
+    sport: str,
+    game_date: str,
+    clv_log_path: str = "results/clv_log.csv",
+    only_plays: bool = True,
+) -> pd.DataFrame:
+    """
+    Writes "open" lines to CLV log. Returns preds_df with bet_id column added.
+
+    For best results:
+      - run this when you actually place bets (your "open" snapshot)
+      - then run update_closing_lines_from_api() later near tip/puck drop/kickoff
+    """
+    if preds_df is None or preds_df.empty:
+        return preds_df
+
+    out = preds_df.copy()
+    if "bet_id" not in out.columns:
+        out["bet_id"] = ""
+
+    rows = []
+    ts_open = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    for i in out.index:
+        if only_plays:
+            if str(out.loc[i, "play_pass"] or "").upper() != "PLAY":
+                continue
+
+        home = str(out.loc[i, "home"])
+        away = str(out.loc[i, "away"])
+
+        market, side, line, price = _extract_bet_fields(out.loc[i])
+
+        # must have a price to track CLV
+        if np.isnan(_safe_float(price)):
+            continue
+
+        bet_id = make_bet_id(
+            sport=sport,
+            game_date=game_date,
+            home=home,
+            away=away,
+            market=market,
+            side=side,
+            line=None if np.isnan(_safe_float(line)) else float(line),
+        )
+        out.loc[i, "bet_id"] = bet_id
+
+        open_imp = american_to_prob(price)
+
+        rows.append(
+            {
+                "ts_open_utc": ts_open,
+                "ts_close_utc": "",
+                "sport": sport,
+                "game_date": game_date,
+                "home": home,
+                "away": away,
+                "market": market,
+                "side": side,
+                "bet_id": bet_id,
+                "open_price": float(price),
+                "open_line": (np.nan if np.isnan(_safe_float(line)) else float(line)),
+                "close_price": np.nan,
+                "close_line": np.nan,
+                "open_imp_prob": float(open_imp) if not np.isnan(open_imp) else np.nan,
+                "close_imp_prob": np.nan,
+                "clv_imp_prob": np.nan,
+                "clv_line": np.nan,
+                "notes": "",
+            }
+        )
+
+    if rows:
+        _append_rows(clv_log_path, rows)
+
+    return out
+
+
+# -----------------------------
+# Public API: update "close" lines
+# -----------------------------
+def update_closing_lines_from_api(
+    *,
+    sport: str,
+    game_date: str,  # "MM/DD/YYYY"
+    days_padding: int = 1,
+    clv_log_path: str = "results/clv_log.csv",
+    sleep_s: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Reads clv_log.csv and fills close_price/close_line for matching sport+date rows
+    using the CURRENT odds snapshot from Odds API.
+
+    Run this near game start to approximate "closing" lines.
+    """
+    df = _read_log(clv_log_path)
+    if df.empty:
+        return df
+
+    # filter rows that need close and match sport/date
+    mask = (
+        (df.get("sport", "").astype(str).str.lower() == str(sport).lower())
+        & (df.get("game_date", "").astype(str) == str(game_date))
+        & (df.get("close_price").isna())
+    )
+    needs = df[mask].copy()
+    if needs.empty:
+        return df
+
+    # Pull current odds snapshot (this is your "close" approximation)
+    try:
+        dt = datetime.strptime(game_date, "%m/%d/%Y")
+    except Exception:
+        # if parse fails, just return
+        return df
+
+    commence_from = dt.replace(tzinfo=timezone.utc) - timedelta(days=int(days_padding))
+    commence_to = dt.replace(tzinfo=timezone.utc) + timedelta(days=int(days_padding), hours=23, minutes=59)
+
+    sport_key = SPORT_TO_ODDS_KEY.get(str(sport).lower())
+    if not sport_key:
+        return df
+
+    odds_dict = load_odds_for_date_from_api(
+        sport_key=sport_key,
+        commence_from=commence_from,
+        commence_to=commence_to,
+        markets="h2h,spreads,totals",
+    )
+
+    ts_close = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    for idx in needs.index:
+        home = str(df.loc[idx, "home"])
+        away = str(df.loc[idx, "away"])
+        market = str(df.loc[idx, "market"])
+        side = str(df.loc[idx, "side"])
+
+        oi = odds_dict.get((home, away))
+        if oi is None:
+            # Sometimes key ordering differs; try reverse
+            oi = odds_dict.get((away, home))
+
+        if not isinstance(oi, dict):
+            continue
+
+        close_price = np.nan
+        close_line = np.nan
+
+        if market == "ML":
+            if side == "HOME":
+                close_price = _safe_float(oi.get("home_ml"))
+            else:
+                close_price = _safe_float(oi.get("away_ml"))
+        elif market == "ATS":
+            hs = _safe_float(oi.get("home_spread"))
+            sp = _safe_float(oi.get("spread_price"))
+            if side == "HOME":
+                close_line = hs
+                close_price = sp
+            else:
+                close_line = -hs if not np.isnan(hs) else np.nan
+                close_price = sp
+        elif market == "TOTAL":
+            tp = _safe_float(oi.get("total_points"))
+            op = _safe_float(oi.get("over_price"))
+            up = _safe_float(oi.get("under_price"))
+            close_line = tp
+            close_price = op if side == "OVER" else up
+
+        if np.isnan(_safe_float(close_price)):
+            continue
+
+        df.loc[idx, "ts_close_utc"] = ts_close
+        df.loc[idx, "close_price"] = float(close_price)
+        if not np.isnan(_safe_float(close_line)):
+            df.loc[idx, "close_line"] = float(close_line)
+
+        # implied-prob CLV
+        open_p = _safe_float(df.loc[idx, "open_imp_prob"])
+        close_p = american_to_prob(close_price)
+        df.loc[idx, "close_imp_prob"] = float(close_p) if not np.isnan(close_p) else np.nan
+        if not np.isnan(open_p) and not np.isnan(close_p):
+            df.loc[idx, "clv_imp_prob"] = float(close_p - open_p)
+
+        # line CLV (favorable movement)
+        # For ATS:
+        #   HOME: you want close_line < open_line if you bet HOME -x, or close_line smaller if you bet +x
+        #   A robust rule: for HOME, favorable = open_line - close_line. For AWAY, favorable = close_line - open_line.
+        # For TOTAL:
+        #   OVER: favorable = open_total - close_total (line goes down)
+        #   UNDER: favorable = close_total - open_total (line goes up)
+        ol = _safe_float(df.loc[idx, "open_line"])
+        cl = _safe_float(df.loc[idx, "close_line"])
+        if not np.isnan(ol) and not np.isnan(cl):
+            if market == "ATS":
+                if side == "HOME":
+                    df.loc[idx, "clv_line"] = float(ol - cl)
+                else:
+                    df.loc[idx, "clv_line"] = float(cl - ol)
+            elif market == "TOTAL":
+                if side == "OVER":
+                    df.loc[idx, "clv_line"] = float(ol - cl)
+                else:
+                    df.loc[idx, "clv_line"] = float(cl - ol)
+
+        if sleep_s and sleep_s > 0:
+            time.sleep(float(sleep_s))
+
+    _ensure_dir(clv_log_path)
+    df.to_csv(clv_log_path, index=False)
+    return df
+
+
+# -----------------------------
+# Market health / stop-betting report
+# -----------------------------
+@dataclass
+class MarketStopRule:
+    min_bets: int = 30
+    lookback_days: int = 60
+    # If your average CLV is below this, stop.
+    # For clv_imp_prob: -0.005 means you're losing ~0.5% implied-prob vs close on average.
+    max_negative_mean_clv_imp_prob: float = -0.005
+
+
+def market_health_report(
+    *,
+    clv_log_path: str = "results/clv_log.csv",
+    rule: MarketStopRule = MarketStopRule(),
+) -> pd.DataFrame:
+    """
+    Uses CLV as a *proxy* for whether your bets are beating the market.
+
+    Output columns:
+      market, n, mean_clv_imp_prob, median_clv_imp_prob, mean_clv_line
+      recommendation: "OK" or "STOP"
+    """
+    df = _read_log(clv_log_path)
+    if df.empty:
+        return pd.DataFrame(
+            columns=["market", "n", "mean_clv_imp_prob", "median_clv_imp_prob", "mean_clv_line", "recommendation"]
+        )
+
+    # time filter
+    try:
+        df["ts_open_utc"] = pd.to_datetime(df["ts_open_utc"], errors="coerce", utc=True)
+    except Exception:
+        pass
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=int(rule.lookback_days))
+    if "ts_open_utc" in df.columns:
+        df = df[df["ts_open_utc"] >= cutoff]
+
+    # only rows with close
+    df = df[~df.get("clv_imp_prob").isna()]
+    if df.empty:
+        return pd.DataFrame(
+            columns=["market", "n", "mean_clv_imp_prob", "median_clv_imp_prob", "mean_clv_line", "recommendation"]
+        )
+
+    out_rows = []
+    for market, g in df.groupby("market"):
+        n = int(len(g))
+        mean_clv = float(np.mean(g["clv_imp_prob"].astype(float)))
+        med_clv = float(np.median(g["clv_imp_prob"].astype(float)))
+        mean_line = float(np.mean(g["clv_line"].astype(float))) if "clv_line" in g.columns else float("nan")
+
+        rec = "OK"
+        if n >= int(rule.min_bets) and mean_clv <= float(rule.max_negative_mean_clv_imp_prob):
+            rec = "STOP"
+
+        out_rows.append(
+            {
+                "market": str(market),
+                "n": n,
+                "mean_clv_imp_prob": mean_clv,
+                "median_clv_imp_prob": med_clv,
+                "mean_clv_line": mean_line,
+                "recommendation": rec,
+            }
+        )
+
+    out = pd.DataFrame(out_rows).sort_values(["recommendation", "mean_clv_imp_prob"])
+    return out
+
+
+def markets_to_stop(
+    *,
+    clv_log_path: str = "results/clv_log.csv",
+    rule: MarketStopRule = MarketStopRule(),
+) -> Dict[str, bool]:
+    """
+    Returns dict like {"ML": False, "ATS": True, "TOTAL": True}
+    """
+    rep = market_health_report(clv_log_path=clv_log_path, rule=rule)
+    stop = {"ML": False, "ATS": False, "TOTAL": False}
+    if rep is None or rep.empty:
+        return stop
+    for _, r in rep.iterrows():
+        m = str(r.get("market"))
+        stop[m] = (str(r.get("recommendation")) == "STOP")
+    return stop
