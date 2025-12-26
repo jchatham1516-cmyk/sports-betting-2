@@ -7,7 +7,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import requests
@@ -15,13 +15,14 @@ import requests
 ODDS_API_HOST = "https://api.the-odds-api.com"
 DEFAULT_TIMEOUT = 20
 
-# OPTION B knobs (safe + not thousands of requests)
-HIST_MAX_REQUESTS = int(os.getenv("ODDS_HIST_TOTALS_MAX_REQUESTS", "60"))     # hard cap
-HIST_SLEEP_S = float(os.getenv("ODDS_HIST_TOTALS_SLEEP_S", "0.10"))           # spacing
-HIST_DAYS_BACK_DEFAULT = int(os.getenv("ODDS_HIST_TOTALS_DAYS_BACK", "14"))   # typical 14
-HIST_EVENTS_PER_DAY = int(os.getenv("ODDS_HIST_EVENTS_PER_DAY", "6"))         # sample only a few events/day
-HIST_MIN_TOTAL_LINES = int(os.getenv("ODDS_HIST_MIN_TOTAL_LINES", "20"))      # if cache < this, recompute
-HIST_BOOKMAKERS = os.getenv("ODDS_HIST_TOTALS_BOOKMAKERS", "draftkings,fanduel,betmgm,caesars")
+# OPTION C knobs
+HIST_MAX_REQUESTS = int(os.getenv("ODDS_HIST_TOTALS_MAX_REQUESTS", "60"))  # hard cap
+HIST_SLEEP_S = float(os.getenv("ODDS_HIST_TOTALS_SLEEP_S", "0.15"))        # tiny spacing
+HIST_BOOKMAKERS = os.getenv("ODDS_HIST_TOTALS_BOOKMAKERS", "draftkings")   # can change later
+
+# Cache safety: don't reuse an empty cache all day
+HIST_CACHE_MIN_TEAMS = int(os.getenv("ODDS_HIST_TOTALS_CACHE_MIN_TEAMS", "10"))
+HIST_CACHE_MIN_LINES = int(os.getenv("ODDS_HIST_TOTALS_CACHE_MIN_LINES", "30"))
 
 
 @dataclass
@@ -69,7 +70,7 @@ def _get_json(url: str, params: dict, budget: _HistBudget) -> Any:
         return None
 
     if r.status_code == 429:
-        time.sleep(1.0)
+        time.sleep(1.5)
 
     r.raise_for_status()
     time.sleep(HIST_SLEEP_S)
@@ -102,45 +103,89 @@ def _save_cache(sport_key: str, payload: dict) -> None:
         pass
 
 
-def _extract_total_from_hist_odds_payload(payload: dict) -> Optional[float]:
+def _extract_events_list(events_payload: Any) -> List[dict]:
+    """
+    Odds API historical events endpoint can return:
+      - list[events]
+      - {"data": list[events]}
+      - {"data": {"events": list[events]}} (rare)
+    This normalizes to list[dict].
+    """
+    if events_payload is None:
+        return []
+
+    if isinstance(events_payload, list):
+        return [e for e in events_payload if isinstance(e, dict)]
+
+    if isinstance(events_payload, dict):
+        d = events_payload.get("data")
+        if isinstance(d, list):
+            return [e for e in d if isinstance(e, dict)]
+        if isinstance(d, dict):
+            maybe = d.get("events")
+            if isinstance(maybe, list):
+                return [e for e in maybe if isinstance(e, dict)]
+    return []
+
+
+def _extract_total_from_hist_odds_payload(payload: Any) -> Optional[float]:
+    """
+    Historical odds endpoint commonly returns:
+      - {"data": {event-like dict with bookmakers...}}
+      - {"data": [event-like dicts...]}   (sometimes)
+      - {event-like dict...}
+    We look for totals market point.
+    """
     if payload is None:
         return None
 
-    # historical odds endpoint often returns {"data": {...event...}}
-    ev = payload.get("data") if isinstance(payload, dict) else None
-    if ev is None and isinstance(payload, dict):
-        ev = payload
+    candidates: List[dict] = []
 
-    books = (ev or {}).get("bookmakers") or []
-    for b in books:
-        markets = b.get("markets") or []
-        for m in markets:
-            if m.get("key") != "totals":
-                continue
-            outs = m.get("outcomes") or []
-            for o in outs:
-                pt = o.get("point")
-                if pt is not None:
-                    try:
-                        return float(pt)
-                    except Exception:
-                        continue
+    if isinstance(payload, dict):
+        if isinstance(payload.get("data"), dict):
+            candidates.append(payload["data"])
+        elif isinstance(payload.get("data"), list):
+            for x in payload["data"]:
+                if isinstance(x, dict):
+                    candidates.append(x)
+        else:
+            candidates.append(payload)
+    elif isinstance(payload, list):
+        for x in payload:
+            if isinstance(x, dict):
+                candidates.append(x)
+
+    for ev in candidates:
+        books = (ev or {}).get("bookmakers") or []
+        for b in books:
+            markets = b.get("markets") or []
+            for m in markets:
+                if m.get("key") != "totals":
+                    continue
+                outs = m.get("outcomes") or []
+                for o in outs:
+                    pt = o.get("point")
+                    if pt is not None:
+                        try:
+                            return float(pt)
+                        except Exception:
+                            continue
     return None
 
 
 def build_team_historical_total_lines(
     *,
     sport_key: str,
-    days_back: int = HIST_DAYS_BACK_DEFAULT,
+    days_back: int = 14,
     minutes_before_commence: int = 10,
 ) -> Dict[str, Dict[str, float]]:
     """
-    OPTION B:
-      - cache daily
-      - if cache exists but is "too empty" -> recompute
-      - request cap via HIST_MAX_REQUESTS
-      - sample only HIST_EVENTS_PER_DAY events/day
-      - bookmaker fallback list
+    Returns:
+      { team_name: {"avg": float, "sd": float, "n": int} }
+
+    OPTION C behavior:
+      - uses cache if already computed today AND it's not trivially empty
+      - caps total HTTP requests (events list + per-event odds) via HIST_MAX_REQUESTS
     """
     api_key = _get_api_key()
     if not api_key:
@@ -150,51 +195,46 @@ def build_team_historical_total_lines(
     today_utc = datetime.now(timezone.utc).date().isoformat()
     cache = _load_cache(sport_key) or {}
 
-    # Cache validation: must be same day AND contain enough data
-    if cache.get("asof_date") == today_utc and isinstance(cache.get("team_totals"), dict):
-        n_lines = int(cache.get("n_total_lines", 0) or 0)
-        if n_lines >= HIST_MIN_TOTAL_LINES:
-            return cache["team_totals"]
-        else:
-            print(f"[hist_totals] Cache exists but too small (n_total_lines={n_lines}<{HIST_MIN_TOTAL_LINES}), recomputing...")
+    cached_team_totals = cache.get("team_totals") if isinstance(cache, dict) else None
+    if cache.get("asof_date") == today_utc and isinstance(cached_team_totals, dict):
+        # Only trust cache if it's non-trivially populated
+        try:
+            teams_n = len(cached_team_totals)
+            lines_n = int(sum(int(v.get("n", 0)) for v in cached_team_totals.values() if isinstance(v, dict)))
+        except Exception:
+            teams_n, lines_n = 0, 0
+
+        if teams_n >= HIST_CACHE_MIN_TEAMS and lines_n >= HIST_CACHE_MIN_LINES:
+            return cached_team_totals
+        # Otherwise ignore cache and recompute (prevents "empty all day" problem)
 
     budget = _HistBudget(limit=HIST_MAX_REQUESTS)
     totals_by_team: Dict[str, List[float]] = defaultdict(list)
 
-    bookmakers = [b.strip() for b in str(HIST_BOOKMAKERS).split(",") if b.strip()]
-
-    # loop backward over days
     for d in range(int(days_back)):
-        if budget.hard_stop:
-            break
-
+        # Stable “query time”
         query_dt = datetime.now(timezone.utc) - timedelta(days=d)
         query_dt = query_dt.replace(hour=12, minute=0, second=0, microsecond=0)
 
-        # 1) list events for that date
+        # 1) list events
         events_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events"
         events_params = {"apiKey": api_key, "date": _iso_z(query_dt), "dateFormat": "iso"}
 
         try:
-            events = _get_json(events_url, events_params, budget)
+            events_payload = _get_json(events_url, events_params, budget)
         except Exception as e:
             print(f"[hist_totals] WARNING: events list failed for {query_dt.date()}: {e}")
             break
 
-        if events is None:
+        if events_payload is None:
             break
-        if not isinstance(events, list) or not events:
+
+        events = _extract_events_list(events_payload)
+        if not events:
             continue
 
-        # sample only a few events/day to control calls
-        sampled = 0
-
+        # 2) for each event, fetch totals odds once
         for ev in events:
-            if sampled >= HIST_EVENTS_PER_DAY:
-                break
-            if budget.hard_stop:
-                break
-
             try:
                 event_id = ev.get("id")
                 home = ev.get("home_team")
@@ -206,56 +246,52 @@ def build_team_historical_total_lines(
                 try:
                     cdt = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
                 except Exception:
-                    continue
+                    cdt = query_dt
 
                 hist_dt = cdt - timedelta(minutes=int(minutes_before_commence))
 
-                got_line = None
-                for bm in bookmakers:
-                    odds_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events/{event_id}/odds"
-                    odds_params = {
-                        "apiKey": api_key,
-                        "date": _iso_z(hist_dt),
-                        "regions": "us",
-                        "markets": "totals",
-                        "oddsFormat": "american",
-                        "dateFormat": "iso",
-                        "bookmakers": bm,
-                    }
+                odds_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events/{event_id}/odds"
+                odds_params = {
+                    "apiKey": api_key,
+                    "date": _iso_z(hist_dt),
+                    "regions": "us",
+                    "markets": "totals",
+                    "oddsFormat": "american",
+                    "dateFormat": "iso",
+                    "bookmakers": HIST_BOOKMAKERS,
+                }
 
-                    payload = _get_json(odds_url, odds_params, budget)
-                    if payload is None:
-                        budget.hard_stop = True
-                        break
+                payload = _get_json(odds_url, odds_params, budget)
+                if payload is None:
+                    break
 
-                    got_line = _extract_total_from_hist_odds_payload(payload)
-                    if got_line is not None:
-                        break  # bookmaker success
-
-                if got_line is None:
+                total_line = _extract_total_from_hist_odds_payload(payload)
+                if total_line is None:
                     continue
 
-                totals_by_team[str(home)].append(float(got_line))
-                totals_by_team[str(away)].append(float(got_line))
-                sampled += 1
+                totals_by_team[str(home)].append(float(total_line))
+                totals_by_team[str(away)].append(float(total_line))
 
             except Exception as e:
-                if "Request budget exceeded" in str(e):
-                    print(f"[hist_totals] {e} -> stopping.")
+                msg = str(e)
+                if "Request budget exceeded" in msg:
+                    print(f"[hist_totals] {msg} -> stopping.")
                     budget.hard_stop = True
                     break
                 continue
 
+        if budget.hard_stop:
+            break
+
     out: Dict[str, Dict[str, float]] = {}
-    n_total_lines = 0
     for team, lines in totals_by_team.items():
         if not lines:
             continue
         arr = np.array(lines, dtype=float)
-        n_total_lines += int(arr.size)
         avg = float(np.mean(arr))
         sd = float(np.std(arr, ddof=1)) if arr.size >= 2 else float("nan")
         out[str(team)] = {"avg": avg, "sd": sd, "n": int(arr.size)}
 
-    _save_cache(sport_key, {"asof_date": today_utc, "team_totals": out, "n_total_lines": int(n_total_lines)})
+    # Save cache even if small, but tomorrow's run will recompute if too small
+    _save_cache(sport_key, {"asof_date": today_utc, "team_totals": out})
     return out
