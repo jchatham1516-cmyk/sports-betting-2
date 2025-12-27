@@ -29,57 +29,43 @@ MARGIN_CAL_PATH = "results/margin_cal_nhl.json"
 HOME_ADV = 45.0
 ELO_K = 18.0
 
-# Elo -> goals (roughly) (fallback until margin calibrator is trained)
+# Elo -> goals (fallback until margin calibrator is trained)
 ELO_PER_GOAL = 55.0
 
-# Spread cap (puck line-ish)
 MAX_ABS_MODEL_SPREAD = 2.5
-
-# Prob compression
 BASE_COMPRESS = 0.78
-
-# ML threshold
 MIN_ML_EDGE = 0.02
-
-# Calibration minimum games
 CAL_MIN_GAMES = 120
 
-# Rest effects
 SHORT_REST_PENALTY_ELO = -10.0
 NORMAL_REST_BONUS_ELO = 0.0
 
-# Recent form (margin = goals for - goals against)
 FORM_LOOKBACK_DAYS = 35
 FORM_MIN_GAMES = 2
 FORM_ELO_PER_GOAL = 7.0
 FORM_ELO_CLAMP = 35.0
 
 # ----------------------------
-# ATS (puck line)
-# NOTE: NHL puck line is usually -1.5 / +1.5 and pricing is often different.
-# We DISABLE ATS by default; turn on with NHL_ENABLE_ATS=1.
+# Puck line (ATS) - DISABLED by default
 # ----------------------------
-ENABLE_ATS = os.getenv("NHL_ENABLE_ATS", "0") == "1"
+NHL_ENABLE_PUCKLINE = os.getenv("NHL_ENABLE_PUCKLINE", "0") == "1"
 
 ATS_SD_GOALS = 1.35
 ATS_DEFAULT_PRICE = -110.0
 ATS_MIN_EDGE_VS_BE = 0.03
-ATS_MIN_GOALS_EDGE = 0.35
+ATS_MIN_GOALS_EDGE = 0.50  # stricter than before
 ATS_BIG_LINE = 1.5
 ATS_TINY_MODEL = 0.35
 ATS_BIGLINE_FORCE_PASS = False
-MAX_ATS_PLAYS_PER_DAY = 3  # None to disable; only matters if ENABLE_ATS=1
+MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NHL_MAX_ATS_PLAYS_PER_DAY", "0"))  # 0 => effectively none
 
 # ----------------------------
-# Totals (historical market totals lines)
+# Totals (goals)
 # ----------------------------
 TOTAL_DEFAULT_PRICE = -110.0
-TOTAL_HIST_DAYS = 21
-
-# Regression to league mean (prevents extremes)
+TOTAL_HIST_DAYS = int(os.getenv("NHL_HIST_TOTALS_DAYS", "21"))
 TOTAL_REGRESS_WEIGHT = 0.40
 
-# Totals uncertainty in goals
 TOTAL_SD_FLOOR = 0.55
 TOTAL_SD_CEIL = 1.35
 
@@ -197,7 +183,7 @@ def _breakeven_prob_from_american(price: float) -> float:
 
 
 # ----------------------------
-# ATS helpers (puck line)
+# Puck line helpers (ATS)
 # ----------------------------
 def _cover_prob_from_edge(spread_edge_goals: float, sd_goals: float = ATS_SD_GOALS) -> float:
     if spread_edge_goals is None or np.isnan(spread_edge_goals):
@@ -237,10 +223,10 @@ def _ats_strength_label(edge_vs_be: float) -> str:
 
 def _ats_reco(side: str, strength: str) -> str:
     if side == "NONE" or strength == "UNKNOWN":
-        return "No ATS bet (missing spread/price)"
+        return "No puckline bet (missing spread/price)"
     if strength == "too_close":
-        return "Too close to call ATS (edge too small)"
-    return f"Model PICK ATS: {side} ({strength})"
+        return "Too close to call puckline (edge too small)"
+    return f"Model PICK PUCKLINE: {side} ({strength})"
 
 
 # ----------------------------
@@ -253,10 +239,6 @@ def _total_pick_and_edge(
     under_price: float,
     sd: float,
 ) -> Tuple[str, float, float, float, float]:
-    """
-    Returns:
-      side, p_win, be, edge_vs_be, edge_goals
-    """
     if np.isnan(model_total) or np.isnan(market_total) or np.isnan(sd) or sd <= 0:
         return ("NONE", float("nan"), float("nan"), float("nan"), float("nan"))
 
@@ -313,16 +295,14 @@ def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
 
         home = canon_team(home_raw)
         away = canon_team(away_raw)
-        if not home or not away:
-            continue
 
         d = _parse_iso_date(ev.get("commence_time") or "")
         if d is None:
             continue
 
-        if (home not in last_played) or (d > last_played[home]):
+        if home and ((home not in last_played) or (d > last_played[home])):
             last_played[home] = d
-        if (away not in last_played) or (d > last_played[away]):
+        if away and ((away not in last_played) or (d > last_played[away])):
             last_played[away] = d
 
     return last_played
@@ -370,30 +350,21 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
     for team, lst in margins.items():
         lst = sorted(lst, key=lambda x: x[0], reverse=True)
         margins_only = [m for _, m in lst]
-        games = len(margins_only)
-        if games < FORM_MIN_GAMES:
+        if len(margins_only) < FORM_MIN_GAMES:
             continue
 
         avg_margin = float(np.mean(margins_only))
         elo_adj = _clamp(avg_margin * FORM_ELO_PER_GOAL, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
-        out[team] = {"avg_margin": avg_margin, "games": int(games), "elo_adj": float(elo_adj)}
+        out[team] = {"avg_margin": avg_margin, "games": int(len(margins_only)), "elo_adj": float(elo_adj)}
 
     return out
 
 
 def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
-    """
-    Updates Elo from recent completed games.
-    Trains:
-      - Platt probability calibrator
-      - Margin calibrator (elo_diff -> expected goals margin)
-    """
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nhl"]
 
-    # give NHL plenty of runway so Elo doesn't stay default early on
-    lookback = min(max(int(days_from), 30), 120)
-    events = fetch_recent_scores(sport_key=sport_key, days_from=lookback)
+    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 60))
 
     train_ps: list = []
     train_ys: list = []
@@ -459,7 +430,7 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 # Main daily run
 # ----------------------------
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
-    st = update_elo_from_recent_scores(days_from=45)
+    st = update_elo_from_recent_scores(days_from=14)
 
     platt = load_platt(PLATT_PATH)
     margin_cal = load_margin_cal(MARGIN_CAL_PATH)
@@ -488,7 +459,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         try:
             team_total_lines = build_team_historical_total_lines(
                 sport_key=sport_key,
-                days_back=TOTAL_HIST_DAYS,
+                days_back=int(TOTAL_HIST_DAYS),
                 minutes_before_commence=10,
             )
         except Exception as e:
@@ -509,19 +480,23 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     league_avg_total = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 0.95
 
-    def _team_line_avg_sd(team_key: str) -> Tuple[float, float]:
-        # IMPORTANT: historical_totals is keyed by Odds API team strings (raw),
-        # so we pass in home_in/away_in (raw) not canon_team(...)
-        v = (team_total_lines or {}).get(team_key)
+    def _team_line_avg_sd(team_name: str, raw_name: str) -> Tuple[float, float]:
+        # Try canonical key first, then raw Odds API key
+        v = (team_total_lines or {}).get(team_name)
+        if not (isinstance(v, dict) and v.get("avg") is not None):
+            v = (team_total_lines or {}).get(raw_name)
+
         if isinstance(v, dict) and v.get("avg") is not None:
             return (_safe_float(v.get("avg")), _safe_float(v.get("sd"), default=np.nan))
         return (float("nan"), float("nan"))
 
     rows = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
-        # canon for Elo + form/rest
-        home = canon_team(home_in)
-        away = canon_team(away_in)
+        raw_home = str(home_in)
+        raw_away = str(away_in)
+
+        home = canon_team(raw_home)
+        away = canon_team(raw_away)
         if not home or not away:
             continue
 
@@ -538,10 +513,11 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         form_away = float((form_map.get(away) or {}).get("elo_adj", 0.0))
         form_diff = float(form_home - form_away)
 
+        # Effective elos
         eh_eff = float(eh) + float(rest_adj) + 0.5 * float(form_diff)
         ea_eff = float(ea) - 0.5 * float(form_diff)
 
-        # Win prob
+        # Win prob (raw -> compressed -> calibrated)
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
         p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
         try:
@@ -549,7 +525,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         except Exception:
             p_home = p_comp
 
-        # Spread-ish model
+        # Spread-ish (goals)
         elo_diff = (eh_eff - ea_eff) + HOME_ADV
         model_spread_home = _clamp(
             _margin_model_spread_from_elo_diff(float(elo_diff)),
@@ -561,7 +537,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         home_ml = _safe_float((oi or {}).get("home_ml"))
         away_ml = _safe_float((oi or {}).get("away_ml"))
         home_spread = _safe_float((oi or {}).get("home_spread"))
-        spread_price = _safe_float((oi or {}).get("spread_price"), default=ATS_DEFAULT_PRICE)
+        spread_price = _safe_float((oi or {}).get("spread_price"), default=np.nan)
 
         total_points = _safe_float((oi or {}).get("total_points"))
         total_over_price = _safe_float((oi or {}).get("over_price"), default=TOTAL_DEFAULT_PRICE)
@@ -579,26 +555,30 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         value_tier = _pick_value_tier(abs(edge_home)) if not np.isnan(edge_home) else "UNKNOWN"
 
         # ----------------------------
-        # ATS: disabled by default
+        # PUCK LINE (ATS) — disabled by default + sanity checks
         # ----------------------------
-        if not ENABLE_ATS:
-            spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
-            p_home_cover = float("nan")
-            ats_side, ats_p_win, ats_edge_vs_be, ats_be = ("NONE", float("nan"), float("nan"), float("nan"))
-            ats_strength = "pass"
-            ats_pass_reason = "disabled"
-            spread_reco = "No ATS bet (disabled)"
-        else:
-            spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
-            p_home_cover = _cover_prob_from_edge(spread_edge_home, sd_goals=ATS_SD_GOALS)
-            ats_side, ats_p_win, ats_edge_vs_be, ats_be = _ats_pick_and_edge(p_home_cover, spread_price)
+        ats_strength = "pass"
+        ats_pass_reason = "disabled"
+        ats_side, ats_p_win, ats_edge_vs_be, ats_be = ("NONE", float("nan"), float("nan"), float("nan"))
+        p_home_cover = float("nan")
+        spread_edge_home = float("nan")
+        spread_reco = "No puckline bet (disabled)"
 
-            ats_pass_reason = ""
-            ats_allowed = True
-            if np.isnan(home_spread) or np.isnan(model_spread_home):
-                ats_allowed = False
+        if NHL_ENABLE_PUCKLINE:
+            # Sanity checks: prevent ML prices being mistaken as puckline prices
+            # Puckline prices should usually be in a reasonable range like [-200, +200]
+            if np.isnan(home_spread):
                 ats_pass_reason = "missing spread"
+            elif np.isnan(spread_price) or abs(float(spread_price)) > 250:
+                ats_pass_reason = "bad puckline price (looks wrong)"
+            elif abs(float(home_spread)) < 0.75 or abs(float(home_spread)) > 2.5:
+                ats_pass_reason = "bad puckline spread (looks wrong)"
             else:
+                spread_edge_home = float(home_spread - model_spread_home)
+                p_home_cover = _cover_prob_from_edge(spread_edge_home, sd_goals=ATS_SD_GOALS)
+                ats_side, ats_p_win, ats_edge_vs_be, ats_be = _ats_pick_and_edge(p_home_cover, float(spread_price))
+
+                ats_allowed = True
                 if ATS_BIGLINE_FORCE_PASS and abs(home_spread) >= ATS_BIG_LINE and abs(model_spread_home) <= ATS_TINY_MODEL:
                     ats_allowed = False
                     ats_pass_reason = "big market line but tiny model line"
@@ -609,18 +589,19 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                     ats_allowed = False
                     ats_pass_reason = f"|spread_edge|<{ATS_MIN_GOALS_EDGE:.2f}"
 
-            if not ats_allowed:
-                ats_strength = "pass"
-                spread_reco = f"No ATS bet (gated): {ats_pass_reason}" if ats_pass_reason else "No ATS bet (gated)"
-            else:
-                ats_strength = _ats_strength_label(ats_edge_vs_be)
-                spread_reco = _ats_reco(ats_side, ats_strength)
+                if not ats_allowed:
+                    ats_strength = "pass"
+                    spread_reco = f"No puckline bet (gated): {ats_pass_reason}"
+                else:
+                    ats_strength = _ats_strength_label(ats_edge_vs_be)
+                    spread_reco = _ats_reco(ats_side, ats_strength)
+                    ats_pass_reason = ""
 
         # ----------------------------
-        # TOTALS: use historical market totals lines (KEYED BY RAW TEAM NAMES)
+        # TOTALS (goals) — if history missing, fall back to league/market so we don't output blanks
         # ----------------------------
-        home_avg, home_sd = _team_line_avg_sd(str(home_in))
-        away_avg, away_sd = _team_line_avg_sd(str(away_in))
+        home_avg, home_sd = _team_line_avg_sd(home, raw_home)
+        away_avg, away_sd = _team_line_avg_sd(away, raw_away)
 
         base_total = float("nan")
         if not np.isnan(home_avg) and not np.isnan(away_avg):
@@ -631,9 +612,10 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         if not np.isnan(base_total) and not np.isnan(league_avg_total):
             model_total = float((1.0 - TOTAL_REGRESS_WEIGHT) * base_total + TOTAL_REGRESS_WEIGHT * league_avg_total)
         else:
-            model_total = float("nan")
+            # fallback: if we have a market total, anchor to it (so output isn't missing)
+            model_total = float(total_points) if not np.isnan(total_points) else float("nan")
 
-        # SD
+        sd = float("nan")
         if not np.isnan(home_sd) and not np.isnan(away_sd):
             sd = 0.5 * (home_sd + away_sd)
         elif not np.isnan(home_sd):
@@ -642,24 +624,23 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             sd = away_sd
         else:
             sd = league_sd_total
-        sd = _clamp(float(sd), TOTAL_SD_FLOOR, TOTAL_SD_CEIL)
+
+        sd = _clamp(sd, TOTAL_SD_FLOOR, TOTAL_SD_CEIL)
 
         total_side, total_p_win, total_be, total_edge_vs_be, total_edge_pts = _total_pick_and_edge(
-            model_total=float(model_total) if not np.isnan(model_total) else float("nan"),
+            model_total=float(model_total),
             market_total=float(total_points) if not np.isnan(total_points) else float("nan"),
             over_price=float(total_over_price),
             under_price=float(total_under_price),
             sd=float(sd),
         )
-
         total_pass_reason = _total_gate_reason(total_side, total_edge_vs_be, total_edge_pts)
         total_recommendation = _total_reco(total_side, total_edge_vs_be, total_edge_pts)
 
-        # ----------------------------
-        # PRIMARY: ML or TOTAL only (ATS never primary unless enabled AND not filtered)
-        # ----------------------------
+        # Primary choice: prefer ML, then TOTAL. Only consider puckline if enabled and not filtered.
         ml_edge_abs = float(abs(edge_home)) if not np.isnan(edge_home) else -999.0
         tot_edge_val = float(total_edge_vs_be) if str(total_recommendation).startswith("Model PICK TOTAL:") else -999.0
+        ats_edge_val = float(ats_edge_vs_be) if (NHL_ENABLE_PUCKLINE and str(spread_reco).startswith("Model PICK PUCKLINE:")) else -999.0
 
         primary = ml_pick
         why_primary = f"Primary=ML (abs_edge={ml_edge_abs:+.3f})"
@@ -669,6 +650,10 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             best_edge = tot_edge_val
             primary = total_recommendation
             why_primary = f"Primary=TOTAL (edge_vs_be={tot_edge_val:+.3f})"
+
+        if ats_edge_val > best_edge:
+            primary = spread_reco
+            why_primary = f"Primary=PUCKLINE (edge_vs_be={ats_edge_val:+.3f})"
 
         rows.append(
             {
@@ -686,8 +671,8 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "ats_pick_prob": float(ats_p_win) if not np.isnan(ats_p_win) else np.nan,
                 "ats_breakeven_prob": float(ats_be) if not np.isnan(ats_be) else np.nan,
                 "ats_edge_vs_be": float(ats_edge_vs_be) if not np.isnan(ats_edge_vs_be) else np.nan,
-                "ats_strength": str(ats_strength),
-                "ats_pass_reason": str(ats_pass_reason),
+                "ats_strength": ats_strength,
+                "ats_pass_reason": ats_pass_reason,
                 "total_points": float(total_points) if not np.isnan(total_points) else np.nan,
                 "total_over_price": float(total_over_price),
                 "total_under_price": float(total_under_price),
@@ -700,7 +685,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "total_pass_reason": str(total_pass_reason),
                 "total_recommendation": str(total_recommendation),
                 "ml_recommendation": ml_pick,
-                "spread_recommendation": str(spread_reco),
+                "spread_recommendation": spread_reco,
                 "primary_recommendation": primary,
                 "why_primary": why_primary,
                 "value_tier": value_tier,
@@ -716,42 +701,20 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     df = pd.DataFrame(rows)
 
-    # Optional: top-N ATS filter only if ATS is enabled
-    if ENABLE_ATS and MAX_ATS_PLAYS_PER_DAY is not None and not df.empty and "ats_edge_vs_be" in df.columns:
-        elig = df["spread_recommendation"].astype(str).str.contains("Model PICK ATS:", na=False)
+    # If puckline is disabled, no need for top-N puckline filtering.
+    if NHL_ENABLE_PUCKLINE and MAX_ATS_PLAYS_PER_DAY and MAX_ATS_PLAYS_PER_DAY > 0 and not df.empty:
+        elig = df["spread_recommendation"].astype(str).str.contains("Model PICK PUCKLINE:", na=False)
         df["ats_rank_score"] = np.where(elig, df["ats_edge_vs_be"].astype(float), -999.0)
-        top_idx = df.sort_values("ats_rank_score", ascending=False).head(MAX_ATS_PLAYS_PER_DAY).index
+        top_idx = df.sort_values("ats_rank_score", ascending=False).head(int(MAX_ATS_PLAYS_PER_DAY)).index
         keep = set(top_idx.tolist())
 
         for i in df.index:
             if bool(elig.loc[i]) and i not in keep:
-                df.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
+                df.loc[i, "spread_recommendation"] = "No puckline bet (top-N filter)"
                 df.loc[i, "ats_strength"] = "pass"
                 df.loc[i, "ats_pass_reason"] = "top-N filter"
 
         df.drop(columns=["ats_rank_score"], inplace=True, errors="ignore")
-
-        # Recompute primary after ATS filter (but still ML/TOTAL only)
-        for i in df.index:
-            ml_pick = str(df.loc[i, "ml_recommendation"])
-            total_reco = str(df.loc[i, "total_recommendation"])
-
-            edge_home = float(df.loc[i, "edge_home"]) if not pd.isna(df.loc[i, "edge_home"]) else float("nan")
-            total_edge_vs_be = float(df.loc[i, "total_edge_vs_be"]) if not pd.isna(df.loc[i, "total_edge_vs_be"]) else float("nan")
-
-            ml_edge_abs = float(abs(edge_home)) if not np.isnan(edge_home) else -999.0
-            tot_edge_val = float(total_edge_vs_be) if total_reco.startswith("Model PICK TOTAL:") else -999.0
-
-            primary = ml_pick
-            why_primary = f"Primary=ML (abs_edge={ml_edge_abs:+.3f})"
-            best = ml_edge_abs
-
-            if tot_edge_val > best:
-                primary = total_reco
-                why_primary = f"Primary=TOTAL (edge_vs_be={tot_edge_val:+.3f})"
-
-            df.loc[i, "primary_recommendation"] = primary
-            df.loc[i, "why_primary"] = why_primary
 
     return df
 
