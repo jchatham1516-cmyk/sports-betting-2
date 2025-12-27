@@ -74,19 +74,28 @@ MAX_ATS_PLAYS_PER_DAY = 3  # None to disable
 # ----------------------------
 TOTAL_DEFAULT_PRICE = -110.0
 
-# Market anchor weight. Since we also “base” totals on market below, this can be moderate.
+# Anchor weight: higher = trust your expected-points model more
 TOTAL_ANCHOR_W = float(os.getenv("NFL_TOTAL_ANCHOR_W", "0.60"))
 
 # Expected points model settings
 PTS_LOOKBACK_DAYS = int(os.getenv("NFL_PTS_LOOKBACK_DAYS", "70"))
-PTS_RECENT_WEIGHT = float(os.getenv("NFL_PTS_RECENT_WEIGHT", "0.60"))
+PTS_RECENT_WEIGHT = float(os.getenv("NFL_PTS_RECENT_WEIGHT", "0.60"))  # kept for future expansion
 PTS_REGRESS = float(os.getenv("NFL_PTS_REGRESS", "0.35"))
 PTS_MIN_GAMES = int(os.getenv("NFL_PTS_MIN_GAMES", "4"))
+
+# NEW: stabilize tiny samples (prevents extreme totals)
+# - K controls how quickly a team "earns" its own strength away from 1.0
+PTS_SAMPLE_K = float(os.getenv("NFL_PTS_SAMPLE_K", "8.0"))
+# - clamp prevents ridiculous low/high multipliers from small samples
+PTS_STRENGTH_CLAMP_LO = float(os.getenv("NFL_PTS_STRENGTH_CLAMP_LO", "0.80"))
+PTS_STRENGTH_CLAMP_HI = float(os.getenv("NFL_PTS_STRENGTH_CLAMP_HI", "1.20"))
+# - don’t derive league points from a tiny sample
+LEAGUE_PTS_PER_TEAM = float(os.getenv("NFL_LEAGUE_PTS_PER_TEAM", "22.0"))
 
 # Convert injuries/QB/rest into point adjustments
 INJ_POINTS_TO_TOTAL_PTS = float(os.getenv("NFL_INJ_POINTS_TO_TOTAL_PTS", "0.45"))
 QB_POINTS_PER_QB_IMPACT = float(os.getenv("NFL_QB_POINTS_PER_QB_IMPACT", "0.55"))
-REST_POINTS_PER_ELO = float(os.getenv("NFL_REST_POINTS_PER_ELO", "0.02"))
+REST_POINTS_PER_ELO = float(os.getenv("NFL_REST_POINTS_PER_ELO", "0.02"))  # tiny
 
 # Weather impact
 ENABLE_WEATHER = os.getenv("NFL_ENABLE_WEATHER", "1") == "1"
@@ -98,13 +107,10 @@ TOTAL_MIN_EDGE_VS_BE = 0.02
 TOTAL_MIN_PTS_EDGE = 2.0
 TOTAL_SD_FLOOR = 5.5
 TOTAL_SD_CEIL = 14.5
+TOTAL_REGRESS_WEIGHT = 0.40
 
+# Totals priority preference (NFL: you want totals to win primary more often)
 TOTAL_PRIMARY_BOOST = float(os.getenv("NFL_TOTAL_PRIMARY_BOOST", "1.25"))
-
-# IMPORTANT:
-# This prevents your model_total_outcome from collapsing to ~36 when score sample is tiny.
-# We compute a “strength delta” from the scoring model and apply only part of it.
-TOTAL_STRENGTH_DELTA_W = float(os.getenv("NFL_TOTAL_STRENGTH_DELTA_W", "0.35"))
 
 # ----------------------------
 # Helpers
@@ -326,6 +332,10 @@ def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
 # Scoring-strength model (expected points)
 # ----------------------------
 def _build_team_scoring_table() -> pd.DataFrame:
+    """
+    Uses OddsAPI scores endpoint (daysFrom<=3 per call).
+    This is a SMALL sample, so downstream code MUST stabilize/regularize heavily.
+    """
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
     events = fetch_recent_scores(sport_key=sport_key, days_from=3)
 
@@ -361,29 +371,61 @@ def _expected_points_total(
     league_pts: float,
     team_tbl: pd.DataFrame,
 ) -> Tuple[float, float, float]:
-    if team_tbl is None or team_tbl.empty or league_pts <= 1e-6:
+    """
+    Stabilized expected points model.
+    - Uses sample-size weighting (n/(n+K))
+    - Regresses toward 1.0
+    - Clamps strength multipliers to avoid absurd totals from tiny samples
+    """
+    if league_pts <= 1e-6:
+        league_pts = 22.0
+
+    if team_tbl is None or team_tbl.empty:
         return (league_pts, league_pts, 2.0 * league_pts)
 
-    def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
+    def _team_stats(t: str) -> Tuple[Optional[float], Optional[float], int]:
         sub = team_tbl[team_tbl["team"] == t]
-        if sub.empty or len(sub) < PTS_MIN_GAMES:
-            return (None, None)
-        return (float(sub["pts_for"].mean()), float(sub["pts_against"].mean()))
+        if sub.empty:
+            return (None, None, 0)
+        return (float(sub["pts_for"].mean()), float(sub["pts_against"].mean()), int(len(sub)))
 
-    hf, ha = _team_means(home)
-    af, aa = _team_means(away)
+    hf, ha, hn = _team_stats(home)
+    af, aa, an = _team_stats(away)
 
-    def _strength(x: Optional[float]) -> float:
-        if x is None or np.isnan(x):
+    def _blend_strength(raw_ratio: Optional[float], n: int) -> float:
+        # If no data, neutral
+        if raw_ratio is None or np.isnan(raw_ratio) or n <= 0:
             return 1.0
-        raw = float(x) / float(league_pts)
-        return float((1.0 - PTS_REGRESS) * raw + PTS_REGRESS * 1.0)
 
-    home_off = _strength(hf)
-    home_def = _strength(ha)
-    away_off = _strength(af)
-    away_def = _strength(aa)
+        # sample weight: small n => close to 1.0
+        w = float(n) / float(n + PTS_SAMPLE_K)
 
+        # raw_ratio already like (pts_for / league_pts) or (pts_against / league_pts)
+        r = float(raw_ratio)
+
+        # regress toward 1.0
+        r = float((1.0 - PTS_REGRESS) * r + PTS_REGRESS * 1.0)
+
+        # then blend toward 1.0 based on sample size
+        s = float((1.0 - w) * 1.0 + w * r)
+
+        # clamp to avoid extreme outputs
+        return float(_clamp(s, PTS_STRENGTH_CLAMP_LO, PTS_STRENGTH_CLAMP_HI))
+
+    # Convert to ratios vs league
+    home_off_ratio = (float(hf) / float(league_pts)) if (hf is not None and not np.isnan(hf)) else None
+    home_def_ratio = (float(ha) / float(league_pts)) if (ha is not None and not np.isnan(ha)) else None
+    away_off_ratio = (float(af) / float(league_pts)) if (af is not None and not np.isnan(af)) else None
+    away_def_ratio = (float(aa) / float(league_pts)) if (aa is not None and not np.isnan(aa)) else None
+
+    # Strength multipliers
+    home_off = _blend_strength(home_off_ratio, hn)
+    home_def = _blend_strength(home_def_ratio, hn)
+    away_off = _blend_strength(away_off_ratio, an)
+    away_def = _blend_strength(away_def_ratio, an)
+
+    # Expected points:
+    # - if opponent allows more points (def_ratio >1), you score more
     exp_home = float(league_pts * home_off * away_def)
     exp_away = float(league_pts * away_off * home_def)
 
@@ -578,17 +620,13 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             print(f"[nfl totals] WARNING: failed to build historical totals lines: {e}")
             team_total_lines = {}
 
-    league_avgs = []
     league_sds = []
     for v in (team_total_lines or {}).values():
         try:
-            if v.get("avg") is not None:
-                league_avgs.append(float(v.get("avg")))
             if v.get("sd") is not None and not np.isnan(float(v.get("sd"))):
                 league_sds.append(float(v.get("sd")))
         except Exception:
             continue
-    league_avg_total_line = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 11.0
 
     def _team_line_avg_sd(team_name: str) -> Tuple[float, float]:
@@ -597,22 +635,11 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             return (_safe_float(v.get("avg")), _safe_float(v.get("sd"), default=np.nan))
         return (float("nan"), float("nan"))
 
-    # Build scoring table
+    # scoring table (tiny sample -> stabilized in _expected_points_total)
     team_tbl = _build_team_scoring_table()
 
-    # IMPORTANT: do NOT let league_pts collapse to the last-3-days scoring environment.
-    # Use a stable league baseline from historical market totals when available.
-    if not np.isnan(league_avg_total_line):
-        league_pts = float(league_avg_total_line / 2.0)
-    else:
-        league_pts = 22.0
-
-    # Only override league_pts from scores if we have a lot of rows (meaningful sample)
-    try:
-        if team_tbl is not None and not team_tbl.empty and len(team_tbl) >= 80:
-            league_pts = float(team_tbl["pts_for"].mean())
-    except Exception:
-        pass
+    # IMPORTANT: do NOT overwrite league_pts from tiny sample means
+    league_pts = float(LEAGUE_PTS_PER_TEAM)
 
     rows = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
@@ -733,60 +760,51 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             spread_reco = _ats_reco(ats_side, ats_strength)
 
         # ----------------------------
-        # TOTALS (fixed)
+        # TOTALS
         # ----------------------------
-        market_total = float(total_points) if not np.isnan(total_points) else float("nan")
-
-        # Base total should NOT be 2*league_pts from sparse scoring data.
-        # Use market if available; else use league avg total line; else fallback 44.
-        if not np.isnan(market_total):
-            base_total = float(market_total)
-        elif not np.isnan(league_avg_total_line):
-            base_total = float(league_avg_total_line)
-        else:
-            base_total = 44.0
-
-        # 1) strength model produces a "raw total"
-        exp_home, exp_away, raw_strength_total = _expected_points_total(
+        exp_home, exp_away, model_total_outcome = _expected_points_total(
             home=home, away=away, league_pts=float(league_pts), team_tbl=team_tbl
         )
 
-        # Convert that to a *delta* vs neutral (2*league_pts), then apply only part of it
-        neutral_total = float(2.0 * league_pts)
-        strength_delta = float(raw_strength_total - neutral_total)
+        total_adj_inj = -INJ_POINTS_TO_TOTAL_PTS * (abs(float(inj_pts)))
+        total_adj_qb = -QB_POINTS_PER_QB_IMPACT * (abs(float(qb_home)) + abs(float(qb_away)))
+        total_adj_rest = REST_POINTS_PER_ELO * float(rest_adj_elo)
 
-        model_total_outcome = float(base_total + TOTAL_STRENGTH_DELTA_W * strength_delta)
+        model_total_outcome = float(model_total_outcome + total_adj_inj + total_adj_qb + total_adj_rest)
 
-        # 2) injuries/QB/rest adjustments
-        model_total_outcome += float(-INJ_POINTS_TO_TOTAL_PTS * abs(float(inj_pts)))
-        model_total_outcome += float(-QB_POINTS_PER_QB_IMPACT * (abs(float(qb_home)) + abs(float(qb_away))))
-        model_total_outcome += float(REST_POINTS_PER_ELO * float(rest_adj_elo))
-
-        # 3) weather adjustment (dict-safe)
+        # Weather (FIXED: dict access)
         weather_temp = np.nan
         weather_wind = np.nan
         if ENABLE_WEATHER:
-            kickoff_dt = _parse_iso_datetime((oi or {}).get("commence_time", "")) or datetime.utcnow()
-            w = fetch_game_weather(home_team=home, game_dt_utc=kickoff_dt) or {}
+            kickoff_dt = _parse_iso_datetime((oi or {}).get("commence_time", "")) or None
+            if kickoff_dt is None:
+                kickoff_dt = datetime.utcnow()
 
-            weather_temp = _safe_float(w.get("temp_f"), default=np.nan)
-            weather_wind = _safe_float(w.get("wind_mph"), default=np.nan)
+            w = fetch_game_weather(home_team=home, game_dt_utc=kickoff_dt)  # returns dict
 
-            if not np.isnan(weather_temp) and weather_temp < 35.0:
-                model_total_outcome -= float(COLD_PTS_IF_UNDER_35F)
+            temp_f = _safe_float((w or {}).get("temp_f"), default=np.nan)
+            wind_mph = _safe_float((w or {}).get("wind_mph"), default=np.nan)
 
-            if not np.isnan(weather_wind) and weather_wind > 10.0:
-                model_total_outcome -= float((weather_wind - 10.0) * WIND_PTS_PER_MPH_OVER_10)
+            if not np.isnan(temp_f):
+                weather_temp = float(temp_f)
+                if weather_temp < 35.0:
+                    model_total_outcome -= float(COLD_PTS_IF_UNDER_35F)
 
-        # 4) final blend with market (if present)
+            if not np.isnan(wind_mph):
+                weather_wind = float(wind_mph)
+                if weather_wind > 10.0:
+                    model_total_outcome -= float((weather_wind - 10.0) * WIND_PTS_PER_MPH_OVER_10)
+
+        # Anchor to market
+        market_total = float(total_points) if not np.isnan(total_points) else float("nan")
         if not np.isnan(market_total):
             model_total = float(TOTAL_ANCHOR_W * model_total_outcome + (1.0 - TOTAL_ANCHOR_W) * market_total)
         else:
             model_total = float(model_total_outcome)
 
         # SD baseline from historical market total lines
-        _, home_sd = _team_line_avg_sd(home)
-        _, away_sd = _team_line_avg_sd(away)
+        home_avg, home_sd = _team_line_avg_sd(home)
+        away_avg, away_sd = _team_line_avg_sd(away)
 
         if not np.isnan(home_sd) and not np.isnan(away_sd):
             sd = 0.5 * (home_sd + away_sd)
@@ -797,7 +815,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         else:
             sd = league_sd_total
 
-        sd = _clamp(sd, TOTAL_SD_FLOOR, TOTAL_SD_CEIL)
+        sd = _clamp(float(sd), TOTAL_SD_FLOOR, TOTAL_SD_CEIL)
 
         total_side, total_p_win, total_be, total_edge_vs_be, total_edge_pts = _total_pick_and_edge(
             model_total=float(model_total),
@@ -818,7 +836,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             tot_score *= float(TOTAL_PRIMARY_BOOST)
 
         primary = ml_pick
-        why_primary = f"Primary=ML (abs_edge={ml_score:+.3f})"
+        why_primary = f"Primary=ML (score={ml_score:+.3f})"
         best = ml_score
 
         if ats_score > best:
