@@ -17,24 +17,21 @@ class EloState:
     processed: Set[str] = field(default_factory=set)
     default_elo: float = 1500.0
 
-    # NEW: allow `team in st` and iteration
-    def __contains__(self, team: object) -> bool:
-        try:
-            return str(team) in (self.ratings or {})
-        except Exception:
-            return False
-
-    def __iter__(self):
-        return iter(self.ratings)
-
-    def keys(self):
-        return (self.ratings or {}).keys()
-
     def get(self, team: str) -> float:
         return float(self.ratings.get(str(team), self.default_elo))
 
     def set(self, team: str, elo: float) -> None:
         self.ratings[str(team)] = float(elo)
+
+    def has_team(self, team: str) -> bool:
+        return str(team) in (self.ratings or {})
+
+    def __contains__(self, team: object) -> bool:
+        # Allows: `if team in st:`
+        try:
+            return str(team) in (self.ratings or {})
+        except Exception:
+            return False
 
     def is_processed(self, game_key: str) -> bool:
         return str(game_key) in self.processed
@@ -74,7 +71,7 @@ def elo_win_prob(
     *,
     home_adv: float = 0.0,
 ) -> float:
-    diff = (elo_home + home_adv) - elo_away
+    diff = (float(elo_home) + float(home_adv)) - float(elo_away)
     return 1.0 / (1.0 + 10.0 ** (-diff / 400.0))
 
 
@@ -110,11 +107,11 @@ def elo_update(
     else:
         s_home = 0.5
 
-    elo_diff = (elo_home + home_adv) - elo_away
+    elo_diff = (float(elo_home) + float(home_adv)) - float(elo_away)
     k_eff = float(k)
     if use_mov:
         k_eff *= _mov_multiplier(home_score, away_score, elo_diff)
 
-    new_home = elo_home + k_eff * (s_home - p_home)
-    new_away = elo_away + k_eff * ((1.0 - s_home) - (1.0 - p_home))
+    new_home = float(elo_home) + k_eff * (s_home - p_home)
+    new_away = float(elo_away) + k_eff * ((1.0 - s_home) - (1.0 - p_home))
     return new_home, new_away
