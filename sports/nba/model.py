@@ -454,12 +454,17 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
             aw = float(score_map.get(away_raw) or score_map.get(away))
         except Exception:
             continue
+eh = st.get(home)
+ea = st.get(away)
 
-        eh = st.get(home)
-        ea = st.get(away)
 # Sanity check: default Elo should never be used silently
 if eh == 1500 or ea == 1500:
     raise RuntimeError(f"Default Elo used: {home} vs {away}")
+
+# Win probability
+p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
+p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
+
 
         # ---- collect calibration signal BEFORE updating Elo ----
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
