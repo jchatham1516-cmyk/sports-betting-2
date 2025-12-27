@@ -42,9 +42,12 @@ jobs:
           ls -la results || true
 
       - name: Run NFL
-        env: NFL_ELO_TRAIN_DAYS: "200"
-NFL_BASE_COMPRESS: "1.00"
+        env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+
+          # Make spreads / ML less “same-y”
+          NFL_ELO_TRAIN_DAYS: "200"
+          NFL_BASE_COMPRESS: "1.00"
 
           # Totals history / API throttling
           NFL_HIST_TOTALS_DAYS_BACK: "1095"
