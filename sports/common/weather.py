@@ -1,40 +1,22 @@
-# sports/common/weather.py
+# sports/common/weather_sources.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from datetime import datetime
+from typing import Optional, Tuple, Dict
 
-import math
-import time
 import requests
 
-
-# NOTE:
-# - Uses Open-Meteo (no API key) for forecast.
-# - Returns conservative, simple features to adjust totals.
-# - If the call fails for any reason, we safely return None and your model continues.
-
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
-DEFAULT_TIMEOUT = 12
-
-
-@dataclass
-class WeatherInfo:
-    temp_f: float
-    wind_mph: float
-    precip_mm: float
-
-
-# Approx stadium / city lat/lon for each team (good enough for totals adjustments)
-# You can refine later if you want dome/roof logic too.
-TEAM_TO_LATLON: Dict[str, Tuple[float, float]] = {
-    "Arizona Cardinals": (33.5275, -112.2626),
-    "Atlanta Falcons": (33.7553, -84.4006),
+# Minimal-but-usable: NFL stadium-ish coordinates (approx).
+# You can refine later; this is good enough to capture "wind matters" signal.
+TEAM_TO_COORDS: Dict[str, Tuple[float, float]] = {
+    "Arizona Cardinals": (33.5277, -112.2626),
+    "Atlanta Falcons": (33.7573, -84.4008),
     "Baltimore Ravens": (39.2779, -76.6227),
-    "Buffalo Bills": (42.7738, -78.7870),
+    "Buffalo Bills": (42.7738, -78.7868),
     "Carolina Panthers": (35.2258, -80.8528),
     "Chicago Bears": (41.8623, -87.6167),
-    "Cincinnati Bengals": (39.0954, -84.5160),
+    "Cincinnati Bengals": (39.0955, -84.5161),
     "Cleveland Browns": (41.5061, -81.6995),
     "Dallas Cowboys": (32.7473, -97.0945),
     "Denver Broncos": (39.7439, -105.0201),
@@ -62,114 +44,83 @@ TEAM_TO_LATLON: Dict[str, Tuple[float, float]] = {
     "Washington Commanders": (38.9078, -76.8645),
 }
 
-
-def _mph_from_ms(ms: float) -> float:
-    return float(ms) * 2.23693629
+@dataclass
+class GameWeather:
+    temp_f: Optional[float] = None
+    wind_mph: Optional[float] = None
+    precip_prob: Optional[float] = None
 
 
 def fetch_game_weather(
-    *,
     home_team: str,
-    kickoff_iso_utc: Optional[str] = None,
-    sleep_s: float = 0.0,
-) -> Optional[WeatherInfo]:
+    game_dt_utc: datetime,
+    *,
+    timeout: int = 15,
+) -> GameWeather:
     """
-    Very small, robust weather fetch.
-    If kickoff_iso_utc is provided, we try to sample around that hour.
-    If not, we just grab the next-available forecast hour.
-
-    Returns WeatherInfo or None.
+    Pull hourly forecast around kickoff time using Open-Meteo.
+    If anything fails, returns None fields.
     """
-    latlon = TEAM_TO_LATLON.get(str(home_team))
-    if not latlon:
-        return None
+    coords = TEAM_TO_COORDS.get(str(home_team))
+    if not coords:
+        return GameWeather()
 
-    lat, lon = latlon
+    lat, lon = coords
+
+    # Open-Meteo wants ISO date range; we’ll just request that day
+    day = game_dt_utc.date().isoformat()
+
+    url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": "temperature_2m,precipitation,windspeed_10m",
+        "hourly": "temperature_2m,windspeed_10m,precipitation_probability",
         "temperature_unit": "fahrenheit",
         "windspeed_unit": "mph",
-        "precipitation_unit": "mm",
         "timezone": "UTC",
+        "start_date": day,
+        "end_date": day,
     }
 
     try:
-        r = requests.get(OPEN_METEO_URL, params=params, timeout=DEFAULT_TIMEOUT)
+        r = requests.get(url, params=params, timeout=timeout)
         r.raise_for_status()
         data = r.json()
-
         hourly = (data or {}).get("hourly") or {}
         times = hourly.get("time") or []
         temps = hourly.get("temperature_2m") or []
-        precs = hourly.get("precipitation") or []
         winds = hourly.get("windspeed_10m") or []
+        pprob = hourly.get("precipitation_probability") or []
 
-        if not times or not temps or not winds:
-            return None
+        # pick hour closest to kickoff
+        kick = game_dt_utc.replace(minute=0, second=0, microsecond=0).isoformat(timespec="hours")
+        best_i = None
+        best_abs = 10**9
+        for i, t in enumerate(times):
+            try:
+                # string compare is enough for same-day hours; but compute absolute “hour distance”
+                dt = datetime.fromisoformat(t)
+                diff = abs(int((dt - game_dt_utc).total_seconds()))
+                if diff < best_abs:
+                    best_abs = diff
+                    best_i = i
+            except Exception:
+                continue
 
-        # pick hour
-        idx = 0
-        if kickoff_iso_utc:
-            # find closest hour
-            best = None
-            for i, t in enumerate(times):
-                if not isinstance(t, str):
-                    continue
-                # same date-hour string match is good enough here
-                if t[:13] == str(kickoff_iso_utc)[:13]:
-                    best = i
-                    break
-            if best is not None:
-                idx = best
+        if best_i is None:
+            return GameWeather()
 
-        temp_f = float(temps[idx]) if idx < len(temps) else float(temps[0])
-        wind_mph = float(winds[idx]) if idx < len(winds) else float(winds[0])
-        precip_mm = float(precs[idx]) if idx < len(precs) else 0.0
+        def _get(lst, i):
+            try:
+                return float(lst[i])
+            except Exception:
+                return None
 
-        if sleep_s and sleep_s > 0:
-            time.sleep(float(sleep_s))
-
-        return WeatherInfo(temp_f=temp_f, wind_mph=wind_mph, precip_mm=precip_mm)
+        return GameWeather(
+            temp_f=_get(temps, best_i),
+            wind_mph=_get(winds, best_i),
+            precip_prob=_get(pprob, best_i),
+        )
 
     except Exception:
-        return None
-
-
-def totals_weather_adjustment_points(w: Optional[WeatherInfo]) -> float:
-    """
-    Conservative heuristic:
-      - Wind is biggest.
-      - Cold also matters.
-      - Precip matters a bit.
-    Negative means LOWER expected total.
-    """
-    if w is None:
-        return 0.0
-
-    adj = 0.0
-
-    # Wind
-    if w.wind_mph >= 20:
-        adj -= 4.0
-    elif w.wind_mph >= 15:
-        adj -= 2.5
-    elif w.wind_mph >= 12:
-        adj -= 1.5
-
-    # Cold
-    if w.temp_f <= 25:
-        adj -= 2.0
-    elif w.temp_f <= 32:
-        adj -= 1.0
-    elif w.temp_f <= 40:
-        adj -= 0.5
-
-    # Precip (mm per hour)
-    if w.precip_mm >= 2.0:
-        adj -= 1.0
-    elif w.precip_mm >= 0.5:
-        adj -= 0.5
-
-    return float(adj)
+        return GameWeather()
