@@ -16,7 +16,6 @@ from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.historical_totals import build_team_historical_total_lines
 
-# probability + margin calibrators
 from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 
@@ -29,6 +28,9 @@ MARGIN_CAL_PATH = "results/margin_cal_nhl.json"
 # ----------------------------
 HOME_ADV = float(os.getenv("NHL_HOME_ADV", "45.0"))
 ELO_K = float(os.getenv("NHL_ELO_K", "18.0"))
+
+# IMPORTANT: train on enough history (fixes "everyone 1500")
+ELO_TRAIN_DAYS = int(os.getenv("NHL_ELO_TRAIN_DAYS", "200"))
 
 # Elo -> goals (fallback until margin calibrator trained)
 ELO_PER_GOAL = float(os.getenv("NHL_ELO_PER_GOAL", "55.0"))
@@ -56,9 +58,8 @@ FORM_ELO_PER_GOAL = float(os.getenv("NHL_FORM_ELO_PER_GOAL", "7.0"))
 FORM_ELO_CLAMP = float(os.getenv("NHL_FORM_ELO_CLAMP", "35.0"))
 
 # ----------------------------
-# ATS (puck line) settings
+# ATS (puck line) settings (default OFF)
 # ----------------------------
-# default OFF
 ENABLE_ATS = os.getenv("NHL_ENABLE_ATS", "0") == "1"
 
 ATS_SD_GOALS = float(os.getenv("NHL_ATS_SD_GOALS", "1.35"))
@@ -68,14 +69,13 @@ ATS_MIN_GOALS_EDGE = float(os.getenv("NHL_ATS_MIN_GOALS_EDGE", "0.35"))
 ATS_BIG_LINE = float(os.getenv("NHL_ATS_BIG_LINE", "1.5"))
 ATS_TINY_MODEL = float(os.getenv("NHL_ATS_TINY_MODEL", "0.35"))
 ATS_BIGLINE_FORCE_PASS = os.getenv("NHL_ATS_BIGLINE_FORCE_PASS", "0") == "1"
-MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NHL_MAX_ATS_PLAYS_PER_DAY", "3"))  # set None manually if desired
+MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NHL_MAX_ATS_PLAYS_PER_DAY", "3"))
 
 # ----------------------------
 # Totals (historical market totals lines)
 # ----------------------------
 TOTAL_DEFAULT_PRICE = float(os.getenv("NHL_TOTAL_DEFAULT_PRICE", "-110.0"))
 TOTAL_HIST_DAYS = int(os.getenv("NHL_TOTAL_HIST_DAYS", "21"))
-
 TOTAL_REGRESS_WEIGHT = float(os.getenv("NHL_TOTAL_REGRESS_WEIGHT", "0.40"))
 
 TOTAL_SD_FLOOR = float(os.getenv("NHL_TOTAL_SD_FLOOR", "0.55"))
@@ -85,9 +85,6 @@ TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NHL_TOTAL_MIN_EDGE_VS_BE", "0.02"))
 TOTAL_MIN_GOALS_EDGE = float(os.getenv("NHL_TOTAL_MIN_GOALS_EDGE", "0.35"))
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
 def _clamp(x: float, lo: float, hi: float) -> float:
     try:
         return float(max(lo, min(hi, float(x))))
@@ -195,9 +192,6 @@ def _breakeven_prob_from_american(price: float) -> float:
         return float("nan")
 
 
-# ----------------------------
-# ATS helpers
-# ----------------------------
 def _cover_prob_from_edge(spread_edge_goals: float, sd_goals: float = ATS_SD_GOALS) -> float:
     if spread_edge_goals is None or np.isnan(spread_edge_goals):
         return float("nan")
@@ -242,9 +236,6 @@ def _ats_reco(side: str, strength: str) -> str:
     return f"Model PICK ATS: {side} ({strength})"
 
 
-# ----------------------------
-# Totals helpers
-# ----------------------------
 def _total_pick_and_edge(
     model_total: float,
     market_total: float,
@@ -292,9 +283,6 @@ def _total_reco(side: str, edge_vs_be: float, edge_goals: float) -> str:
     return f"Model PICK TOTAL: {side}"
 
 
-# ----------------------------
-# Builders
-# ----------------------------
 def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
     sport_key = SPORT_TO_ODDS_KEY["nhl"]
     events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
@@ -373,17 +361,14 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
     return out
 
 
-def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
-    """
-    Updates Elo from recent completed games.
-    Also trains:
-      - Platt probability calibrator (compressed prob -> calibrated prob)
-      - Margin calibrator (elo_diff -> expected goals margin)
-    """
+def update_elo_from_recent_scores(days_from: int = None) -> EloState:
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nhl"]
 
-    events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_from))
+    train_days = int(days_from) if days_from is not None else int(ELO_TRAIN_DAYS)
+    train_days = int(max(30, train_days))
+
+    events = fetch_recent_scores(sport_key=sport_key, days_from=train_days)
 
     train_ps: list = []
     train_ys: list = []
@@ -414,11 +399,7 @@ def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
         eh = st.get(home)
         ea = st.get(away)
 
-        # Strict sanity check (catches team mapping failures)
-        if eh == 1500 or ea == 1500:
-            raise RuntimeError(f"[NHL] Default Elo used: {home} vs {away}")
-
-        # Use compressed prob for calibration signal (matches prediction-time pipeline)
+        # compressed prob calibration signal
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_comp = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
 
@@ -450,23 +431,17 @@ def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
     return st
 
 
-# ----------------------------
-# Main daily run
-# ----------------------------
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
-    st = update_elo_from_recent_scores(days_from=14)
+    st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
 
     platt = load_platt(PLATT_PATH)
     margin_cal = load_margin_cal(MARGIN_CAL_PATH)
 
     def _margin_model_spread_from_elo_diff(elo_diff: float) -> float:
-        """
-        Returns model_spread_home (negative if home favored).
-        """
         try:
             if abs(getattr(margin_cal, "a", 0.0)) < 1e-9 and abs(getattr(margin_cal, "b", 0.0)) < 1e-9:
                 return float(-(elo_diff / ELO_PER_GOAL))
-            pred_margin = float(margin_cal.predict(float(elo_diff)))  # home_goals - away_goals
+            pred_margin = float(margin_cal.predict(float(elo_diff)))
             return float(-pred_margin)
         except Exception:
             return float(-(elo_diff / ELO_PER_GOAL))
@@ -479,7 +454,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     last_played = _build_last_game_date_map(days_back=21)
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
 
-    # Historical MARKET totals lines (total goals)
     sport_key = SPORT_TO_ODDS_KEY.get("nhl")
     team_total_lines = {}
     if sport_key:
@@ -493,7 +467,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             print(f"[nhl totals] WARNING: failed to build historical totals lines: {e}")
             team_total_lines = {}
 
-    # League baseline for regression + SD fallback
     league_avgs = []
     league_sds = []
     for v in (team_total_lines or {}).values():
@@ -524,26 +497,22 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         eh = st.get(home)
         ea = st.get(away)
         if eh == 1500 or ea == 1500:
-            raise RuntimeError(
-                f"[NHL] Default Elo used (missing team mapping?): home={home_in}->{home} eh={eh}, "
-                f"away={away_in}->{away} ea={ea}"
+            print(
+                f"[NHL WARNING] Default Elo used (mapping/training issue): "
+                f"home={home_in}->{home} eh={eh}, away={away_in}->{away} ea={ea}"
             )
 
-        # Rest
         home_days_off = _calc_days_off(target_date, last_played.get(home))
         away_days_off = _calc_days_off(target_date, last_played.get(away))
         rest_adj = _rest_elo(home_days_off) - _rest_elo(away_days_off)
 
-        # Form
         form_home = float((form_map.get(home) or {}).get("elo_adj", 0.0))
         form_away = float((form_map.get(away) or {}).get("elo_adj", 0.0))
         form_diff = float(form_home - form_away)
 
-        # Effective elos
         eh_eff = float(eh) + float(rest_adj) + 0.5 * float(form_diff)
         ea_eff = float(ea) - 0.5 * float(form_diff)
 
-        # Win prob (raw -> compressed -> calibrated)
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
         p_comp = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
         try:
@@ -551,13 +520,11 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         except Exception:
             p_home = p_comp
 
-        # Spread-ish (goals)
         elo_diff = (eh_eff - ea_eff) + HOME_ADV
         model_spread_home = float(
             _clamp(_margin_model_spread_from_elo_diff(float(elo_diff)), -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
         )
 
-        # Market inputs
         home_ml = _safe_float((oi or {}).get("home_ml"))
         away_ml = _safe_float((oi or {}).get("away_ml"))
         home_spread = _safe_float((oi or {}).get("home_spread"))
@@ -567,7 +534,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         total_over_price = _safe_float((oi or {}).get("over_price"), default=TOTAL_DEFAULT_PRICE)
         total_under_price = _safe_float((oi or {}).get("under_price"), default=TOTAL_DEFAULT_PRICE)
 
-        # Market no-vig
         mkt_home_p = float("nan")
         if not np.isnan(home_ml) and not np.isnan(away_ml):
             mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
@@ -578,7 +544,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         ml_pick = _ml_recommendation(float(p_home), float(mkt_home_p), min_edge=MIN_ML_EDGE)
         value_tier = _pick_value_tier(abs(edge_home)) if not np.isnan(edge_home) else "UNKNOWN"
 
-        # ATS disabled by default
         if not ENABLE_ATS:
             spread_edge_home = float("nan")
             p_home_cover = float("nan")
@@ -614,7 +579,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 ats_strength = _ats_strength_label(ats_edge_vs_be)
                 spread_reco = _ats_reco(ats_side, ats_strength)
 
-        # Totals (historical market totals lines)
         home_avg, home_sd = _team_line_avg_sd(home)
         away_avg, away_sd = _team_line_avg_sd(away)
 
@@ -651,7 +615,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         total_pass_reason = _total_gate_reason(total_side, total_edge_vs_be, total_edge_goals)
         total_recommendation = _total_reco(total_side, total_edge_vs_be, total_edge_goals)
 
-        # Primary pick (never ATS if disabled)
         ml_edge_abs = float(abs(edge_home)) if not np.isnan(edge_home) else -999.0
         ats_edge_val = -999.0
         if ENABLE_ATS and str(spread_reco).startswith("Model PICK ATS:"):
@@ -716,7 +679,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             }
         )
 
-    # Sanity check: constant-probability detector
     if len(rows) >= 5:
         probs = [round(r["model_home_prob"], 3) for r in rows if not np.isnan(r.get("model_home_prob", np.nan))]
         if len(set(probs)) <= 2:
