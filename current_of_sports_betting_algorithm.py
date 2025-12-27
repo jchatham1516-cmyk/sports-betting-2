@@ -1,4 +1,12 @@
 # current_of_sports_betting_algorithm.py
+#
+# Thin runner:
+# - Loads odds (Odds API with CSV fallback)
+# - Runs per-sport model (NBA/NFL/NHL)
+# - Applies recommendations + play/pass + sizing
+# - Saves results to results/predictions_<sport>_<MM-DD-YYYY>.csv
+# - Logs CLV "open" snapshot for PLAY bets
+
 from __future__ import annotations
 
 import os
@@ -8,6 +16,7 @@ from datetime import datetime
 import pandas as pd
 
 from recommendations import add_recommendations_to_df, Thresholds
+from sports.common.clv_tracker import log_open_bets
 
 from sports.common.odds_sources import (
     fetch_odds_for_date_from_odds_api,
@@ -32,48 +41,6 @@ from sports.nfl.model import run_daily_nfl
 from sports.nhl.model import run_daily_nhl
 
 
-def _apply_top_n_plays_filter(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
-    """
-    Keeps only top-N rows that are currently PLAY by pick_score.
-    Converts the rest to PASS and zeros bet_size/units.
-    """
-    if df is None or df.empty:
-        return df
-    if max_plays is None:
-        return df
-
-    if "play_pass" not in df.columns:
-        return df
-
-    d = df.copy()
-
-    elig = d["play_pass"].astype(str).str.upper().eq("PLAY")
-    if not elig.any():
-        return d
-
-    if "pick_score" in d.columns:
-        score = pd.to_numeric(d["pick_score"], errors="coerce").fillna(-999.0)
-    else:
-        # fallback
-        score = pd.to_numeric(d.get("abs_edge_home", -999.0), errors="coerce").fillna(-999.0)
-
-    d["_rank_score"] = score.where(elig, -999.0)
-    keep_idx = d.sort_values("_rank_score", ascending=False).head(int(max_plays)).index
-
-    for i in d.index:
-        if bool(elig.loc[i]) and i not in keep_idx:
-            d.loc[i, "play_pass"] = "PASS"
-            if "why_bet" in d.columns:
-                d.loc[i, "why_bet"] = str(d.loc[i, "why_bet"]) + " | filtered: top-N plays"
-            if "bet_size" in d.columns:
-                d.loc[i, "bet_size"] = 0.0
-            if "units" in d.columns:
-                d.loc[i, "units"] = 0.0
-
-    d.drop(columns=["_rank_score"], inplace=True, errors="ignore")
-    return d
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run sports betting model (NBA/NFL/NHL).")
     parser.add_argument("--sport", type=str, default="nba", choices=["nba", "nfl", "nhl"])
@@ -94,9 +61,6 @@ def main(argv=None):
     parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
-
-    # NEW: target 1–3 plays/day by enforcing a max
-    parser.add_argument("--max_plays_per_day", type=int, default=int(os.getenv("MAX_PLAYS_PER_DAY", "3")))
 
     # Elo rebuild for NBA (if your NBA model supports it)
     parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
@@ -130,10 +94,7 @@ def main(argv=None):
 
     if not odds_dict:
         try:
-            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(
-                game_date,
-                sport=args.sport,
-            )
+            odds_dict, spreads_dict = fetch_odds_for_date_from_csv(game_date, sport=args.sport)
             print(f"[odds_csv] games found: {len(odds_dict)}")
         except Exception as e:
             print(f"[odds_csv] WARNING: failed to load odds from CSV: {e}")
@@ -171,6 +132,10 @@ def main(argv=None):
 
     print(f"[model] rows returned: {len(results_df)}")
 
+    # Add sport column for priority logic
+    if not results_df.empty:
+        results_df["sport"] = str(args.sport)
+
     # Recommendations
     if not results_df.empty:
         results_df, debug_df = add_recommendations_to_df(
@@ -182,6 +147,8 @@ def main(argv=None):
                 ats_edge_lean_pts=1.5,
                 conf_high=0.18,
                 conf_med=0.10,
+                total_min_edge_vs_be=0.02,
+                total_min_edge_pts=3.0,
             ),
             model_spread_home_col="model_spread_home" if "model_spread_home" in results_df.columns else None,
             model_margin_home_col=None,
@@ -219,14 +186,10 @@ def main(argv=None):
         unit_dollars = float(args.bankroll) * UNIT_PCT
         results_df["unit_dollars"] = unit_dollars
         results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
-
-        # NEW: enforce max plays/day (top-N by pick_score)
-        results_df = _apply_top_n_plays_filter(results_df, max_plays=int(args.max_plays_per_day))
-
     else:
         unit_dollars = float(args.bankroll) * UNIT_PCT
 
-    # Save
+    # Save (even if empty)
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
     print(f"[save] writing {len(results_df)} rows -> {out_name}")
@@ -236,12 +199,17 @@ def main(argv=None):
         dbg_name = f"results/debug_why_ml_vs_ats_{args.sport}_{game_date.replace('/', '-')}.csv"
         debug_df.to_csv(dbg_name, index=False)
 
+    # CLV: log OPEN bets after play/pass exists
+    try:
+        log_open_bets(results_df, clv_log_path="results/clv_log.csv")
+    except Exception as e:
+        print(f"[clv] WARNING: failed to log open bets: {e}")
+
     with pd.option_context("display.max_columns", None):
         print(results_df)
 
     print(f"\nSaved predictions to {out_name}")
     print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
-    print(f"Max plays/day={int(args.max_plays_per_day)} (per sport run)")
     return 0
 
 
