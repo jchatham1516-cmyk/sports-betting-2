@@ -25,7 +25,6 @@ from sports.nfl.injuries import (
 from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 
-# OPTIONAL weather
 from sports.common.weather_sources import fetch_game_weather
 
 ELO_PATH = "results/elo_state_nfl.json"
@@ -38,16 +37,17 @@ MARGIN_CAL_PATH = "results/margin_cal_nfl.json"
 HOME_ADV = float(os.getenv("NFL_HOME_ADV", "55.0"))
 ELO_K = float(os.getenv("NFL_ELO_K", "20.0"))
 
-# Fallback mapping when margin calibrator isn't trained yet
-ELO_PER_POINT = float(os.getenv("NFL_ELO_PER_POINT", "40.0"))
+# Make spreads more willing to separate (smaller => bigger spreads)
+# Old default was 40.0 (very conservative). 28 makes blowouts possible.
+ELO_PER_POINT = float(os.getenv("NFL_ELO_PER_POINT", "28.0"))
 
 MAX_ABS_INJ_ELO_ADJ = float(os.getenv("NFL_MAX_ABS_INJ_ELO_ADJ", "45.0"))
 MAX_ABS_INJ_POINTS = float(os.getenv("NFL_MAX_ABS_INJ_POINTS", "6.0"))
 INJ_ELO_PER_POINT = float(os.getenv("NFL_INJ_ELO_PER_POINT", "6.0"))
 QB_EXTRA_ELO = float(os.getenv("NFL_QB_EXTRA_ELO", "10.0"))
 
-# Let blowouts exist a bit more
-MAX_ABS_MODEL_SPREAD = float(os.getenv("NFL_MAX_ABS_MODEL_SPREAD", "21.0"))
+# Let blowouts exist
+MAX_ABS_MODEL_SPREAD = float(os.getenv("NFL_MAX_ABS_MODEL_SPREAD", "24.0"))
 
 SHORT_REST_PENALTY_ELO = float(os.getenv("NFL_SHORT_REST_PENALTY_ELO", "-14.0"))
 NORMAL_REST_BONUS_ELO = float(os.getenv("NFL_NORMAL_REST_BONUS_ELO", "0.0"))
@@ -58,10 +58,18 @@ FORM_MIN_GAMES = int(os.getenv("NFL_FORM_MIN_GAMES", "2"))
 FORM_ELO_PER_POINT = float(os.getenv("NFL_FORM_ELO_PER_POINT", "1.35"))
 FORM_ELO_CLAMP = float(os.getenv("NFL_FORM_ELO_CLAMP", "40.0"))
 
-# Compression was making everything look similar; bump default closer to 1.0
-BASE_COMPRESS = float(os.getenv("NFL_BASE_COMPRESS", "0.90"))
+# Compression was making everything too similar; default to 1.0 (no compression)
+BASE_COMPRESS = float(os.getenv("NFL_BASE_COMPRESS", "1.00"))
+
 MIN_ML_EDGE = float(os.getenv("NFL_MIN_ML_EDGE", "0.02"))
 CAL_MIN_GAMES = int(os.getenv("NFL_CAL_MIN_GAMES", "60"))
+
+# NEW: slightly scale Elo diffs before converting to prob/spread (more separation)
+ELO_DIFF_SCALE = float(os.getenv("NFL_ELO_DIFF_SCALE", "1.15"))
+
+# NEW: blend prob->spread with margin model to allow bigger spreads when prob is strong
+SPREAD_FROM_PROB_W = float(os.getenv("NFL_SPREAD_FROM_PROB_W", "0.55"))  # 0..1
+SPREAD_FROM_PROB_SD = float(os.getenv("NFL_SPREAD_FROM_PROB_SD", "13.5"))  # margin SD
 
 # ATS
 ATS_SD_PTS = float(os.getenv("NFL_ATS_SD_PTS", "13.5"))
@@ -71,13 +79,26 @@ ATS_MIN_PTS_EDGE = float(os.getenv("NFL_ATS_MIN_PTS_EDGE", "2.0"))
 ATS_BIG_LINE = float(os.getenv("NFL_ATS_BIG_LINE", "7.0"))
 ATS_TINY_MODEL = float(os.getenv("NFL_ATS_TINY_MODEL", "2.0"))
 ATS_BIGLINE_FORCE_PASS = os.getenv("NFL_ATS_BIGLINE_FORCE_PASS", "1") == "1"
-MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NFL_MAX_ATS_PLAYS_PER_DAY", "3"))  # set None manually to disable
+
+def _parse_optional_int(x: str) -> Optional[int]:
+    if x is None:
+        return None
+    s = str(x).strip().lower()
+    if s in ("none", "null", ""):
+        return None
+    try:
+        return int(s)
+    except Exception:
+        return None
+
+MAX_ATS_PLAYS_PER_DAY = _parse_optional_int(os.getenv("NFL_MAX_ATS_PLAYS_PER_DAY", "3"))
 
 # ----------------------------
 # Totals
 # ----------------------------
 TOTAL_DEFAULT_PRICE = float(os.getenv("NFL_TOTAL_DEFAULT_PRICE", "-110.0"))
 TOTAL_ANCHOR_W = float(os.getenv("NFL_TOTAL_ANCHOR_W", "0.25"))  # 25% model, 75% market
+
 PTS_LOOKBACK_DAYS = int(os.getenv("NFL_PTS_LOOKBACK_DAYS", "70"))
 PTS_REGRESS = float(os.getenv("NFL_PTS_REGRESS", "0.35"))
 PTS_MIN_GAMES = int(os.getenv("NFL_PTS_MIN_GAMES", "4"))
@@ -212,6 +233,68 @@ def _phi(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
+def _inv_phi(p: float) -> float:
+    """
+    Approx inverse CDF for standard normal.
+    Valid for p in (0,1). Uses Acklam-style rational approximation.
+    """
+    p = float(_clamp(p, 1e-6, 1.0 - 1e-6))
+
+    # Coefficients (Peter J. Acklam)
+    a = [
+        -3.969683028665376e01,
+        2.209460984245205e02,
+        -2.759285104469687e02,
+        1.383577518672690e02,
+        -3.066479806614716e01,
+        2.506628277459239e00,
+    ]
+    b = [
+        -5.447609879822406e01,
+        1.615858368580409e02,
+        -1.556989798598866e02,
+        6.680131188771972e01,
+        -1.328068155288572e01,
+    ]
+    c = [
+        -7.784894002430293e-03,
+        -3.223964580411365e-01,
+        -2.400758277161838e00,
+        -2.549732539343734e00,
+        4.374664141464968e00,
+        2.938163982698783e00,
+    ]
+    d = [
+        7.784695709041462e-03,
+        3.224671290700398e-01,
+        2.445134137142996e00,
+        3.754408661907416e00,
+    ]
+
+    plow = 0.02425
+    phigh = 1.0 - plow
+
+    if p < plow:
+        q = math.sqrt(-2.0 * math.log(p))
+        return (
+            (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+            / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+        )
+    if p > phigh:
+        q = math.sqrt(-2.0 * math.log(1.0 - p))
+        return -(
+            (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+            / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
+        )
+
+    q = p - 0.5
+    r = q * q
+    return (
+        (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
+        / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
+    )
+
+
 def _breakeven_prob_from_american(price: float) -> float:
     try:
         price = float(price)
@@ -323,7 +406,6 @@ def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
 # Scoring-strength model (expected points)
 # ----------------------------
 def _build_team_scoring_table(days_back: int = PTS_LOOKBACK_DAYS) -> pd.DataFrame:
-    # IMPORTANT FIX: use days_back (not hardcoded 3)
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
     events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
 
@@ -393,7 +475,6 @@ def _expected_points_total(
 # Builders
 # ----------------------------
 def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
-    # IMPORTANT FIX: use days_back (not hardcoded 3)
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
     events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
 
@@ -424,7 +505,6 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
     if not sport_key:
         return {}
     try:
-        # IMPORTANT FIX: use days_back (not hardcoded 3)
         events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
     except Exception:
         return {}
@@ -472,8 +552,6 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
 def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
-
-    # IMPORTANT FIX: use days_from (not hardcoded 3)
     events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_from))
 
     train_ps: list = []
@@ -566,7 +644,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     last_played = _build_last_game_date_map(days_back=21)
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
 
-    # Totals market-line history (cached 1x/day inside historical_totals)
+    # Totals market-line history
     sport_key = SPORT_TO_ODDS_KEY.get("nfl")
     team_total_lines = {}
     if sport_key:
@@ -601,7 +679,6 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             return (_safe_float(v.get("avg")), _safe_float(v.get("sd"), default=np.nan))
         return (float("nan"), float("nan"))
 
-    # Expected points table (IMPORTANT FIX uses lookback, not 3 days)
     team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS)
 
     # league_pts baseline
@@ -668,8 +745,9 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         eh_eff = float(eh) + float(rest_adj_elo) + 0.5 * float(inj_total_elo) + 0.5 * float(form_diff)
         ea_eff = float(ea) - 0.5 * float(inj_total_elo) - 0.5 * float(form_diff)
 
-        # Win prob
-        p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
+        # Win prob (raw -> (optional) compress -> platt)
+        # NEW: scale the effective Elo gap to avoid everything clustering near 0.55
+        p_raw = float(elo_win_prob(eh_eff * ELO_DIFF_SCALE, ea_eff * ELO_DIFF_SCALE, home_adv=HOME_ADV * ELO_DIFF_SCALE))
         p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
         try:
             p_home = _clamp(float(platt.predict(float(p_comp))), 0.01, 0.99)
@@ -677,12 +755,21 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             p_home = p_comp
 
         # Spread
-        elo_diff = (eh_eff - ea_eff) + HOME_ADV
-        model_spread_home = _clamp(
+        elo_diff = ((eh_eff - ea_eff) + HOME_ADV) * ELO_DIFF_SCALE
+        spread_from_margin = _clamp(
             _margin_model_spread_from_elo_diff(float(elo_diff)),
             -MAX_ABS_MODEL_SPREAD,
             MAX_ABS_MODEL_SPREAD,
         )
+
+        # NEW: prob -> implied spread (lets blowouts happen if p_home is high)
+        z = _inv_phi(float(p_home))
+        spread_from_prob = float(-z * float(SPREAD_FROM_PROB_SD))
+        spread_from_prob = float(_clamp(spread_from_prob, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
+
+        w = float(_clamp(SPREAD_FROM_PROB_W, 0.0, 1.0))
+        model_spread_home = float((1.0 - w) * spread_from_margin + w * spread_from_prob)
+        model_spread_home = float(_clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
 
         # Market
         home_ml = _safe_float((oi or {}).get("home_ml"))
@@ -756,9 +843,9 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         weather_deduct = 0.0
         if ENABLE_WEATHER:
             kickoff_dt = _parse_iso_datetime((oi or {}).get("commence_time", "")) or datetime.utcnow()
-            w = fetch_game_weather(home_team=home, game_dt_utc=kickoff_dt)
-            t = _safe_float((w or {}).get("temp_f"), default=np.nan)
-            wd = _safe_float((w or {}).get("wind_mph"), default=np.nan)
+            wthr = fetch_game_weather(home_team=home, game_dt_utc=kickoff_dt)
+            t = _safe_float((wthr or {}).get("temp_f"), default=np.nan)
+            wd = _safe_float((wthr or {}).get("wind_mph"), default=np.nan)
 
             if not np.isnan(t):
                 weather_temp = float(t)
