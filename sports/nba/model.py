@@ -21,7 +21,7 @@ from sports.nba.injuries import (
     injury_adjustment_points,
 )
 
-# NEW: probability + margin calibrators
+# probability + margin calibrators
 from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 
@@ -32,55 +32,56 @@ MARGIN_CAL_PATH = "results/margin_cal_nba.json"
 # ----------------------------
 # Tunables (NBA-specific)
 # ----------------------------
-HOME_ADV = 55.0
-ELO_K = 20.0
+HOME_ADV = float(os.getenv("NBA_HOME_ADV", "55.0"))
+ELO_K = float(os.getenv("NBA_ELO_K", "20.0"))
 
-ELO_PER_POINT = 40.0  # fallback only once margin calibrator is trained
+# How far back to train Elo each run (THIS WAS YOUR BIG PROBLEM WHEN CAPPED TO ~21 DAYS)
+ELO_TRAIN_DAYS = int(os.getenv("NBA_ELO_TRAIN_DAYS", "200"))
 
-MAX_ABS_INJ_POINTS = 6.0
-MAX_ABS_MODEL_SPREAD = 17.0
+# Fallback only once margin calibrator isn't trained
+ELO_PER_POINT = float(os.getenv("NBA_ELO_PER_POINT", "40.0"))
 
-SHORT_REST_PENALTY_ELO = -14.0
-NORMAL_REST_BONUS_ELO = 0.0
+MAX_ABS_INJ_POINTS = float(os.getenv("NBA_MAX_ABS_INJ_POINTS", "6.0"))
+MAX_ABS_MODEL_SPREAD = float(os.getenv("NBA_MAX_ABS_MODEL_SPREAD", "17.0"))
 
-FORM_LOOKBACK_DAYS = 35
-FORM_MIN_GAMES = 2
-FORM_ELO_PER_POINT = 1.35
-FORM_ELO_CLAMP = 40.0
+SHORT_REST_PENALTY_ELO = float(os.getenv("NBA_SHORT_REST_PENALTY_ELO", "-14.0"))
+NORMAL_REST_BONUS_ELO = float(os.getenv("NBA_NORMAL_REST_BONUS_ELO", "0.0"))
 
-BASE_COMPRESS = 0.75
-MIN_ML_EDGE = 0.02
+FORM_LOOKBACK_DAYS = int(os.getenv("NBA_FORM_LOOKBACK_DAYS", "35"))
+FORM_MIN_GAMES = int(os.getenv("NBA_FORM_MIN_GAMES", "2"))
+FORM_ELO_PER_POINT = float(os.getenv("NBA_FORM_ELO_PER_POINT", "1.35"))
+FORM_ELO_CLAMP = float(os.getenv("NBA_FORM_ELO_CLAMP", "40.0"))
+
+# Less compression (closer to 1.0) => less “everything looks 52/48”
+BASE_COMPRESS = float(os.getenv("NBA_BASE_COMPRESS", "0.95"))
+MIN_ML_EDGE = float(os.getenv("NBA_MIN_ML_EDGE", "0.02"))
 
 # Calibration minimum games
-CAL_MIN_GAMES = 80
+CAL_MIN_GAMES = int(os.getenv("NBA_CAL_MIN_GAMES", "80"))
 
 # ATS model
-ATS_SD_PTS = 13.5
-ATS_DEFAULT_PRICE = -110.0
-ATS_MIN_EDGE_VS_BE = 0.03
-ATS_MIN_PTS_EDGE = 2.0
-ATS_BIG_LINE = 7.0
-ATS_TINY_MODEL = 2.0
-ATS_BIGLINE_FORCE_PASS = True
-MAX_ATS_PLAYS_PER_DAY = 3  # set None to disable
+ATS_SD_PTS = float(os.getenv("NBA_ATS_SD_PTS", "13.5"))
+ATS_DEFAULT_PRICE = float(os.getenv("NBA_ATS_DEFAULT_PRICE", "-110.0"))
+ATS_MIN_EDGE_VS_BE = float(os.getenv("NBA_ATS_MIN_EDGE_VS_BE", "0.03"))
+ATS_MIN_PTS_EDGE = float(os.getenv("NBA_ATS_MIN_PTS_EDGE", "2.0"))
+ATS_BIG_LINE = float(os.getenv("NBA_ATS_BIG_LINE", "7.0"))
+ATS_TINY_MODEL = float(os.getenv("NBA_ATS_TINY_MODEL", "2.0"))
+ATS_BIGLINE_FORCE_PASS = os.getenv("NBA_ATS_BIGLINE_FORCE_PASS", "1") == "1"
+MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NBA_MAX_ATS_PLAYS_PER_DAY", "3"))  # set None manually to disable
 
 # ----------------------------
 # Totals model (historical MARKET totals lines)
 # ----------------------------
-TOTAL_DEFAULT_PRICE = -110.0
+TOTAL_DEFAULT_PRICE = float(os.getenv("NBA_TOTAL_DEFAULT_PRICE", "-110.0"))
 
-# How much history to pull (costly). Start small; bump later.
-TOTAL_HIST_DAYS = 14
+TOTAL_HIST_DAYS = int(os.getenv("NBA_TOTAL_HIST_DAYS", "14"))
+TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.35"))
 
-# Regression to league mean so it doesn't go "all under" / too extreme.
-TOTAL_REGRESS_WEIGHT = 0.35  # 0=use team only, 1=use league only
+TOTAL_SD_FLOOR = float(os.getenv("NBA_TOTAL_SD_FLOOR", "9.0"))
+TOTAL_SD_CEIL = float(os.getenv("NBA_TOTAL_SD_CEIL", "20.0"))
 
-# Uncertainty for totals probability model (will be learned-ish from line SD)
-TOTAL_SD_FLOOR = 9.0
-TOTAL_SD_CEIL = 20.0
-
-TOTAL_MIN_EDGE_VS_BE = 0.02
-TOTAL_MIN_PTS_EDGE = 3.0
+TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NBA_TOTAL_MIN_EDGE_VS_BE", "0.02"))
+TOTAL_MIN_PTS_EDGE = float(os.getenv("NBA_TOTAL_MIN_PTS_EDGE", "3.0"))
 
 
 # ----------------------------
@@ -241,7 +242,7 @@ def _ats_reco(side: str, strength: str) -> str:
 
 
 # ----------------------------
-# Totals helpers (market totals line history)
+# Totals helpers
 # ----------------------------
 def _total_pick_and_edge(
     model_total: float,
@@ -250,14 +251,9 @@ def _total_pick_and_edge(
     under_price: float,
     sd: float,
 ) -> Tuple[str, float, float, float, float]:
-    """
-    Returns:
-      side, p_win, be, edge_vs_be, edge_points
-    """
     if np.isnan(model_total) or np.isnan(market_total) or np.isnan(sd) or sd <= 0:
         return ("NONE", float("nan"), float("nan"), float("nan"), float("nan"))
 
-    # P(over) = P(actual > market) with mean=model_total, sd=sd
     z = (float(model_total) - float(market_total)) / float(sd)
     p_over = float(_clamp(_phi(z), 0.001, 0.999))
     p_under = 1.0 - p_over
@@ -305,12 +301,6 @@ def _choose_primary_from_fields(
     total_edge_vs_be: float,
     total_edge_points: float,
 ) -> Tuple[str, str]:
-    """
-    Primary selection rule:
-      - ML score: abs(edge_home)  (no-vig win-prob edge)
-      - ATS score: ats_edge_vs_be (only if spread_reco is a real pick)
-      - TOTAL score: max(total_edge_vs_be, abs(total_edge_points)/10) (only if total_reco is a real pick)
-    """
     ml_score = float(abs(edge_home)) if edge_home is not None and not np.isnan(edge_home) else -999.0
 
     ats_score = -999.0
@@ -321,7 +311,11 @@ def _choose_primary_from_fields(
     tot_score = -999.0
     if isinstance(total_reco, str) and total_reco.startswith("Model PICK TOTAL:"):
         a = float(total_edge_vs_be) if total_edge_vs_be is not None and not np.isnan(total_edge_vs_be) else -999.0
-        b = float(abs(total_edge_points) / 10.0) if total_edge_points is not None and not np.isnan(total_edge_points) else -999.0
+        b = (
+            float(abs(total_edge_points) / 10.0)
+            if total_edge_points is not None and not np.isnan(total_edge_points)
+            else -999.0
+        )
         tot_score = float(max(a, b))
 
     primary = str(ml_reco)
@@ -346,7 +340,8 @@ def _choose_primary_from_fields(
 # ----------------------------
 def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
     sport_key = SPORT_TO_ODDS_KEY["nba"]
-    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 21))
+    # DO NOT CAP HARD — we want enough history to find last-played reliably
+    events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
 
     last_played: Dict[str, date] = {}
     for ev in events:
@@ -371,7 +366,8 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
     if not sport_key:
         return {}
     try:
-        events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_back), 45))
+        # DO NOT CAP HARD — if you set NBA_FORM_LOOKBACK_DAYS higher, we should use it
+        events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
     except Exception:
         return {}
 
@@ -421,12 +417,17 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     """
     Updates Elo ratings from recent completed games.
     ALSO trains:
-      - Platt probability calibrator (raw Elo prob -> calibrated prob)
+      - Platt probability calibrator (COMPRESSED Elo prob -> calibrated prob)
       - Margin calibrator (elo_diff -> expected score margin)
     """
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nba"]
-    events = fetch_recent_scores(sport_key=sport_key, days_from=min(int(days_from), 21))
+
+    # IMPORTANT: use a real training window (default 200 days), no tiny cap
+    train_days = int(days_from) if days_from is not None else int(ELO_TRAIN_DAYS)
+    train_days = int(max(7, train_days))
+
+    events = fetch_recent_scores(sport_key=sport_key, days_from=train_days)
 
     train_ps: list = []
     train_ys: list = []
@@ -459,14 +460,17 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
         # ---- collect calibration signal BEFORE updating Elo ----
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
-        train_ps.append(p_raw)
+        # compress FIRST, because we also use compressed values at prediction time
+        p_comp = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
+
+        train_ps.append(p_comp)
         train_ys.append(1.0 if hs > aw else 0.0)
 
         elo_diff = (float(eh) + float(HOME_ADV)) - float(ea)
         train_xs.append(elo_diff)
         train_margins.append(float(hs - aw))
 
-        # ---- update Elo (uses MOV if your elo_update supports it; safe either way) ----
+        # ---- update Elo ----
         nh, na = elo_update(eh, ea, hs, aw, k=ELO_K, home_adv=HOME_ADV)
         st.set(home, nh)
         st.set(away, na)
@@ -493,9 +497,9 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 # Main daily run
 # ----------------------------
 def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
-    st = update_elo_from_recent_scores(days_from=14)
+    # IMPORTANT: train Elo on a real window, not 14 days
+    st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
 
-    # Load calibrators (safe defaults if files not present yet)
     platt = load_platt(PLATT_PATH)
     margin_cal = load_margin_cal(MARGIN_CAL_PATH)
 
@@ -514,7 +518,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     last_played = _build_last_game_date_map(days_back=21)
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
 
-    # Historical MARKET totals lines (paid plans)
+    # Historical MARKET totals lines
     sport_key = SPORT_TO_ODDS_KEY.get("nba")
     team_total_lines: Dict[str, Dict[str, float]] = {}
     if sport_key:
@@ -528,7 +532,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             print(f"[nba totals] WARNING: failed to build historical totals lines: {e}")
             team_total_lines = {}
 
-    # league baseline from historical totals lines
     league_avgs = []
     league_sds = []
     for v in (team_total_lines or {}).values():
@@ -544,10 +547,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     league_sd_total = float(np.mean(league_sds)) if league_sds else 14.0
 
     def _team_line_avg_sd(team_canon: str, team_raw: str) -> Tuple[float, float]:
-        """
-        Try multiple keys because historical_totals may store raw odds-api names.
-        Return (avg, sd) or (nan, nan).
-        """
         candidates = []
         if team_raw:
             candidates.append(str(team_raw))
@@ -566,12 +565,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         return (float("nan"), float("nan"))
 
     def _margin_model_spread_from_elo_diff(elo_diff: float) -> float:
-        """
-        Uses trained margin calibrator if available; falls back to ELO_PER_POINT mapping.
-        Returns model_spread_home (negative if home favored).
-        """
         try:
-            # if not trained yet, many cal files will be a=0,b=0
             if abs(getattr(margin_cal, "a", 0.0)) < 1e-9 and abs(getattr(margin_cal, "b", 0.0)) < 1e-9:
                 return float(-(elo_diff / ELO_PER_POINT))
             pred_margin = float(margin_cal.predict(float(elo_diff)))  # home_score - away_score
@@ -609,7 +603,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         eh_eff = float(eh) + float(rest_adj) + 0.5 * float(inj_pts) + 0.5 * float(form_diff)
         ea_eff = float(ea) - 0.5 * float(inj_pts) - 0.5 * float(form_diff)
 
-        # Win prob (raw -> compressed -> calibrated)
+        # Win prob (raw -> compressed -> calibrated; calibrator trained on p_comp now)
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
         p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
         try:
@@ -617,9 +611,13 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         except Exception:
             p_home = p_comp
 
-        # Spread (use margin calibrator if trained; else fallback)
+        # Spread
         elo_diff = (eh_eff - ea_eff) + HOME_ADV
-        model_spread_home = _clamp(_margin_model_spread_from_elo_diff(float(elo_diff)), -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
+        model_spread_home = _clamp(
+            _margin_model_spread_from_elo_diff(float(elo_diff)),
+            -MAX_ABS_MODEL_SPREAD,
+            MAX_ABS_MODEL_SPREAD,
+        )
 
         # Market
         home_ml = _safe_float((oi or {}).get("home_ml"))
@@ -708,7 +706,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         total_pass_reason = _total_gate_reason(total_side, total_edge_vs_be, total_edge_pts)
         total_recommendation = _total_reco(total_side, total_edge_vs_be, total_edge_pts)
 
-        # Primary (DO NOT finalize until after ATS top-N filter)
         primary_pre, why_pre = _choose_primary_from_fields(
             ml_reco=ml_pick,
             spread_reco=spread_reco,
@@ -728,7 +725,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "model_spread_home": float(model_spread_home),
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
-                "edge_away": float(edge_away) if not np.isnan(edge_away) else np.nan,
+                "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
                 "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
                 "ats_home_cover_prob": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
                 "ats_pick_side": ats_side,
@@ -771,47 +768,49 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     df = pd.DataFrame(rows)
 
     # Top-N ATS filter
-    if MAX_ATS_PLAYS_PER_DAY is not None and not df.empty and "ats_edge_vs_be" in df.columns:
-        elig = df["spread_recommendation"].astype(str).str.contains("Model PICK ATS:", na=False)
-        df["ats_rank_score"] = np.where(elig, df["ats_edge_vs_be"].astype(float), -999.0)
-        top_idx = df.sort_values("ats_rank_score", ascending=False).head(MAX_ATS_PLAYS_PER_DAY).index
-        keep = set(top_idx.tolist())
+    try:
+        if MAX_ATS_PLAYS_PER_DAY is not None and not df.empty and "ats_edge_vs_be" in df.columns:
+            elig = df["spread_recommendation"].astype(str).str.contains("Model PICK ATS:", na=False)
+            df["ats_rank_score"] = np.where(elig, df["ats_edge_vs_be"].astype(float), -999.0)
+            top_idx = df.sort_values("ats_rank_score", ascending=False).head(int(MAX_ATS_PLAYS_PER_DAY)).index
+            keep = set(top_idx.tolist())
 
-        for i in df.index:
-            if bool(elig.loc[i]) and i not in keep:
-                df.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
-                df.loc[i, "ats_strength"] = "pass"
-                df.loc[i, "ats_pass_reason"] = "top-N filter"
+            for i in df.index:
+                if bool(elig.loc[i]) and i not in keep:
+                    df.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
+                    df.loc[i, "ats_strength"] = "pass"
+                    df.loc[i, "ats_pass_reason"] = "top-N filter"
 
-        df.drop(columns=["ats_rank_score"], inplace=True, errors="ignore")
+            df.drop(columns=["ats_rank_score"], inplace=True, errors="ignore")
 
-        # IMPORTANT: recompute PRIMARY after ATS filter so totals can become primary
-        for i in df.index:
-            ml_pick = str(df.loc[i, "ml_recommendation"])
-            spread_reco = str(df.loc[i, "spread_recommendation"])
-            total_reco = str(df.loc[i, "total_recommendation"])
+            # recompute PRIMARY after ATS filter
+            for i in df.index:
+                ml_pick = str(df.loc[i, "ml_recommendation"])
+                spread_reco = str(df.loc[i, "spread_recommendation"])
+                total_reco = str(df.loc[i, "total_recommendation"])
 
-            edge_home = float(df.loc[i, "edge_home"]) if not pd.isna(df.loc[i, "edge_home"]) else float("nan")
-            ats_edge_vs_be = float(df.loc[i, "ats_edge_vs_be"]) if not pd.isna(df.loc[i, "ats_edge_vs_be"]) else float("nan")
-            total_edge_vs_be = float(df.loc[i, "total_edge_vs_be"]) if not pd.isna(df.loc[i, "total_edge_vs_be"]) else float("nan")
-            total_edge_pts = float(df.loc[i, "total_edge_points"]) if not pd.isna(df.loc[i, "total_edge_points"]) else float("nan")
+                edge_home = float(df.loc[i, "edge_home"]) if not pd.isna(df.loc[i, "edge_home"]) else float("nan")
+                ats_edge_vs_be = float(df.loc[i, "ats_edge_vs_be"]) if not pd.isna(df.loc[i, "ats_edge_vs_be"]) else float("nan")
+                total_edge_vs_be = float(df.loc[i, "total_edge_vs_be"]) if not pd.isna(df.loc[i, "total_edge_vs_be"]) else float("nan")
+                total_edge_pts = float(df.loc[i, "total_edge_points"]) if not pd.isna(df.loc[i, "total_edge_points"]) else float("nan")
 
-            primary, why = _choose_primary_from_fields(
-                ml_reco=ml_pick,
-                spread_reco=spread_reco,
-                total_reco=total_reco,
-                edge_home=edge_home,
-                ats_edge_vs_be=ats_edge_vs_be,
-                total_edge_vs_be=total_edge_vs_be,
-                total_edge_points=total_edge_pts,
-            )
-            df.loc[i, "primary_recommendation"] = primary
-            df.loc[i, "why_primary"] = why
+                primary, why = _choose_primary_from_fields(
+                    ml_reco=ml_pick,
+                    spread_reco=spread_reco,
+                    total_reco=total_reco,
+                    edge_home=edge_home,
+                    ats_edge_vs_be=ats_edge_vs_be,
+                    total_edge_vs_be=total_edge_vs_be,
+                    total_edge_points=total_edge_pts,
+                )
+                df.loc[i, "primary_recommendation"] = primary
+                df.loc[i, "why_primary"] = why
+    except Exception:
+        pass
 
     return df
 
 
-# Runner import expects this name
 def run_daily_probs_for_date(
     game_date_str: str = None,
     *,
