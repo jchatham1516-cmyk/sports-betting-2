@@ -17,11 +17,18 @@ class EloState:
     processed: Set[str] = field(default_factory=set)
     default_elo: float = 1500.0
 
-    def __contains__(self, team: str) -> bool:
-        return str(team) in (self.ratings or {})
+    # NEW: allow `team in st` and iteration
+    def __contains__(self, team: object) -> bool:
+        try:
+            return str(team) in (self.ratings or {})
+        except Exception:
+            return False
 
-    def has(self, team: str) -> bool:
-        return str(team) in (self.ratings or {})
+    def __iter__(self):
+        return iter(self.ratings)
+
+    def keys(self):
+        return (self.ratings or {}).keys()
 
     def get(self, team: str) -> float:
         return float(self.ratings.get(str(team), self.default_elo))
