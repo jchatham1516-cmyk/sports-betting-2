@@ -35,7 +35,7 @@ MARGIN_CAL_PATH = "results/margin_cal_nba.json"
 HOME_ADV = float(os.getenv("NBA_HOME_ADV", "55.0"))
 ELO_K = float(os.getenv("NBA_ELO_K", "20.0"))
 
-# How far back to train Elo each run (THIS WAS YOUR BIG PROBLEM WHEN CAPPED TO ~21 DAYS)
+# How far back to train Elo each run
 ELO_TRAIN_DAYS = int(os.getenv("NBA_ELO_TRAIN_DAYS", "200"))
 
 # Fallback only once margin calibrator isn't trained
@@ -52,11 +52,9 @@ FORM_MIN_GAMES = int(os.getenv("NBA_FORM_MIN_GAMES", "2"))
 FORM_ELO_PER_POINT = float(os.getenv("NBA_FORM_ELO_PER_POINT", "1.35"))
 FORM_ELO_CLAMP = float(os.getenv("NBA_FORM_ELO_CLAMP", "40.0"))
 
-# Less compression (closer to 1.0) => less “everything looks 52/48”
 BASE_COMPRESS = float(os.getenv("NBA_BASE_COMPRESS", "0.95"))
 MIN_ML_EDGE = float(os.getenv("NBA_MIN_ML_EDGE", "0.02"))
 
-# Calibration minimum games
 CAL_MIN_GAMES = int(os.getenv("NBA_CAL_MIN_GAMES", "80"))
 
 # ATS model
@@ -73,16 +71,12 @@ MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NBA_MAX_ATS_PLAYS_PER_DAY", "3"))  # set 
 # Totals model (historical MARKET totals lines)
 # ----------------------------
 TOTAL_DEFAULT_PRICE = float(os.getenv("NBA_TOTAL_DEFAULT_PRICE", "-110.0"))
-
 TOTAL_HIST_DAYS = int(os.getenv("NBA_TOTAL_HIST_DAYS", "14"))
 TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.45"))
-
 TOTAL_SD_FLOOR = float(os.getenv("NBA_TOTAL_SD_FLOOR", "9.0"))
 TOTAL_SD_CEIL = float(os.getenv("NBA_TOTAL_SD_CEIL", "20.0"))
-
 TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NBA_TOTAL_MIN_EDGE_VS_BE", "0.02"))
 TOTAL_MIN_PTS_EDGE = float(os.getenv("NBA_TOTAL_MIN_PTS_EDGE", "3.0"))
-
 
 # ----------------------------
 # Helpers
@@ -181,7 +175,6 @@ def _ml_recommendation(model_p: float, market_p: float, min_edge: float = MIN_ML
 def _phi(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
-
 # ----------------------------
 # ATS helpers
 # ----------------------------
@@ -239,7 +232,6 @@ def _ats_reco(side: str, strength: str) -> str:
     if strength == "too_close":
         return "Too close to call ATS (edge too small)"
     return f"Model PICK ATS: {side} ({strength})"
-
 
 # ----------------------------
 # Totals helpers
@@ -340,7 +332,6 @@ def _choose_primary_from_fields(
 # ----------------------------
 def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
     sport_key = SPORT_TO_ODDS_KEY["nba"]
-    # DO NOT CAP HARD — we want enough history to find last-played reliably
     events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
 
     last_played: Dict[str, date] = {}
@@ -366,7 +357,6 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
     if not sport_key:
         return {}
     try:
-        # DO NOT CAP HARD — if you set NBA_FORM_LOOKBACK_DAYS higher, we should use it
         events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
     except Exception:
         return {}
@@ -423,7 +413,6 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nba"]
 
-    # IMPORTANT: use a real training window (default 200 days), no tiny cap
     train_days = int(days_from) if days_from is not None else int(ELO_TRAIN_DAYS)
     train_days = int(max(7, train_days))
 
@@ -454,21 +443,12 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
             aw = float(score_map.get(away_raw) or score_map.get(away))
         except Exception:
             continue
-eh = st.get(home)
-ea = st.get(away)
 
-# Sanity check: default Elo should never be used silently
-if eh == 1500 or ea == 1500:
-    raise RuntimeError(f"Default Elo used: {home} vs {away}")
-
-# Win probability
-p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
-p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
-
+        eh = st.get(home)
+        ea = st.get(away)
 
         # ---- collect calibration signal BEFORE updating Elo ----
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
-        # compress FIRST, because we also use compressed values at prediction time
         p_comp = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
 
         train_ps.append(p_comp)
@@ -505,7 +485,6 @@ p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
 # Main daily run
 # ----------------------------
 def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
-    # IMPORTANT: train Elo on a real window, not 14 days
     st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
 
     platt = load_platt(PLATT_PATH)
@@ -611,7 +590,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         eh_eff = float(eh) + float(rest_adj) + 0.5 * float(inj_pts) + 0.5 * float(form_diff)
         ea_eff = float(ea) - 0.5 * float(inj_pts) - 0.5 * float(form_diff)
 
-        # Win prob (raw -> compressed -> calibrated; calibrator trained on p_comp now)
+        # Win prob (raw -> compressed -> calibrated)
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
         p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
         try:
@@ -676,7 +655,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             ats_strength = _ats_strength_label(ats_edge_vs_be)
             spread_reco = _ats_reco(ats_side, ats_strength)
 
-        # TOTALS (from historical MARKET total lines)
+        # TOTALS
         home_avg, home_sd = _team_line_avg_sd(home, home_in)
         away_avg, away_sd = _team_line_avg_sd(away, away_in)
 
@@ -733,7 +712,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "model_spread_home": float(model_spread_home),
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
-                "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
+                "edge_away": float(-edge_home) if not np.isnan(edge_home) else np.nan,
                 "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
                 "ats_home_cover_prob": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
                 "ats_pick_side": ats_side,
@@ -772,11 +751,12 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "spread_price": spread_price,
             }
         )
-# Sanity check: constant-probability detector
-if len(rows) >= 5:
-    probs = [round(r["model_home_prob"], 3) for r in rows if not np.isnan(r.get("model_home_prob", np.nan))]
-    if len(set(probs)) <= 2:
-        raise RuntimeError("Model produced near-constant probabilities — check Elo/team mapping.")
+
+    # ✅ Sanity check belongs OUTSIDE the loop, and df creation must NOT be inside it
+    if len(rows) >= 5:
+        probs = [round(r["model_home_prob"], 3) for r in rows if not np.isnan(r.get("model_home_prob", np.nan))]
+        if len(set(probs)) <= 2:
+            raise RuntimeError("Model produced near-constant probabilities — check Elo/team mapping.")
 
     df = pd.DataFrame(rows)
 
