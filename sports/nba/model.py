@@ -32,7 +32,7 @@ MARGIN_CAL_PATH = "results/margin_cal_nba.json"
 # ----------------------------
 # Tunables (NBA-specific)
 # ----------------------------
-HOME_ADV = float(os.getenv("NBA_HOME_ADV", "55.0"))
+HOME_ADV = float(os.getenv("NBA_HOME_ADV", "32.0"))
 ELO_K = float(os.getenv("NBA_ELO_K", "20.0"))
 
 # How far back to train Elo each run
