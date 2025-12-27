@@ -45,9 +45,18 @@ jobs:
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
 
-          # Make spreads / ML less “same-y”
-          NFL_ELO_TRAIN_DAYS: "200"
+          # ---- Make NFL less "home always favored" + allow bigger spreads ----
+          NFL_HOME_ADV: "35"
+          NFL_ELO_PER_POINT: "28"
           NFL_BASE_COMPRESS: "1.00"
+
+          # Market prior: pull probs toward the market when odds exist
+          NFL_MARKET_PRIOR_W: "0.35"
+
+          # Totals: stop "always under"
+          NFL_INJ_POINTS_TO_TOTAL_PTS: "0.45"
+          NFL_PTS_MIN_GAMES: "1"
+          NFL_PTS_REGRESS: "0.20"
 
           # Totals history / API throttling
           NFL_HIST_TOTALS_DAYS_BACK: "1095"
