@@ -420,6 +420,9 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
         eh = st.get(home)
         ea = st.get(away)
+# Sanity check: default Elo should never be used silently
+if eh == 1500 or ea == 1500:
+    raise RuntimeError(f"Default Elo used: {home} vs {away}")
 
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         train_ps.append(p_raw)
@@ -726,6 +729,11 @@ if home not in st or away not in st:
                 "spread_price": spread_price,
             }
         )
+# Sanity check: constant-probability detector
+if len(rows) >= 5:
+    probs = [round(r["model_home_prob"], 3) for r in rows if not np.isnan(r.get("model_home_prob", np.nan))]
+    if len(set(probs)) <= 2:
+        raise RuntimeError("Model produced near-constant probabilities — check Elo/team mapping.")
 
     df = pd.DataFrame(rows)
 
