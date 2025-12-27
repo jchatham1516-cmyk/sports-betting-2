@@ -485,7 +485,7 @@ def update_elo_from_recent_scores(days_from: int = 3) -> EloState:
 # Main daily run
 # ----------------------------
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
-    st = update_elo_from_recent_scores(days_from=3)
+    st = update_elo_from_recent_scores(days_from=180)
 
     # IMPORTANT: seed missing elos from today's market so we don't get all-1500
     _seed_missing_elos_from_market(st, odds_dict)
@@ -537,6 +537,19 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     league_avg_total = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 0.95
+# ---- FALLBACK: if historical totals lines failed, use today's market totals to build a baseline ----
+if (np.isnan(league_avg_total) or not league_avgs) and odds_dict:
+    market_totals = []
+    for _k, oi in (odds_dict or {}).items():
+        tp = _safe_float((oi or {}).get("total_points"))
+        if not np.isnan(tp):
+            market_totals.append(float(tp))
+
+    if market_totals:
+        league_avg_total = float(np.mean(market_totals))
+        league_sd_total = float(np.std(market_totals)) if len(market_totals) >= 3 else float(league_sd_total)
+        if np.isnan(league_sd_total) or league_sd_total <= 0:
+            league_sd_total = 0.95
 
     def _team_line_avg_sd(team_name: str) -> Tuple[float, float]:
         v = (team_total_lines or {}).get(team_name)
