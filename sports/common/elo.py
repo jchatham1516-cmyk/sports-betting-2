@@ -17,21 +17,15 @@ class EloState:
     processed: Set[str] = field(default_factory=set)
     default_elo: float = 1500.0
 
+    def __contains__(self, team: str) -> bool:
+        # allows:  if team in st:
+        return str(team) in (self.ratings or {})
+
     def get(self, team: str) -> float:
         return float(self.ratings.get(str(team), self.default_elo))
 
     def set(self, team: str, elo: float) -> None:
         self.ratings[str(team)] = float(elo)
-
-    def has_team(self, team: str) -> bool:
-        return str(team) in (self.ratings or {})
-
-    def __contains__(self, team: object) -> bool:
-        # Allows: `if team in st:`
-        try:
-            return str(team) in (self.ratings or {})
-        except Exception:
-            return False
 
     def is_processed(self, game_key: str) -> bool:
         return str(game_key) in self.processed
