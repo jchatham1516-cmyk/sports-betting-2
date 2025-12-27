@@ -37,16 +37,19 @@ MARGIN_CAL_PATH = "results/margin_cal_nfl.json"
 HOME_ADV = float(os.getenv("NFL_HOME_ADV", "55.0"))
 ELO_K = float(os.getenv("NFL_ELO_K", "20.0"))
 
-# Make spreads more willing to separate (smaller => bigger spreads)
-# Old default was 40.0 (very conservative). 28 makes blowouts possible.
-ELO_PER_POINT = float(os.getenv("NFL_ELO_PER_POINT", "28.0"))
+# IMPORTANT: how far back to rebuild Elo signal from completed games
+# If this is too small, everyone stays ~equal and your probs cluster.
+ELO_TRAIN_DAYS = int(os.getenv("NFL_ELO_TRAIN_DAYS", "200"))
+
+# Fallback mapping when margin calibrator isn't trained yet
+ELO_PER_POINT = float(os.getenv("NFL_ELO_PER_POINT", "40.0"))
 
 MAX_ABS_INJ_ELO_ADJ = float(os.getenv("NFL_MAX_ABS_INJ_ELO_ADJ", "45.0"))
 MAX_ABS_INJ_POINTS = float(os.getenv("NFL_MAX_ABS_INJ_POINTS", "6.0"))
 INJ_ELO_PER_POINT = float(os.getenv("NFL_INJ_ELO_PER_POINT", "6.0"))
 QB_EXTRA_ELO = float(os.getenv("NFL_QB_EXTRA_ELO", "10.0"))
 
-# Let blowouts exist
+# Allow larger spreads (so “blowouts” are possible)
 MAX_ABS_MODEL_SPREAD = float(os.getenv("NFL_MAX_ABS_MODEL_SPREAD", "24.0"))
 
 SHORT_REST_PENALTY_ELO = float(os.getenv("NFL_SHORT_REST_PENALTY_ELO", "-14.0"))
@@ -58,18 +61,12 @@ FORM_MIN_GAMES = int(os.getenv("NFL_FORM_MIN_GAMES", "2"))
 FORM_ELO_PER_POINT = float(os.getenv("NFL_FORM_ELO_PER_POINT", "1.35"))
 FORM_ELO_CLAMP = float(os.getenv("NFL_FORM_ELO_CLAMP", "40.0"))
 
-# Compression was making everything too similar; default to 1.0 (no compression)
+# KEY FIX: compression was squashing everything toward 0.5
+# Set 1.00 to preserve separation.
 BASE_COMPRESS = float(os.getenv("NFL_BASE_COMPRESS", "1.00"))
 
 MIN_ML_EDGE = float(os.getenv("NFL_MIN_ML_EDGE", "0.02"))
 CAL_MIN_GAMES = int(os.getenv("NFL_CAL_MIN_GAMES", "60"))
-
-# NEW: slightly scale Elo diffs before converting to prob/spread (more separation)
-ELO_DIFF_SCALE = float(os.getenv("NFL_ELO_DIFF_SCALE", "1.15"))
-
-# NEW: blend prob->spread with margin model to allow bigger spreads when prob is strong
-SPREAD_FROM_PROB_W = float(os.getenv("NFL_SPREAD_FROM_PROB_W", "0.55"))  # 0..1
-SPREAD_FROM_PROB_SD = float(os.getenv("NFL_SPREAD_FROM_PROB_SD", "13.5"))  # margin SD
 
 # ATS
 ATS_SD_PTS = float(os.getenv("NFL_ATS_SD_PTS", "13.5"))
@@ -79,25 +76,11 @@ ATS_MIN_PTS_EDGE = float(os.getenv("NFL_ATS_MIN_PTS_EDGE", "2.0"))
 ATS_BIG_LINE = float(os.getenv("NFL_ATS_BIG_LINE", "7.0"))
 ATS_TINY_MODEL = float(os.getenv("NFL_ATS_TINY_MODEL", "2.0"))
 ATS_BIGLINE_FORCE_PASS = os.getenv("NFL_ATS_BIGLINE_FORCE_PASS", "1") == "1"
+MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NFL_MAX_ATS_PLAYS_PER_DAY", "3"))
 
-def _parse_optional_int(x: str) -> Optional[int]:
-    if x is None:
-        return None
-    s = str(x).strip().lower()
-    if s in ("none", "null", ""):
-        return None
-    try:
-        return int(s)
-    except Exception:
-        return None
-
-MAX_ATS_PLAYS_PER_DAY = _parse_optional_int(os.getenv("NFL_MAX_ATS_PLAYS_PER_DAY", "3"))
-
-# ----------------------------
 # Totals
-# ----------------------------
 TOTAL_DEFAULT_PRICE = float(os.getenv("NFL_TOTAL_DEFAULT_PRICE", "-110.0"))
-TOTAL_ANCHOR_W = float(os.getenv("NFL_TOTAL_ANCHOR_W", "0.25"))  # 25% model, 75% market
+TOTAL_ANCHOR_W = float(os.getenv("NFL_TOTAL_ANCHOR_W", "0.25"))
 
 PTS_LOOKBACK_DAYS = int(os.getenv("NFL_PTS_LOOKBACK_DAYS", "70"))
 PTS_REGRESS = float(os.getenv("NFL_PTS_REGRESS", "0.35"))
@@ -123,6 +106,7 @@ TOTAL_MIN_PTS_EDGE = float(os.getenv("NFL_TOTAL_MIN_PTS_EDGE", "2.0"))
 TOTAL_SD_FLOOR = float(os.getenv("NFL_TOTAL_SD_FLOOR", "5.5"))
 TOTAL_SD_CEIL = float(os.getenv("NFL_TOTAL_SD_CEIL", "14.5"))
 TOTAL_PRIMARY_BOOST = float(os.getenv("NFL_TOTAL_PRIMARY_BOOST", "1.25"))
+
 
 # ----------------------------
 # Helpers
@@ -231,68 +215,6 @@ def _ml_recommendation(model_p: float, market_p: float, min_edge: float = MIN_ML
 
 def _phi(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
-
-
-def _inv_phi(p: float) -> float:
-    """
-    Approx inverse CDF for standard normal.
-    Valid for p in (0,1). Uses Acklam-style rational approximation.
-    """
-    p = float(_clamp(p, 1e-6, 1.0 - 1e-6))
-
-    # Coefficients (Peter J. Acklam)
-    a = [
-        -3.969683028665376e01,
-        2.209460984245205e02,
-        -2.759285104469687e02,
-        1.383577518672690e02,
-        -3.066479806614716e01,
-        2.506628277459239e00,
-    ]
-    b = [
-        -5.447609879822406e01,
-        1.615858368580409e02,
-        -1.556989798598866e02,
-        6.680131188771972e01,
-        -1.328068155288572e01,
-    ]
-    c = [
-        -7.784894002430293e-03,
-        -3.223964580411365e-01,
-        -2.400758277161838e00,
-        -2.549732539343734e00,
-        4.374664141464968e00,
-        2.938163982698783e00,
-    ]
-    d = [
-        7.784695709041462e-03,
-        3.224671290700398e-01,
-        2.445134137142996e00,
-        3.754408661907416e00,
-    ]
-
-    plow = 0.02425
-    phigh = 1.0 - plow
-
-    if p < plow:
-        q = math.sqrt(-2.0 * math.log(p))
-        return (
-            (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
-            / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
-        )
-    if p > phigh:
-        q = math.sqrt(-2.0 * math.log(1.0 - p))
-        return -(
-            (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
-            / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
-        )
-
-    q = p - 0.5
-    r = q * q
-    return (
-        (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
-        / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0)
-    )
 
 
 def _breakeven_prob_from_american(price: float) -> float:
@@ -435,12 +357,7 @@ def _build_team_scoring_table(days_back: int = PTS_LOOKBACK_DAYS) -> pd.DataFram
     return pd.DataFrame(rows)
 
 
-def _expected_points_total(
-    home: str,
-    away: str,
-    league_pts: float,
-    team_tbl: pd.DataFrame,
-) -> Tuple[float, float, float]:
+def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd.DataFrame) -> Tuple[float, float, float]:
     if team_tbl is None or team_tbl.empty or league_pts <= 1e-6:
         return (league_pts, league_pts, 2.0 * league_pts)
 
@@ -466,9 +383,7 @@ def _expected_points_total(
 
     exp_home = float(league_pts * home_off * away_def)
     exp_away = float(league_pts * away_off * home_def)
-
-    total = float(exp_home + exp_away)
-    return (exp_home, exp_away, total)
+    return (exp_home, exp_away, float(exp_home + exp_away))
 
 
 # ----------------------------
@@ -539,20 +454,21 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
     for team, lst in margins.items():
         lst = sorted(lst, key=lambda x: x[0], reverse=True)
         margins_only = [m for _, m in lst]
-        games = len(margins_only)
-        if games < FORM_MIN_GAMES:
+        if len(margins_only) < FORM_MIN_GAMES:
             continue
-
         avg_margin = float(np.mean(margins_only))
         elo_adj = _clamp(avg_margin * FORM_ELO_PER_POINT, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
-        out[team] = {"avg_margin": float(avg_margin), "games": int(games), "elo_adj": float(elo_adj)}
+        out[team] = {"avg_margin": float(avg_margin), "games": int(len(margins_only)), "elo_adj": float(elo_adj)}
     return out
 
 
 def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
-    events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_from))
+
+    # KEY FIX: use a bigger window so ratings actually separate
+    df = max(int(days_from), int(ELO_TRAIN_DAYS))
+    events = fetch_recent_scores(sport_key=sport_key, days_from=df)
 
     train_ps: list = []
     train_ys: list = []
@@ -599,6 +515,7 @@ def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
     os.makedirs("results", exist_ok=True)
     st.save(ELO_PATH)
 
+    # Fit calibrators only if enough games
     try:
         if len(train_ps) >= CAL_MIN_GAMES:
             cal = fit_platt(np.array(train_ps, dtype=float), np.array(train_ys, dtype=float))
@@ -616,7 +533,9 @@ def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
 # Main daily run
 # ----------------------------
 def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
+    # KEY FIX: Elo gets rebuilt w/ big window via env NFL_ELO_TRAIN_DAYS
     st = update_elo_from_recent_scores(days_from=14)
+
     platt = load_platt(PLATT_PATH)
     margin_cal = load_margin_cal(MARGIN_CAL_PATH)
 
@@ -634,7 +553,6 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     except Exception:
         target_date = None
 
-    # injuries
     try:
         injuries_map = fetch_espn_nfl_injuries()
     except Exception as e:
@@ -644,7 +562,6 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     last_played = _build_last_game_date_map(days_back=21)
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
 
-    # Totals market-line history
     sport_key = SPORT_TO_ODDS_KEY.get("nfl")
     team_total_lines = {}
     if sport_key:
@@ -659,8 +576,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             print(f"[nfl totals] WARNING: failed to build historical totals lines: {e}")
             team_total_lines = {}
 
-    league_avgs = []
-    league_sds = []
+    league_avgs, league_sds = [], []
     for v in (team_total_lines or {}).values():
         try:
             if v.get("avg") is not None:
@@ -681,7 +597,6 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS)
 
-    # league_pts baseline
     league_pts = 22.0
     try:
         if not np.isnan(league_avg_total_line) and league_avg_total_line > 10:
@@ -702,12 +617,10 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         eh = st.get(home)
         ea = st.get(away)
 
-        # Rest
         home_days_off = _calc_days_off(target_date, last_played.get(home))
         away_days_off = _calc_days_off(target_date, last_played.get(away))
         rest_adj_elo = _rest_elo(home_days_off) - _rest_elo(away_days_off)
 
-        # Injuries + QB
         home_inj = build_injury_list_for_team_nfl(home, injuries_map)
         away_inj = build_injury_list_for_team_nfl(away, injuries_map)
 
@@ -730,48 +643,40 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
         qb_home = qb_cost(home_inj)
         qb_away = qb_cost(away_inj)
-        qb_diff = float(qb_away - qb_home)  # positive => away QB worse => home advantage
+        qb_diff = float(qb_away - qb_home)
 
         inj_elo_adj = float(inj_pts) * float(INJ_ELO_PER_POINT)
         qb_elo_adj = float(qb_diff) * float(QB_EXTRA_ELO)
         inj_total_elo = _clamp(inj_elo_adj + qb_elo_adj, -MAX_ABS_INJ_ELO_ADJ, MAX_ABS_INJ_ELO_ADJ)
 
-        # Form
         form_home = float((form_map.get(home) or {}).get("elo_adj", 0.0))
         form_away = float((form_map.get(away) or {}).get("elo_adj", 0.0))
         form_diff = float(form_home - form_away)
 
-        # Effective elos
         eh_eff = float(eh) + float(rest_adj_elo) + 0.5 * float(inj_total_elo) + 0.5 * float(form_diff)
         ea_eff = float(ea) - 0.5 * float(inj_total_elo) - 0.5 * float(form_diff)
 
-        # Win prob (raw -> (optional) compress -> platt)
-        # NEW: scale the effective Elo gap to avoid everything clustering near 0.55
-        p_raw = float(elo_win_prob(eh_eff * ELO_DIFF_SCALE, ea_eff * ELO_DIFF_SCALE, home_adv=HOME_ADV * ELO_DIFF_SCALE))
+        # Win prob: preserve separation
+        p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
         p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
+
+        # Only apply platt if it looks “real”; otherwise keep p_comp
+        p_home = p_comp
         try:
-            p_home = _clamp(float(platt.predict(float(p_comp))), 0.01, 0.99)
+            a = float(getattr(platt, "a", 0.0))
+            b = float(getattr(platt, "b", 0.0))
+            if abs(a) > 1e-9 or abs(b) > 1e-9:
+                p_home = _clamp(float(platt.predict(float(p_comp))), 0.01, 0.99)
         except Exception:
             p_home = p_comp
 
-        # Spread
-        elo_diff = ((eh_eff - ea_eff) + HOME_ADV) * ELO_DIFF_SCALE
-        spread_from_margin = _clamp(
+        elo_diff = (eh_eff - ea_eff) + HOME_ADV
+        model_spread_home = _clamp(
             _margin_model_spread_from_elo_diff(float(elo_diff)),
             -MAX_ABS_MODEL_SPREAD,
             MAX_ABS_MODEL_SPREAD,
         )
 
-        # NEW: prob -> implied spread (lets blowouts happen if p_home is high)
-        z = _inv_phi(float(p_home))
-        spread_from_prob = float(-z * float(SPREAD_FROM_PROB_SD))
-        spread_from_prob = float(_clamp(spread_from_prob, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
-
-        w = float(_clamp(SPREAD_FROM_PROB_W, 0.0, 1.0))
-        model_spread_home = float((1.0 - w) * spread_from_margin + w * spread_from_prob)
-        model_spread_home = float(_clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
-
-        # Market
         home_ml = _safe_float((oi or {}).get("home_ml"))
         away_ml = _safe_float((oi or {}).get("away_ml"))
         home_spread = _safe_float((oi or {}).get("home_spread"))
@@ -781,7 +686,6 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         total_over_price = _safe_float((oi or {}).get("over_price"), default=TOTAL_DEFAULT_PRICE)
         total_under_price = _safe_float((oi or {}).get("under_price"), default=TOTAL_DEFAULT_PRICE)
 
-        # Market no-vig ML
         mkt_home_p = float("nan")
         if not np.isnan(home_ml) and not np.isnan(away_ml):
             mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
@@ -792,7 +696,6 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         ml_pick = _ml_recommendation(float(p_home), float(mkt_home_p), min_edge=MIN_ML_EDGE)
         value_tier = _pick_value_tier(abs(edge_home)) if not np.isnan(edge_home) else "UNKNOWN"
 
-        # ATS
         spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
         p_home_cover = _cover_prob_from_edge(spread_edge_home, sd_pts=ATS_SD_PTS)
         ats_side, ats_p_win, ats_edge_vs_be, ats_be = _ats_pick_and_edge(p_home_cover, spread_price)
@@ -820,12 +723,8 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             ats_strength = _ats_strength_label(ats_edge_vs_be)
             spread_reco = _ats_reco(ats_side, ats_strength)
 
-        # ----------------------------
-        # TOTALS
-        # ----------------------------
-        _, _, model_total_outcome = _expected_points_total(
-            home=home, away=away, league_pts=float(league_pts), team_tbl=team_tbl
-        )
+        # Totals
+        _, _, model_total_outcome = _expected_points_total(home=home, away=away, league_pts=float(league_pts), team_tbl=team_tbl)
 
         total_adj_inj = -float(INJ_POINTS_TO_TOTAL_PTS) * abs(float(inj_pts))
         total_adj_inj = float(_clamp(total_adj_inj, -MAX_TOTAL_INJ_DEDUCT, 0.0))
@@ -843,9 +742,9 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         weather_deduct = 0.0
         if ENABLE_WEATHER:
             kickoff_dt = _parse_iso_datetime((oi or {}).get("commence_time", "")) or datetime.utcnow()
-            wthr = fetch_game_weather(home_team=home, game_dt_utc=kickoff_dt)
-            t = _safe_float((wthr or {}).get("temp_f"), default=np.nan)
-            wd = _safe_float((wthr or {}).get("wind_mph"), default=np.nan)
+            w = fetch_game_weather(home_team=home, game_dt_utc=kickoff_dt)
+            t = _safe_float((w or {}).get("temp_f"), default=np.nan)
+            wd = _safe_float((w or {}).get("wind_mph"), default=np.nan)
 
             if not np.isnan(t):
                 weather_temp = float(t)
@@ -895,7 +794,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         total_pass_reason = _total_gate_reason(total_side, total_edge_vs_be, total_edge_pts)
         total_recommendation = _total_reco(total_side, total_edge_vs_be, total_edge_pts)
 
-        # PRIMARY selection
+        # Primary selection
         ml_score = float(abs(edge_home)) if not np.isnan(edge_home) else -999.0
         ats_score = float(ats_edge_vs_be) if str(spread_reco).startswith("Model PICK ATS:") else -999.0
         tot_score = float(total_edge_vs_be) if str(total_recommendation).startswith("Model PICK TOTAL:") else -999.0
@@ -905,14 +804,11 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         primary = ml_pick
         why_primary = f"Primary=ML (score={ml_score:+.3f})"
         best = ml_score
-
         if ats_score > best:
             best = ats_score
             primary = spread_reco
             why_primary = f"Primary=ATS (edge_vs_be={ats_score:+.3f})"
-
         if tot_score > best:
-            best = tot_score
             primary = total_recommendation
             why_primary = f"Primary=TOTAL (edge_vs_be={float(total_edge_vs_be):+.3f}; boosted)"
 
@@ -972,13 +868,11 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             df["ats_rank_score"] = np.where(elig, df["ats_edge_vs_be"].astype(float), -999.0)
             top_idx = df.sort_values("ats_rank_score", ascending=False).head(int(MAX_ATS_PLAYS_PER_DAY)).index
             keep = set(top_idx.tolist())
-
             for i in df.index:
                 if bool(elig.loc[i]) and i not in keep:
                     df.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
                     df.loc[i, "ats_strength"] = "pass"
                     df.loc[i, "ats_pass_reason"] = "top-N filter"
-
             df.drop(columns=["ats_rank_score"], inplace=True, errors="ignore")
     except Exception:
         pass
