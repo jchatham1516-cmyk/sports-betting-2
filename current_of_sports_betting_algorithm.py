@@ -137,22 +137,20 @@ def main(argv=None):
         results_df["sport"] = str(args.sport)
 
     # Recommendations
-    if not results_df.empty:
-        results_df, debug_df = add_recommendations_to_df(
-            results_df,
-            thresholds=Thresholds(
-                ml_edge_strong=0.06,
-                ml_edge_lean=0.035,
-                ats_edge_strong_pts=3.0,
-                ats_edge_lean_pts=1.5,
-                conf_high=0.18,
-                conf_med=0.10,
-                total_min_edge_vs_be=0.02,
-                total_min_edge_pts=3.0,
-            ),
-            model_spread_home_col="model_spread_home" if "model_spread_home" in results_df.columns else None,
-            model_margin_home_col=None,
-        )
+results_df, debug_df = add_recommendations_to_df(
+    results_df,
+    thresholds=Thresholds(
+        ml_edge_strong=0.06,
+        ml_edge_lean=0.035,
+        ats_edge_strong_pts=3.0,
+        ats_edge_lean_pts=1.5,
+        conf_high=0.18,
+        conf_med=0.10,
+    ),
+    sport=args.sport,  # <--- IMPORTANT
+    model_spread_home_col="model_spread_home" if "model_spread_home" in results_df.columns else None,
+    model_margin_home_col=None,
+)
     else:
         debug_df = pd.DataFrame([])
 
