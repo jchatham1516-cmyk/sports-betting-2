@@ -6,8 +6,8 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone, date
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import requests
@@ -28,11 +28,10 @@ HIST_SLEEP_S = float(os.getenv("ODDS_HIST_TOTALS_SLEEP_S", "0.15"))
 # Default bookmaker to anchor totals history
 HIST_BOOKMAKERS = os.getenv("ODDS_HIST_TOTALS_BOOKMAKERS", "draftkings")
 
-# NEW: How far back we FETCH (once per day). Example: 365, 730, etc.
-HIST_FETCH_DAYS = int(os.getenv("ODDS_HIST_TOTALS_FETCH_DAYS", "365"))
-
-# NEW: If set, never hit the API; use cache only.
-HIST_DISABLE_FETCH = os.getenv("ODDS_HIST_TOTALS_DISABLE_FETCH", "0") == "1"
+# NEW: when days_back is large, sample 1 day every N days (keeps requests sane)
+# Example: days_back=1095 with step=7 => ~156 sampled days
+HIST_SAMPLE_STEP_DAYS = int(os.getenv("ODDS_HIST_TOTALS_SAMPLE_STEP_DAYS", "7"))
+HIST_SAMPLE_ONLY_IF_DAYS_BACK_GE = int(os.getenv("ODDS_HIST_TOTALS_SAMPLE_ONLY_IF_DAYS_BACK_GE", "60"))
 
 
 @dataclass
@@ -155,13 +154,6 @@ def _extract_total_from_hist_odds_payload(payload: dict) -> Optional[float]:
     return None
 
 
-def _as_utc_date(d: str) -> Optional[date]:
-    try:
-        return datetime.fromisoformat(d).date()
-    except Exception:
-        return None
-
-
 def build_team_historical_total_lines(
     *,
     sport_key: str,
@@ -172,163 +164,138 @@ def build_team_historical_total_lines(
     Returns:
       { team_name: {"avg": float, "sd": float, "n": int} }
 
-    New behavior:
-      - Fetch RAW totals lines (with dates) up to HIST_FETCH_DAYS ONCE per UTC day.
-      - Reuse that raw cache for any 'days_back' <= cached window with ZERO extra API calls.
-      - Optional cache-only mode: set ODDS_HIST_TOTALS_DISABLE_FETCH=1
+    Cache behavior:
+      - Cache is keyed by *today's UTC date* + params, so it refreshes at most once per day.
+
+    Sampling behavior:
+      - If days_back is large, we sample every HIST_SAMPLE_STEP_DAYS to keep requests sane.
     """
     api_key = _get_api_key()
-    if not api_key and not HIST_DISABLE_FETCH:
+    if not api_key:
         print("[hist_totals] WARNING: ODDS_API_KEY missing. Returning empty totals history.")
         return {}
 
     today_utc = datetime.now(timezone.utc).date().isoformat()
 
+    # sampling step
+    step = 1
+    if int(days_back) >= int(HIST_SAMPLE_ONLY_IF_DAYS_BACK_GE):
+        step = max(1, int(HIST_SAMPLE_STEP_DAYS))
+
     cache = _load_cache(sport_key) or {}
-
-    # Cache is "daily raw": depends on date + bookmaker + mins + fetch_days (NOT days_back)
     cache_key = (
-        f"{today_utc}|fetch_days={int(HIST_FETCH_DAYS)}|mins={int(minutes_before_commence)}|bm={HIST_BOOKMAKERS}"
+        f"{today_utc}|days_back={int(days_back)}|step={int(step)}|mins={int(minutes_before_commence)}|"
+        f"bm={HIST_BOOKMAKERS}|maxreq={int(HIST_MAX_REQUESTS)}|maxodds={int(HIST_MAX_EVENT_ODDS_CALLS)}"
     )
+    if cache.get("cache_key") == cache_key and isinstance(cache.get("team_totals"), dict):
+        return cache["team_totals"]
 
-    raw = None
-    if cache.get("cache_key") == cache_key and isinstance(cache.get("raw_team_lines"), dict):
-        raw = cache.get("raw_team_lines")
+    budget = _HistBudget(limit=HIST_MAX_REQUESTS)
+    totals_by_team: Dict[str, List[float]] = defaultdict(list)
+    odds_calls_used = 0
 
-    if raw is None:
-        if HIST_DISABLE_FETCH:
-            print("[hist_totals] cache-only mode enabled but no valid cache found; returning empty.")
-            return {}
+    # We iterate d in steps to cover long horizons cheaply
+    for d in range(0, int(days_back), int(step)):
+        if budget.hard_stop:
+            break
+        if odds_calls_used >= HIST_MAX_EVENT_ODDS_CALLS:
+            break
 
-        # ---- FETCH once per day ----
-        budget = _HistBudget(limit=HIST_MAX_REQUESTS)
-        raw_team_lines: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
-        odds_calls_used = 0
+        query_dt = datetime.now(timezone.utc) - timedelta(days=int(d))
+        query_dt = query_dt.replace(hour=12, minute=0, second=0, microsecond=0)
 
-        for d in range(int(HIST_FETCH_DAYS)):
-            if budget.hard_stop:
-                break
-            if odds_calls_used >= HIST_MAX_EVENT_ODDS_CALLS:
-                break
+        # 1) list events for that date
+        events_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events"
+        events_params = {"apiKey": api_key, "date": _iso_z(query_dt), "dateFormat": "iso"}
 
-            query_dt = datetime.now(timezone.utc) - timedelta(days=d)
-            query_dt = query_dt.replace(hour=12, minute=0, second=0, microsecond=0)
+        events = _get_json(events_url, events_params, budget)
+        if events is None:
+            break
 
-            events_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events"
-            events_params = {"apiKey": api_key, "date": _iso_z(query_dt), "dateFormat": "iso"}
-
-            events = _get_json(events_url, events_params, budget)
-            if events is None:
-                break
-
-            if not isinstance(events, list) or not events:
-                continue
-
-            events = events[: max(1, int(HIST_MAX_EVENTS_PER_DAY))]
-
-            for ev in events:
-                if budget.hard_stop or odds_calls_used >= HIST_MAX_EVENT_ODDS_CALLS:
-                    break
-                try:
-                    event_id = ev.get("id")
-                    home = ev.get("home_team")
-                    away = ev.get("away_team")
-                    commence = ev.get("commence_time")
-                    if not event_id or not home or not away or not commence:
-                        continue
-
-                    try:
-                        cdt = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
-                    except Exception:
-                        cdt = query_dt
-
-                    hist_dt = cdt - timedelta(minutes=int(minutes_before_commence))
-
-                    odds_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events/{event_id}/odds"
-                    odds_params = {
-                        "apiKey": api_key,
-                        "date": _iso_z(hist_dt),
-                        "regions": "us",
-                        "markets": "totals",
-                        "oddsFormat": "american",
-                        "dateFormat": "iso",
-                        "bookmakers": HIST_BOOKMAKERS,
-                    }
-
-                    payload = _get_json(odds_url, odds_params, budget)
-                    if payload is None:
-                        budget.hard_stop = True
-                        break
-
-                    odds_calls_used += 1
-
-                    total_line = _extract_total_from_hist_odds_payload(payload)
-                    if total_line is None:
-                        continue
-
-                    # store with the game's UTC date so we can filter later
-                    game_day = cdt.astimezone(timezone.utc).date().isoformat()
-                    raw_team_lines[str(home)].append((game_day, float(total_line)))
-                    raw_team_lines[str(away)].append((game_day, float(total_line)))
-
-                except Exception:
-                    continue
-
-            # early stop if we’ve mostly spent odds calls
-            if odds_calls_used >= max(10, int(HIST_MAX_EVENT_ODDS_CALLS * 0.8)):
-                break
-
-        raw = {k: v for k, v in raw_team_lines.items()}
-
-        _save_cache(
-            sport_key,
-            {
-                "cache_key": cache_key,
-                "asof_date": today_utc,
-                "raw_team_lines": raw,
-                "meta": {
-                    "requests_used": int(budget.used),
-                    "odds_calls_used": int(odds_calls_used),
-                    "max_requests": int(HIST_MAX_REQUESTS),
-                    "max_event_odds_calls": int(HIST_MAX_EVENT_ODDS_CALLS),
-                    "fetch_days": int(HIST_FETCH_DAYS),
-                    "minutes_before_commence": int(minutes_before_commence),
-                    "bookmakers": str(HIST_BOOKMAKERS),
-                },
-            },
-        )
-
-    # ---- COMPUTE stats from cached raw for requested days_back ----
-    cutoff = datetime.now(timezone.utc).date() - timedelta(days=int(days_back))
-    out: Dict[str, Dict[str, float]] = {}
-
-    for team, pts in (raw or {}).items():
-        if not isinstance(pts, list) or not pts:
+        if not isinstance(events, list) or not events:
             continue
 
-        vals: List[float] = []
-        for d_str, line in pts:
-            dd = _as_utc_date(str(d_str))
-            if dd is None:
-                continue
-            if dd < cutoff:
-                continue
+        # cap events per sampled day
+        events = events[: max(1, int(HIST_MAX_EVENTS_PER_DAY))]
+
+        # 2) per-event totals odds
+        for ev in events:
+            if budget.hard_stop or odds_calls_used >= HIST_MAX_EVENT_ODDS_CALLS:
+                break
+
             try:
-                vals.append(float(line))
+                event_id = ev.get("id")
+                home = ev.get("home_team")
+                away = ev.get("away_team")
+                commence = ev.get("commence_time")
+                if not event_id or not home or not away or not commence:
+                    continue
+
+                try:
+                    cdt = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+                except Exception:
+                    cdt = query_dt
+
+                hist_dt = cdt - timedelta(minutes=int(minutes_before_commence))
+
+                odds_url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events/{event_id}/odds"
+                odds_params = {
+                    "apiKey": api_key,
+                    "date": _iso_z(hist_dt),
+                    "regions": "us",
+                    "markets": "totals",
+                    "oddsFormat": "american",
+                    "dateFormat": "iso",
+                    "bookmakers": HIST_BOOKMAKERS,
+                }
+
+                payload = _get_json(odds_url, odds_params, budget)
+                if payload is None:
+                    budget.hard_stop = True
+                    break
+
+                odds_calls_used += 1
+
+                total_line = _extract_total_from_hist_odds_payload(payload)
+                if total_line is None:
+                    continue
+
+                totals_by_team[str(home)].append(float(total_line))
+                totals_by_team[str(away)].append(float(total_line))
+
             except Exception:
                 continue
 
-        if not vals:
+        # If we've spent most of our odds budget, stop early
+        if odds_calls_used >= max(10, int(HIST_MAX_EVENT_ODDS_CALLS * 0.85)):
+            break
+
+    out: Dict[str, Dict[str, float]] = {}
+    for team, lines in totals_by_team.items():
+        if not lines:
             continue
-
-        arr = np.array(vals, dtype=float)
-        if arr.size < 2:
-            avg = float(np.mean(arr))
-            sd = float("nan")
-        else:
-            avg = float(np.mean(arr))
-            sd = float(np.std(arr, ddof=1))
-
+        arr = np.array(lines, dtype=float)
+        avg = float(np.mean(arr))
+        sd = float(np.std(arr, ddof=1)) if arr.size >= 2 else float("nan")
         out[str(team)] = {"avg": avg, "sd": sd, "n": int(arr.size)}
+
+    _save_cache(
+        sport_key,
+        {
+            "cache_key": cache_key,
+            "asof_date": today_utc,
+            "team_totals": out,
+            "meta": {
+                "requests_used": int(budget.used),
+                "odds_calls_used": int(odds_calls_used),
+                "max_requests": int(HIST_MAX_REQUESTS),
+                "max_event_odds_calls": int(HIST_MAX_EVENT_ODDS_CALLS),
+                "days_back": int(days_back),
+                "sample_step_days": int(step),
+                "minutes_before_commence": int(minutes_before_commence),
+                "bookmakers": str(HIST_BOOKMAKERS),
+            },
+        },
+    )
 
     return out
