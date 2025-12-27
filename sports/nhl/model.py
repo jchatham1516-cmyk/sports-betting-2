@@ -502,19 +502,19 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     rows = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
-        home = canon_team(home_in)
-        away = canon_team(away_in)
-        if not home or not away:
-            continue
+    home = canon_team(home_in)
+    away = canon_team(away_in)
+    if not home or not away:
+        continue
 
-       # Sanity check: default Elo should never be used silently
-# (EloState.get() returns 1500 if missing)
-eh = st.get(home)
-ea = st.get(away)
-if eh == 1500 or ea == 1500:
-    raise RuntimeError(
-        f"[NHL] Default Elo used (missing team mapping?): home={home_in}->{home} eh={eh}, away={away_in}->{away} ea={ea}"
-    )
+    eh = st.get(home)
+    ea = st.get(away)
+
+    # Sanity check: default Elo should never be used silently
+    if eh == 1500 or ea == 1500:
+        raise RuntimeError(
+            f"[NHL] Default Elo used (missing team mapping?): home={home_in}->{home} eh={eh}, away={away_in}->{away} ea={ea}"
+        )
 
         eh = st.get(home)
         ea = st.get(away)
