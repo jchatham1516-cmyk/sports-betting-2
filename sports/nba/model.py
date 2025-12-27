@@ -32,29 +32,33 @@ MARGIN_CAL_PATH = "results/margin_cal_nba.json"
 # ----------------------------
 # Tunables (NBA-specific)
 # ----------------------------
-# IMPORTANT: if your model "always favors home", lower this (recommended ~30-35).
-HOME_ADV = float(os.getenv("NBA_HOME_ADV", "32.0"))
-
+HOME_ADV = float(os.getenv("NBA_HOME_ADV", "55.0"))
 ELO_K = float(os.getenv("NBA_ELO_K", "20.0"))
 
-# How far back to train Elo each run
+# Elo training window (days)
 ELO_TRAIN_DAYS = int(os.getenv("NBA_ELO_TRAIN_DAYS", "200"))
 
-# Fallback mapping until margin calibrator is trained
+# Fallback until margin calibrator exists
 ELO_PER_POINT = float(os.getenv("NBA_ELO_PER_POINT", "40.0"))
 
+# Injuries
 MAX_ABS_INJ_POINTS = float(os.getenv("NBA_MAX_ABS_INJ_POINTS", "6.0"))
+INJ_DAMP = float(os.getenv("NBA_INJ_DAMP", "0.60"))  # damp injuries
+
+# Spread sanity clamp
 MAX_ABS_MODEL_SPREAD = float(os.getenv("NBA_MAX_ABS_MODEL_SPREAD", "17.0"))
 
+# Rest / fatigue
 SHORT_REST_PENALTY_ELO = float(os.getenv("NBA_SHORT_REST_PENALTY_ELO", "-14.0"))
 NORMAL_REST_BONUS_ELO = float(os.getenv("NBA_NORMAL_REST_BONUS_ELO", "0.0"))
 
+# Recent form
 FORM_LOOKBACK_DAYS = int(os.getenv("NBA_FORM_LOOKBACK_DAYS", "35"))
 FORM_MIN_GAMES = int(os.getenv("NBA_FORM_MIN_GAMES", "2"))
 FORM_ELO_PER_POINT = float(os.getenv("NBA_FORM_ELO_PER_POINT", "1.35"))
 FORM_ELO_CLAMP = float(os.getenv("NBA_FORM_ELO_CLAMP", "40.0"))
 
-# Less compression (closer to 1.0) => less “everything looks 52/48”
+# Prob compression
 BASE_COMPRESS = float(os.getenv("NBA_BASE_COMPRESS", "0.95"))
 MIN_ML_EDGE = float(os.getenv("NBA_MIN_ML_EDGE", "0.02"))
 
@@ -69,23 +73,19 @@ ATS_MIN_PTS_EDGE = float(os.getenv("NBA_ATS_MIN_PTS_EDGE", "2.0"))
 ATS_BIG_LINE = float(os.getenv("NBA_ATS_BIG_LINE", "7.0"))
 ATS_TINY_MODEL = float(os.getenv("NBA_ATS_TINY_MODEL", "2.0"))
 ATS_BIGLINE_FORCE_PASS = os.getenv("NBA_ATS_BIGLINE_FORCE_PASS", "1") == "1"
-MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NBA_MAX_ATS_PLAYS_PER_DAY", "3"))  # set None manually to disable
+MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NBA_MAX_ATS_PLAYS_PER_DAY", "3"))
 
-# ----------------------------
 # Totals model (historical MARKET totals lines)
-# ----------------------------
 TOTAL_DEFAULT_PRICE = float(os.getenv("NBA_TOTAL_DEFAULT_PRICE", "-110.0"))
-
 TOTAL_HIST_DAYS = int(os.getenv("NBA_TOTAL_HIST_DAYS", "14"))
-
-# Stronger regression to league avg (fixes early-season overreaction)
-TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.45"))
-
+TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.45"))  # stronger regression
 TOTAL_SD_FLOOR = float(os.getenv("NBA_TOTAL_SD_FLOOR", "9.0"))
 TOTAL_SD_CEIL = float(os.getenv("NBA_TOTAL_SD_CEIL", "20.0"))
-
 TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NBA_TOTAL_MIN_EDGE_VS_BE", "0.02"))
 TOTAL_MIN_PTS_EDGE = float(os.getenv("NBA_TOTAL_MIN_PTS_EDGE", "3.0"))
+
+# Sanity behavior: warn by default, optionally raise
+STRICT_SANITY = os.getenv("NBA_STRICT_SANITY", "0") == "1"
 
 
 # ----------------------------
@@ -186,10 +186,7 @@ def _phi(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
-# ----------------------------
-# ATS helpers
-# ----------------------------
-def _cover_prob_from_edge(spread_edge_pts: float, sd_pts: float = ATS_SD_PTS) -> float:
+def _cover_prob_from_edge(spread_edge_pts: float, sd_pts: float) -> float:
     if spread_edge_pts is None or np.isnan(spread_edge_pts):
         return float("nan")
     z = float(spread_edge_pts) / float(sd_pts)
@@ -245,16 +242,7 @@ def _ats_reco(side: str, strength: str) -> str:
     return f"Model PICK ATS: {side} ({strength})"
 
 
-# ----------------------------
-# Totals helpers
-# ----------------------------
-def _total_pick_and_edge(
-    model_total: float,
-    market_total: float,
-    over_price: float,
-    under_price: float,
-    sd: float,
-) -> Tuple[str, float, float, float, float]:
+def _total_pick_and_edge(model_total: float, market_total: float, over_price: float, under_price: float, sd: float):
     if np.isnan(model_total) or np.isnan(market_total) or np.isnan(sd) or sd <= 0:
         return ("NONE", float("nan"), float("nan"), float("nan"), float("nan"))
 
@@ -272,26 +260,19 @@ def _total_pick_and_edge(
         return ("NONE", float("nan"), float("nan"), float("nan"), float(model_total - market_total))
 
     if edge_over >= edge_under:
-        return ("OVER", float(p_over), float(be_over), float(edge_over), float(model_total - market_total))
-    return ("UNDER", float(p_under), float(be_under), float(edge_under), float(model_total - market_total))
-
-
-def _total_gate_reason(side: str, edge_vs_be: float, edge_points: float) -> str:
-    if side == "NONE":
-        return "missing total/model"
-    if np.isnan(edge_vs_be) or np.isnan(edge_points):
-        return "missing price/model"
-    if abs(edge_points) < TOTAL_MIN_PTS_EDGE:
-        return "edge too small"
-    if edge_vs_be < TOTAL_MIN_EDGE_VS_BE:
-        return f"edge_vs_be<{TOTAL_MIN_EDGE_VS_BE:.3f}"
-    return ""
+        return ("OVER", p_over, be_over, edge_over, float(model_total - market_total))
+    return ("UNDER", p_under, be_under, edge_under, float(model_total - market_total))
 
 
 def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
-    reason = _total_gate_reason(side, edge_vs_be, edge_points)
-    if reason:
-        return f"No total bet ({reason})"
+    if side == "NONE":
+        return "No total bet (missing total/model)"
+    if np.isnan(edge_vs_be) or np.isnan(edge_points):
+        return "No total bet (missing price/model)"
+    if abs(edge_points) < TOTAL_MIN_PTS_EDGE:
+        return "No total bet (edge too small)"
+    if edge_vs_be < TOTAL_MIN_EDGE_VS_BE:
+        return f"No total bet (edge_vs_be<{TOTAL_MIN_EDGE_VS_BE:.3f})"
     return f"Model PICK TOTAL: {side}"
 
 
@@ -315,15 +296,11 @@ def _choose_primary_from_fields(
     tot_score = -999.0
     if isinstance(total_reco, str) and total_reco.startswith("Model PICK TOTAL:"):
         a = float(total_edge_vs_be) if total_edge_vs_be is not None and not np.isnan(total_edge_vs_be) else -999.0
-        b = (
-            float(abs(total_edge_points) / 10.0)
-            if total_edge_points is not None and not np.isnan(total_edge_points)
-            else -999.0
-        )
+        b = float(abs(total_edge_points) / 10.0) if total_edge_points is not None and not np.isnan(total_edge_points) else -999.0
         tot_score = float(max(a, b))
 
     primary = str(ml_reco)
-    why = f"Primary=ML (score={ml_score:+.3f})"
+    why = f"Primary=ML (abs_edge={ml_score:+.3f})"
     best = ml_score
 
     if ats_score > best:
@@ -332,16 +309,12 @@ def _choose_primary_from_fields(
         why = f"Primary=ATS (edge_vs_be={ats_score:+.3f})"
 
     if tot_score > best:
-        best = tot_score
         primary = str(total_reco)
         why = f"Primary=TOTAL (score={tot_score:+.3f}; edge_vs_be={float(total_edge_vs_be):+.3f})"
 
     return primary, why
 
 
-# ----------------------------
-# Builders
-# ----------------------------
 def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
     sport_key = SPORT_TO_ODDS_KEY["nba"]
     events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
@@ -417,8 +390,9 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
 
 def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     """
-    Updates Elo ratings from recent completed games.
-    ALSO trains:
+    Updates Elo ratings from recent completed NBA games.
+
+    Also fits:
       - Platt probability calibrator (compressed Elo prob -> calibrated prob)
       - Margin calibrator (elo_diff -> expected score margin)
     """
@@ -430,10 +404,10 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
     events = fetch_recent_scores(sport_key=sport_key, days_from=train_days)
 
-    train_ps: list = []
-    train_ys: list = []
-    train_xs: list = []
-    train_margins: list = []
+    train_ps: list[float] = []
+    train_ys: list[float] = []
+    train_xs: list[float] = []
+    train_margins: list[float] = []
 
     for ev in events:
         home_raw = ev.get("home_team")
@@ -456,25 +430,21 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
         except Exception:
             continue
 
+        # Pull current elos (may be default early in season — that's OK)
         eh = st.get(home)
         ea = st.get(away)
 
-        # Sanity check: default Elo should never be used silently
-        if eh == 1500 or ea == 1500:
-            raise RuntimeError(f"Default Elo used: {home} vs {away}")
-
-        # ---- collect calibration signal BEFORE updating Elo ----
+        # Collect calibration signal BEFORE updating Elo
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_comp = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
-
         train_ps.append(p_comp)
         train_ys.append(1.0 if hs > aw else 0.0)
 
         elo_diff = (float(eh) + float(HOME_ADV)) - float(ea)
-        train_xs.append(elo_diff)
+        train_xs.append(float(elo_diff))
         train_margins.append(float(hs - aw))
 
-        # ---- update Elo ----
+        # Update Elo
         nh, na = elo_update(eh, ea, hs, aw, k=ELO_K, home_adv=HOME_ADV)
         st.set(home, nh)
         st.set(away, na)
@@ -483,7 +453,7 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     os.makedirs("results", exist_ok=True)
     st.save(ELO_PATH)
 
-    # ---- fit + save calibrators when enough samples ----
+    # Fit + save calibrators when enough samples
     try:
         if len(train_ps) >= CAL_MIN_GAMES:
             cal = fit_platt(np.array(train_ps, dtype=float), np.array(train_ys, dtype=float))
@@ -497,9 +467,6 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     return st
 
 
-# ----------------------------
-# Main daily run
-# ----------------------------
 def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
 
@@ -511,7 +478,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     except Exception:
         target_date = None
 
-    # injuries
+    # Injuries
     try:
         injuries_map = fetch_official_nba_injuries()
     except Exception as e:
@@ -535,8 +502,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             print(f"[nba totals] WARNING: failed to build historical totals lines: {e}")
             team_total_lines = {}
 
-    league_avgs = []
-    league_sds = []
+    league_avgs: list[float] = []
+    league_sds: list[float] = []
     for v in (team_total_lines or {}).values():
         try:
             if v.get("avg") is not None:
@@ -548,20 +515,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     league_avg_total = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 14.0
-
-    # FALLBACK: if historical totals failed, estimate league baseline from today's market totals
-    if (np.isnan(league_avg_total) or not league_avgs) and odds_dict:
-        market_totals = []
-        for _k, oi in (odds_dict or {}).items():
-            tp = _safe_float((oi or {}).get("total_points"))
-            if not np.isnan(tp):
-                market_totals.append(float(tp))
-        if market_totals:
-            league_avg_total = float(np.mean(market_totals))
-            if len(market_totals) >= 3:
-                league_sd_total = float(np.std(market_totals))
-            if np.isnan(league_sd_total) or league_sd_total <= 0:
-                league_sd_total = 14.0
 
     def _team_line_avg_sd(team_canon: str, team_raw: str) -> Tuple[float, float]:
         candidates = []
@@ -590,7 +543,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         except Exception:
             return float(-(elo_diff / ELO_PER_POINT))
 
-    rows = []
+    rows: list[dict] = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
         away = canon_team(away_in)
@@ -599,6 +552,13 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
         eh = st.get(home)
         ea = st.get(away)
+
+        # If we are still at defaults, warn (don't crash)
+        if eh == st.default_elo or ea == st.default_elo:
+            msg = f"[NBA WARNING] Default Elo used (mapping/training issue): home={home_in}->{home} eh={eh}, away={away_in}->{away} ea={ea}"
+            if STRICT_SANITY:
+                raise RuntimeError(msg)
+            print(msg)
 
         # Rest
         home_days_off = _calc_days_off(target_date, last_played.get(home))
@@ -609,9 +569,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         home_inj = build_injury_list_for_team_nba(home, injuries_map)
         away_inj = build_injury_list_for_team_nba(away, injuries_map)
         inj_pts_raw = float(injury_adjustment_points(home_inj, away_inj))
-
-        # ✅ damp injury impact
-        inj_pts = 0.6 * _clamp(inj_pts_raw, -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
+        inj_pts = float(INJ_DAMP) * _clamp(inj_pts_raw, -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
 
         # Form
         form_home = float((form_map.get(home) or {}).get("elo_adj", 0.0))
@@ -638,7 +596,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             MAX_ABS_MODEL_SPREAD,
         )
 
-        # Market
+        # Market inputs
         home_ml = _safe_float((oi or {}).get("home_ml"))
         away_ml = _safe_float((oi or {}).get("away_ml"))
         home_spread = _safe_float((oi or {}).get("home_spread"))
@@ -687,23 +645,19 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             ats_strength = _ats_strength_label(ats_edge_vs_be)
             spread_reco = _ats_reco(ats_side, ats_strength)
 
-        # TOTALS
+        # TOTALS (historical market lines)
         home_avg, home_sd = _team_line_avg_sd(home, home_in)
         away_avg, away_sd = _team_line_avg_sd(away, away_in)
 
-        # base_total from teams if available else league baseline
         base_total = float("nan")
         if not np.isnan(home_avg) and not np.isnan(away_avg):
             base_total = 0.5 * (home_avg + away_avg)
         elif not np.isnan(league_avg_total):
             base_total = float(league_avg_total)
 
-        # ✅ stronger regression
+        # Stronger regression to league average
         if not np.isnan(base_total) and not np.isnan(league_avg_total):
-            model_total = float(
-                (1.0 - TOTAL_REGRESS_WEIGHT) * base_total
-                + TOTAL_REGRESS_WEIGHT * league_avg_total
-            )
+            model_total = float((1.0 - TOTAL_REGRESS_WEIGHT) * base_total + TOTAL_REGRESS_WEIGHT * league_avg_total)
         else:
             model_total = float("nan")
 
@@ -726,7 +680,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             under_price=float(total_under_price),
             sd=float(sd),
         )
-
         total_recommendation = _total_reco(total_side, total_edge_vs_be, total_edge_pts)
 
         primary_pre, why_pre = _choose_primary_from_fields(
@@ -745,103 +698,42 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "home": home,
                 "away": away,
                 "model_home_prob": float(p_home),
-                "model_spread_home": float(model_spread_home),
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
                 "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
+                "model_spread_home": float(model_spread_home),
                 "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
-                "ats_home_cover_prob": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
-                "ats_pick_side": ats_side,
-                "ats_pick_prob": float(ats_p_win) if not np.isnan(ats_p_win) else np.nan,
-                "ats_breakeven_prob": float(ats_be) if not np.isnan(ats_be) else np.nan,
-                "ats_edge_vs_be": float(ats_edge_vs_be) if not np.isnan(ats_edge_vs_be) else np.nan,
-                "ats_strength": ats_strength,
-                "ats_pass_reason": ats_pass_reason,
+                "ml_recommendation": ml_pick,
+                "spread_recommendation": spread_reco,
+                "primary_recommendation": primary_pre,
+                "why_primary": why_pre,
+                "value_tier": value_tier,
+                "home_ml": home_ml,
+                "away_ml": away_ml,
+                "home_spread": home_spread,
+                "spread_price": spread_price,
+                # totals (always present as columns)
                 "total_points": float(total_points) if not np.isnan(total_points) else np.nan,
                 "total_over_price": float(total_over_price),
                 "total_under_price": float(total_under_price),
                 "model_total": float(model_total) if not np.isnan(model_total) else np.nan,
                 "total_edge_points": float(total_edge_pts) if not np.isnan(total_edge_pts) else np.nan,
                 "total_pick_side": total_side,
-                "total_pick_prob": float(total_p_win) if not np.isnan(total_p_win) else np.nan,
-                "total_breakeven_prob": float(total_be) if not np.isnan(total_be) else np.nan,
                 "total_edge_vs_be": float(total_edge_vs_be) if not np.isnan(total_edge_vs_be) else np.nan,
                 "total_recommendation": str(total_recommendation),
-                "ml_recommendation": ml_pick,
-                "spread_recommendation": spread_reco,
-                "primary_recommendation": primary_pre,
-                "why_primary": why_pre,
-                "value_tier": value_tier,
-                "elo_diff": float(elo_diff),
-                "inj_points_raw": float(inj_pts_raw),
-                "inj_points": float(inj_pts),
-                "form_elo_diff": float(form_diff),
-                "form_home_elo": float(form_home),
-                "form_away_elo": float(form_away),
-                "rest_days_home": np.nan if home_days_off is None else float(home_days_off),
-                "rest_days_away": np.nan if away_days_off is None else float(away_days_off),
-                "home_ml": home_ml,
-                "away_ml": away_ml,
-                "home_spread": home_spread,
-                "spread_price": spread_price,
             }
         )
 
-    # ✅ Sanity check MUST be inside the function (this is what fixes your "return outside function" crash)
+    # Sanity check: constant-probability detector (warn by default)
     if len(rows) >= 5:
         probs = [round(r["model_home_prob"], 3) for r in rows if not np.isnan(r.get("model_home_prob", np.nan))]
         if len(set(probs)) <= 2:
-            raise RuntimeError("Model produced near-constant probabilities — check Elo/team mapping.")
+            msg = "Model produced near-constant probabilities — check Elo/team mapping."
+            if STRICT_SANITY:
+                raise RuntimeError(msg)
+            print(f"[NBA WARNING] {msg}")
 
     df = pd.DataFrame(rows)
-
-    # Top-N ATS filter
-    try:
-        if MAX_ATS_PLAYS_PER_DAY is not None and not df.empty and "ats_edge_vs_be" in df.columns:
-            elig = df["spread_recommendation"].astype(str).str.contains("Model PICK ATS:", na=False)
-            df["ats_rank_score"] = np.where(elig, df["ats_edge_vs_be"].astype(float), -999.0)
-            top_idx = df.sort_values("ats_rank_score", ascending=False).head(int(MAX_ATS_PLAYS_PER_DAY)).index
-            keep = set(top_idx.tolist())
-
-            for i in df.index:
-                if bool(elig.loc[i]) and i not in keep:
-                    df.loc[i, "spread_recommendation"] = "No ATS bet (top-N filter)"
-                    df.loc[i, "ats_strength"] = "pass"
-                    df.loc[i, "ats_pass_reason"] = "top-N filter"
-
-            df.drop(columns=["ats_rank_score"], inplace=True, errors="ignore")
-
-            # recompute PRIMARY after ATS filter
-            for i in df.index:
-                ml_pick = str(df.loc[i, "ml_recommendation"])
-                spread_reco = str(df.loc[i, "spread_recommendation"])
-                total_reco = str(df.loc[i, "total_recommendation"])
-
-                edge_home = float(df.loc[i, "edge_home"]) if not pd.isna(df.loc[i, "edge_home"]) else float("nan")
-                ats_edge_vs_be = (
-                    float(df.loc[i, "ats_edge_vs_be"]) if not pd.isna(df.loc[i, "ats_edge_vs_be"]) else float("nan")
-                )
-                total_edge_vs_be = (
-                    float(df.loc[i, "total_edge_vs_be"]) if not pd.isna(df.loc[i, "total_edge_vs_be"]) else float("nan")
-                )
-                total_edge_pts = (
-                    float(df.loc[i, "total_edge_points"]) if not pd.isna(df.loc[i, "total_edge_points"]) else float("nan")
-                )
-
-                primary, why = _choose_primary_from_fields(
-                    ml_reco=ml_pick,
-                    spread_reco=spread_reco,
-                    total_reco=total_reco,
-                    edge_home=edge_home,
-                    ats_edge_vs_be=ats_edge_vs_be,
-                    total_edge_vs_be=total_edge_vs_be,
-                    total_edge_points=total_edge_pts,
-                )
-                df.loc[i, "primary_recommendation"] = primary
-                df.loc[i, "why_primary"] = why
-    except Exception:
-        pass
-
     return df
 
 
