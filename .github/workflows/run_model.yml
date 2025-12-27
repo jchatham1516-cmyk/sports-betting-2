@@ -44,6 +44,16 @@ jobs:
       - name: Run NFL
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+
+          # Totals history / API throttling
+          NFL_HIST_TOTALS_DAYS_BACK: "1095"
+          ODDS_HIST_TOTALS_SAMPLE_STEP_DAYS: "7"
+          ODDS_HIST_TOTALS_MAX_REQUESTS: "60"
+          ODDS_HIST_TOTALS_MAX_EVENT_ODDS_CALLS: "35"
+
+          # Totals behavior
+          NFL_TOTAL_ANCHOR_W: "0.25"
+          NFL_TOTAL_MAX_DEVIATION_FROM_MARKET: "7"
         run: |
           python current_of_sports_betting_algorithm.py --sport nfl
           echo "[debug] results contents AFTER NFL:"
