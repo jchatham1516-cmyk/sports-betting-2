@@ -501,7 +501,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         return (float("nan"), float("nan"))
 
     rows = []
-    for (home_in, away_in), oi in (odds_dict or {}).items():
+for (home_in, away_in), oi in (odds_dict or {}).items():
     home = canon_team(home_in)
     away = canon_team(away_in)
     if not home or not away:
@@ -513,41 +513,41 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     # Sanity check: default Elo should never be used silently
     if eh == 1500 or ea == 1500:
         raise RuntimeError(
-            f"[NHL] Default Elo used (missing team mapping?): home={home_in}->{home} eh={eh}, away={away_in}->{away} ea={ea}"
+            f"[NHL] Default Elo used (missing team mapping?): home={home_in}->{home} eh={eh}, "
+            f"away={away_in}->{away} ea={ea}"
         )
 
-        eh = st.get(home)
-        ea = st.get(away)
+    # Rest
+    home_days_off = _calc_days_off(target_date, last_played.get(home))
+    away_days_off = _calc_days_off(target_date, last_played.get(away))
+    rest_adj = _rest_elo(home_days_off) - _rest_elo(away_days_off)
 
-        # Rest
-        home_days_off = _calc_days_off(target_date, last_played.get(home))
-        away_days_off = _calc_days_off(target_date, last_played.get(away))
-        rest_adj = _rest_elo(home_days_off) - _rest_elo(away_days_off)
+    # Form
+    form_home = float((form_map.get(home) or {}).get("elo_adj", 0.0))
+    form_away = float((form_map.get(away) or {}).get("elo_adj", 0.0))
+    form_diff = float(form_home - form_away)
 
-        # Form
-        form_home = float((form_map.get(home) or {}).get("elo_adj", 0.0))
-        form_away = float((form_map.get(away) or {}).get("elo_adj", 0.0))
-        form_diff = float(form_home - form_away)
+    # Effective elos
+    eh_eff = float(eh) + float(rest_adj) + 0.5 * float(form_diff)
+    ea_eff = float(ea) - 0.5 * float(form_diff)
 
-        # Effective elos
-        eh_eff = float(eh) + float(rest_adj) + 0.5 * float(form_diff)
-        ea_eff = float(ea) - 0.5 * float(form_diff)
+    # Win prob (raw -> compressed -> calibrated)
+    p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
+    p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
+    try:
+        p_home = _clamp(float(platt.predict(float(p_comp))), 0.01, 0.99)
+    except Exception:
+        p_home = p_comp
 
-        # Win prob (raw -> compressed -> calibrated)
-        p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
-        p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
-        try:
-            p_home = _clamp(float(platt.predict(float(p_comp))), 0.01, 0.99)
-        except Exception:
-            p_home = p_comp
+    # Spread-ish (goals)
+    elo_diff = (eh_eff - ea_eff) + HOME_ADV
+    model_spread_home = _clamp(
+        _margin_model_spread_from_elo_diff(float(elo_diff)),
+        -MAX_ABS_MODEL_SPREAD,
+        MAX_ABS_MODEL_SPREAD,
+    )
 
-        # Spread-ish (goals)
-        elo_diff = (eh_eff - ea_eff) + HOME_ADV
-        model_spread_home = _clamp(
-            _margin_model_spread_from_elo_diff(float(elo_diff)),
-            -MAX_ABS_MODEL_SPREAD,
-            MAX_ABS_MODEL_SPREAD,
-        )
+    # ... keep the rest of your loop body here, all indented 4 spaces ...
 
         # Market inputs
         home_ml = _safe_float((oi or {}).get("home_ml"))
