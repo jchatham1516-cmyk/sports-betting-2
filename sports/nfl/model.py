@@ -73,7 +73,7 @@ MAX_ATS_PLAYS_PER_DAY = 3  # None to disable
 # ----------------------------
 TOTAL_DEFAULT_PRICE = -110.0
 
-# Trust market more by default to prevent extreme lowball totals
+# Trust market more by default
 TOTAL_ANCHOR_W = float(os.getenv("NFL_TOTAL_ANCHOR_W", "0.25"))  # 25% model, 75% market
 
 PTS_REGRESS = float(os.getenv("NFL_PTS_REGRESS", "0.35"))
@@ -92,7 +92,7 @@ MAX_TOTAL_QB_DEDUCT = float(os.getenv("NFL_MAX_TOTAL_QB_DEDUCT", "3.0"))
 MAX_TOTAL_WEATHER_DEDUCT = float(os.getenv("NFL_MAX_TOTAL_WEATHER_DEDUCT", "4.0"))
 MAX_TOTAL_REST_ADJ = float(os.getenv("NFL_MAX_TOTAL_REST_ADJ", "1.0"))
 
-# NEW: clamp model outcome vs market when market exists (prevents “market 53.5 / model 39”)
+# Clamp model outcome vs market (prevents crazy totals)
 TOTAL_MAX_DEVIATION_FROM_MARKET = float(os.getenv("NFL_TOTAL_MAX_DEVIATION_FROM_MARKET", "7.0"))
 
 TOTAL_MIN_EDGE_VS_BE = 0.02
@@ -560,12 +560,11 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     last_played = _build_last_game_date_map(days_back=21)
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
 
-    # Totals market-line history
+    # Totals market-line history (cached once per day in results/)
     sport_key = SPORT_TO_ODDS_KEY.get("nfl")
     team_total_lines = {}
     if sport_key:
         try:
-            # You can set this to 1095 (3 years) now that historical_totals samples + caches.
             days_back = int(os.getenv("NFL_HIST_TOTALS_DAYS_BACK", "365"))
             team_total_lines = build_team_historical_total_lines(
                 sport_key=sport_key,
@@ -745,9 +744,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
         model_total_outcome = float(model_total_outcome + total_adj_inj + total_adj_qb + total_adj_rest)
 
-        # Weather (dict-safe) + clamp
-        weather_temp = np.nan
-        weather_wind = np.nan
+        # Weather
         weather_deduct = 0.0
         if ENABLE_WEATHER:
             kickoff_dt = _parse_iso_datetime((oi or {}).get("commence_time", "")) or datetime.utcnow()
@@ -755,20 +752,17 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             t = _safe_float((w or {}).get("temp_f"), default=np.nan)
             wd = _safe_float((w or {}).get("wind_mph"), default=np.nan)
 
-            if not np.isnan(t):
-                weather_temp = float(t)
-                if weather_temp < 35.0:
-                    weather_deduct += float(COLD_PTS_IF_UNDER_35F)
-            if not np.isnan(wd):
-                weather_wind = float(wd)
-                if weather_wind > 10.0:
-                    weather_deduct += float((weather_wind - 10.0) * WIND_PTS_PER_MPH_OVER_10)
+            if not np.isnan(t) and float(t) < 35.0:
+                weather_deduct += float(COLD_PTS_IF_UNDER_35F)
+            if not np.isnan(wd) and float(wd) > 10.0:
+                weather_deduct += float((float(wd) - 10.0) * WIND_PTS_PER_MPH_OVER_10)
 
             weather_deduct = float(_clamp(weather_deduct, 0.0, MAX_TOTAL_WEATHER_DEDUCT))
             model_total_outcome = float(model_total_outcome - weather_deduct)
 
-        # NEW: clamp vs market BEFORE anchoring
         market_total = float(total_points) if not np.isnan(total_points) else float("nan")
+
+        # Clamp outcome vs market BEFORE anchoring
         if not np.isnan(market_total) and TOTAL_MAX_DEVIATION_FROM_MARKET > 0:
             lo = float(market_total - TOTAL_MAX_DEVIATION_FROM_MARKET)
             hi = float(market_total + TOTAL_MAX_DEVIATION_FROM_MARKET)
@@ -780,9 +774,9 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         else:
             model_total = float(model_total_outcome)
 
-        # SD baseline from historical market total lines
-        home_avg, home_sd = _team_line_avg_sd(home)
-        away_avg, away_sd = _team_line_avg_sd(away)
+        # SD baseline from historical totals lines
+        _, home_sd = _team_line_avg_sd(home)
+        _, away_sd = _team_line_avg_sd(away)
 
         if not np.isnan(home_sd) and not np.isnan(away_sd):
             sd = 0.5 * (home_sd + away_sd)
