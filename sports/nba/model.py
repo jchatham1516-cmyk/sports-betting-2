@@ -75,7 +75,7 @@ MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NBA_MAX_ATS_PLAYS_PER_DAY", "3"))  # set 
 TOTAL_DEFAULT_PRICE = float(os.getenv("NBA_TOTAL_DEFAULT_PRICE", "-110.0"))
 
 TOTAL_HIST_DAYS = int(os.getenv("NBA_TOTAL_HIST_DAYS", "14"))
-TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.35"))
+TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.45"))
 
 TOTAL_SD_FLOOR = float(os.getenv("NBA_TOTAL_SD_FLOOR", "9.0"))
 TOTAL_SD_CEIL = float(os.getenv("NBA_TOTAL_SD_CEIL", "20.0"))
@@ -457,6 +457,9 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
         eh = st.get(home)
         ea = st.get(away)
+# Sanity check: default Elo should never be used silently
+if eh == 1500 or ea == 1500:
+    raise RuntimeError(f"Default Elo used: {home} vs {away}")
 
         # ---- collect calibration signal BEFORE updating Elo ----
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
@@ -592,7 +595,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         home_inj = build_injury_list_for_team_nba(home, injuries_map)
         away_inj = build_injury_list_for_team_nba(away, injuries_map)
         inj_pts_raw = float(injury_adjustment_points(home_inj, away_inj))
-        inj_pts = _clamp(inj_pts_raw, -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
+        inj_pts = 0.6 * _clamp(inj_pts_raw, -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
 
         # Form
         form_home = float((form_map.get(home) or {}).get("elo_adj", 0.0))
@@ -764,6 +767,11 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "spread_price": spread_price,
             }
         )
+# Sanity check: constant-probability detector
+if len(rows) >= 5:
+    probs = [round(r["model_home_prob"], 3) for r in rows if not np.isnan(r.get("model_home_prob", np.nan))]
+    if len(set(probs)) <= 2:
+        raise RuntimeError("Model produced near-constant probabilities — check Elo/team mapping.")
 
     df = pd.DataFrame(rows)
 
