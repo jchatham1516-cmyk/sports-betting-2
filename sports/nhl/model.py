@@ -521,6 +521,10 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         away = canon_team(away_in)
         if not home or not away:
             continue
+if home not in st or away not in st:
+    raise RuntimeError(
+        f"[NHL] Team not found in Elo state: home={home_in}->{home}, away={away_in}->{away}"
+    )
 
         eh = st.get(home)
         ea = st.get(away)
