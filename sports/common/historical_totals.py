@@ -28,8 +28,7 @@ HIST_SLEEP_S = float(os.getenv("ODDS_HIST_TOTALS_SLEEP_S", "0.15"))
 # Default bookmaker to anchor totals history
 HIST_BOOKMAKERS = os.getenv("ODDS_HIST_TOTALS_BOOKMAKERS", "draftkings")
 
-# NEW: when days_back is large, sample 1 day every N days (keeps requests sane)
-# Example: days_back=1095 with step=7 => ~156 sampled days
+# When days_back is large, sample 1 day every N days (keeps requests sane)
 HIST_SAMPLE_STEP_DAYS = int(os.getenv("ODDS_HIST_TOTALS_SAMPLE_STEP_DAYS", "7"))
 HIST_SAMPLE_ONLY_IF_DAYS_BACK_GE = int(os.getenv("ODDS_HIST_TOTALS_SAMPLE_ONLY_IF_DAYS_BACK_GE", "60"))
 
@@ -194,7 +193,6 @@ def build_team_historical_total_lines(
     totals_by_team: Dict[str, List[float]] = defaultdict(list)
     odds_calls_used = 0
 
-    # We iterate d in steps to cover long horizons cheaply
     for d in range(0, int(days_back), int(step)):
         if budget.hard_stop:
             break
@@ -215,7 +213,6 @@ def build_team_historical_total_lines(
         if not isinstance(events, list) or not events:
             continue
 
-        # cap events per sampled day
         events = events[: max(1, int(HIST_MAX_EVENTS_PER_DAY))]
 
         # 2) per-event totals odds
@@ -266,7 +263,6 @@ def build_team_historical_total_lines(
             except Exception:
                 continue
 
-        # If we've spent most of our odds budget, stop early
         if odds_calls_used >= max(10, int(HIST_MAX_EVENT_ODDS_CALLS * 0.85)):
             break
 
