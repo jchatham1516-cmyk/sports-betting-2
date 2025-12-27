@@ -43,6 +43,8 @@ jobs:
 
       - name: Run NFL
         env:
+        NFL_ELO_TRAIN_DAYS: "200"
+NFL_BASE_COMPRESS: "1.00"
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
 
           # Totals history / API throttling
