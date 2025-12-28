@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import math
 from dataclasses import dataclass, field
 from typing import Dict, Set, Tuple, Iterator
-import math
 
 
 @dataclass
@@ -17,53 +17,43 @@ class EloState:
     processed: Set[str] = field(default_factory=set)
     default_elo: float = 1500.0
 
-    # -----------------------------
-    # Core API
-    # -----------------------------
-    def get(self, team: str) -> float:
-        return float(self.ratings.get(str(team), self.default_elo))
-
-    def set(self, team: str, elo: float) -> None:
-        self.ratings[str(team)] = float(elo)
-
-    def is_processed(self, game_key: str) -> bool:
-        return str(game_key) in self.processed
-
-    def mark_processed(self, game_key: str) -> None:
-        self.processed.add(str(game_key))
-
-    # -----------------------------
-    # Convenience / Python protocol
-    # -----------------------------
-    def has_team(self, team: str) -> bool:
-        return str(team) in (self.ratings or {})
-
+    # ---- dict-like conveniences (prevents "EloState is not iterable" bugs) ----
     def __contains__(self, team: object) -> bool:
-        # enables: if team in st:
         try:
             return str(team) in (self.ratings or {})
         except Exception:
             return False
 
     def __iter__(self) -> Iterator[str]:
-        # enables: for team in st:
         return iter((self.ratings or {}).keys())
 
-    def __len__(self) -> int:
-        return int(len(self.ratings or {}))
+    def __getitem__(self, team: str) -> float:
+        return self.get(team)
 
     def keys(self):
         return (self.ratings or {}).keys()
 
-    # -----------------------------
-    # Persistence
-    # -----------------------------
+    def items(self):
+        return (self.ratings or {}).items()
+
+    def get(self, team: str) -> float:
+        return float((self.ratings or {}).get(str(team), self.default_elo))
+
+    def set(self, team: str, elo: float) -> None:
+        (self.ratings or {})[str(team)] = float(elo)
+
+    def is_processed(self, game_key: str) -> bool:
+        return str(game_key) in (self.processed or set())
+
+    def mark_processed(self, game_key: str) -> None:
+        self.processed.add(str(game_key))
+
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         payload = {
             "default_elo": float(self.default_elo),
             "ratings": {k: float(v) for k, v in (self.ratings or {}).items()},
-            "processed": sorted(list(self.processed)),
+            "processed": sorted(list(self.processed or set())),
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, sort_keys=True)
@@ -117,7 +107,7 @@ def elo_update(
     home_adv: float = 65.0,
     use_mov: bool = True,
 ) -> Tuple[float, float]:
-    p_home = elo_win_prob(float(elo_home), float(elo_away), home_adv=float(home_adv))
+    p_home = elo_win_prob(elo_home, elo_away, home_adv=home_adv)
 
     if home_score > away_score:
         s_home = 1.0
