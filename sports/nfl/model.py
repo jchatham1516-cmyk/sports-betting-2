@@ -819,7 +819,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "model_spread_home": float(model_spread_home),
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
-                "edge_away": float(edge_away) if not np.isnan(edge_away) else np.nan,
+                "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
                 "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
                 "ats_home_cover_prob": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
                 "ats_pick_side": ats_side,
