@@ -1,11 +1,4 @@
 # current_of_sports_betting_algorithm.py
-#
-# Thin runner:
-# - Loads odds (Odds API with CSV fallback)
-# - Runs per-sport model (NBA/NFL/NHL)
-# - Applies recommendations + play/pass + sizing
-# - Saves results to results/predictions_<sport>_<MM-DD-YYYY>.csv
-
 from __future__ import annotations
 
 import os
@@ -35,21 +28,15 @@ from sports.nba.bdl_client import (
     fetch_team_ratings_bdl,
 )
 from sports.nba.model import run_daily_probs_for_date as run_nba_daily
-
 from sports.nfl.model import run_daily_nfl
 from sports.nhl.model import run_daily_nhl
 
 
 def _cap_to_top_plays(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
-    """
-    If play_pass == PLAY is more than max_plays, keep only top max_plays by pick_score (desc).
-    Everyone else gets set to PASS and bet_size=0.
-    """
     if df is None or df.empty:
         return df
     if max_plays is None:
         return df
-
     if "play_pass" not in df.columns:
         return df
 
@@ -59,13 +46,8 @@ def _cap_to_top_plays(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
 
     if "pick_score" in df.columns:
         plays = plays.sort_values("pick_score", ascending=False)
-    else:
-        # fallback: abs_edge_home if present
-        if "abs_edge_home" in df.columns:
-            plays = plays.assign(_score=plays["abs_edge_home"].astype(float))
-            plays = plays.sort_values("_score", ascending=False)
-        else:
-            plays = plays.iloc[:]
+    elif "abs_edge_home" in df.columns:
+        plays = plays.assign(_score=plays["abs_edge_home"].astype(float)).sort_values("_score", ascending=False)
 
     if len(plays) <= int(max_plays):
         return df
@@ -83,36 +65,68 @@ def _cap_to_top_plays(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
     return df
 
 
+def _ensure_nonempty_csv_schema(results_df: pd.DataFrame, sport: str) -> pd.DataFrame:
+    """
+    If the model returns 0 rows and 0 columns, your CSV becomes a 1-byte file.
+    This forces a sane schema so the file has headers even when empty.
+    """
+    if results_df is None:
+        results_df = pd.DataFrame([])
+
+    if not results_df.empty:
+        return results_df
+
+    # If empty but columns exist, keep as-is.
+    if len(results_df.columns) > 0:
+        return results_df
+
+    # Minimal “universal” columns your pipeline expects.
+    base_cols = [
+        "date", "home", "away",
+        "model_home_prob", "market_home_prob", "edge_home", "edge_away",
+        "model_spread_home", "home_spread", "spread_price", "spread_edge_home",
+        "home_ml", "away_ml",
+        "ml_recommendation", "spread_recommendation", "primary_recommendation",
+        "abs_edge_home", "confidence", "value_tier", "pick_score",
+        "why_primary", "why_bet",
+        "play_pass", "bet_size", "unit_dollars", "units",
+    ]
+
+    # Add totals columns for sports that support it.
+    totals_cols = [
+        "total_points", "total_over_price", "total_under_price",
+        "model_total_outcome", "model_total",
+        "total_edge_points", "total_pick_side", "total_pick_prob",
+        "total_breakeven_prob", "total_edge_vs_be", "total_pass_reason",
+        "total_recommendation",
+    ]
+
+    cols = base_cols + totals_cols
+    return pd.DataFrame(columns=cols)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run sports betting model (NBA/NFL/NHL).")
     parser.add_argument("--sport", type=str, default="nba", choices=["nba", "nfl", "nhl"])
     parser.add_argument("--date", type=str, default=None, help="Game date in MM/DD/YYYY (default: today UTC).")
-
-    # Odds API window padding (days)
     parser.add_argument("--days_padding", type=int, default=int(os.getenv("ODDS_DAYS_PADDING", "1")))
 
-    # Sizing
     parser.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL)
     parser.add_argument("--sizing", type=str, default="flat", choices=["flat", "kelly"])
     parser.add_argument("--flat_pct", type=float, default=UNIT_PCT)
     parser.add_argument("--kelly_mult", type=float, default=0.5)
     parser.add_argument("--kelly_max_pct", type=float, default=0.03)
 
-    # Play/pass
     parser.add_argument("--play_require_pick", action="store_true")
     parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
 
-    # Cap plays
     parser.add_argument("--max_plays", type=int, default=int(os.getenv("MAX_PLAYS_PER_SPORT_PER_DAY", "3")))
-
-    # Elo rebuild for NBA
     parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
 
     args = parser.parse_args(argv)
 
-    # Date
     if args.date is None:
         game_date = datetime.utcnow().strftime("%m/%d/%Y")
     else:
@@ -120,7 +134,6 @@ def main(argv=None):
 
     print(f"Running {args.sport.upper()} model for {game_date}...")
 
-    # Odds (API first, fallback CSV)
     odds_dict, spreads_dict = {}, {}
 
     try:
@@ -144,7 +157,7 @@ def main(argv=None):
             print(f"[odds_csv] WARNING: failed to load odds from CSV: {e}")
             odds_dict, spreads_dict = {}, {}
 
-    # Run sport model
+    # Run model
     if args.sport == "nba":
         api_key = get_bdl_api_key()
         game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
@@ -170,13 +183,10 @@ def main(argv=None):
     else:
         raise RuntimeError("Unsupported sport")
 
-    if results_df is None:
-        print("[model] No dataframe returned.")
-        results_df = pd.DataFrame([])
+    results_df = _ensure_nonempty_csv_schema(results_df, args.sport)
 
     print(f"[model] rows returned: {len(results_df)}")
 
-    # Recommendations
     debug_df = pd.DataFrame([])
     if not results_df.empty:
         results_df, debug_df = add_recommendations_to_df(
@@ -193,7 +203,6 @@ def main(argv=None):
             model_margin_home_col=None,
         )
 
-    # Play/pass + sizing
     play_max_abs_ml = None if int(args.play_max_abs_ml) == 0 else int(args.play_max_abs_ml)
     unit_dollars = float(args.bankroll) * UNIT_PCT
 
@@ -224,10 +233,8 @@ def main(argv=None):
         results_df["unit_dollars"] = unit_dollars
         results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
 
-        # cap to top plays
         results_df = _cap_to_top_plays(results_df, int(args.max_plays))
 
-    # Save (even if empty, so Actions artifact exists)
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
     print(f"[save] writing {len(results_df)} rows -> {out_name}")
