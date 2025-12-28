@@ -35,11 +35,8 @@ MARGIN_CAL_PATH = "results/margin_cal_nfl.json"
 # ----------------------------
 # Tunables (NFL-specific)
 # ----------------------------
-# Key fix: default home adv was too large => home > 0.50 too often.
 HOME_ADV = float(os.getenv("NFL_HOME_ADV", "35.0"))
 ELO_K = float(os.getenv("NFL_ELO_K", "20.0"))
-
-# Key fix: lower ELO_PER_POINT to allow bigger spreads (blowouts)
 ELO_PER_POINT = float(os.getenv("NFL_ELO_PER_POINT", "28.0"))
 
 MAX_ABS_INJ_ELO_ADJ = float(os.getenv("NFL_MAX_ABS_INJ_ELO_ADJ", "45.0"))
@@ -62,7 +59,6 @@ BASE_COMPRESS = float(os.getenv("NFL_BASE_COMPRESS", "1.00"))
 MIN_ML_EDGE = float(os.getenv("NFL_MIN_ML_EDGE", "0.02"))
 CAL_MIN_GAMES = int(os.getenv("NFL_CAL_MIN_GAMES", "60"))
 
-# Key fix: market prior to prevent persistent home bias when market says away is strong
 MARKET_PRIOR_W = float(os.getenv("NFL_MARKET_PRIOR_W", "0.35"))  # 0.0 disables
 
 # ATS
@@ -79,14 +75,14 @@ MAX_ATS_PLAYS_PER_DAY = int(os.getenv("NFL_MAX_ATS_PLAYS_PER_DAY", "3"))
 # Totals
 # ----------------------------
 TOTAL_DEFAULT_PRICE = float(os.getenv("NFL_TOTAL_DEFAULT_PRICE", "-110.0"))
-TOTAL_ANCHOR_W = float(os.getenv("NFL_TOTAL_ANCHOR_W", "0.25"))
+
+# IMPORTANT: you were anchoring too hard to market -> kills edge points
+TOTAL_ANCHOR_W = float(os.getenv("NFL_TOTAL_ANCHOR_W", "0.40"))
 
 PTS_LOOKBACK_DAYS = int(os.getenv("NFL_PTS_LOOKBACK_DAYS", "70"))
-# Key fix: regression was too strong + min games too high => table often “not used”
 PTS_REGRESS = float(os.getenv("NFL_PTS_REGRESS", "0.20"))
 PTS_MIN_GAMES = int(os.getenv("NFL_PTS_MIN_GAMES", "1"))
 
-# Key fix: injuries-to-total was always negative before (using abs). Now signed.
 INJ_POINTS_TO_TOTAL_PTS = float(os.getenv("NFL_INJ_POINTS_TO_TOTAL_PTS", "0.45"))
 QB_POINTS_PER_QB_IMPACT = float(os.getenv("NFL_QB_POINTS_PER_QB_IMPACT", "0.25"))
 REST_POINTS_PER_ELO = float(os.getenv("NFL_REST_POINTS_PER_ELO", "0.015"))
@@ -102,8 +98,10 @@ MAX_TOTAL_REST_ADJ = float(os.getenv("NFL_MAX_TOTAL_REST_ADJ", "1.0"))
 
 TOTAL_MAX_DEVIATION_FROM_MARKET = float(os.getenv("NFL_TOTAL_MAX_DEVIATION_FROM_MARKET", "7.0"))
 
-TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NFL_TOTAL_MIN_EDGE_VS_BE", "0.02"))
-TOTAL_MIN_PTS_EDGE = float(os.getenv("NFL_TOTAL_MIN_PTS_EDGE", "2.0"))
+# IMPORTANT: these were too strict -> almost always "edge too small"
+TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NFL_TOTAL_MIN_EDGE_VS_BE", "0.012"))
+TOTAL_MIN_PTS_EDGE = float(os.getenv("NFL_TOTAL_MIN_PTS_EDGE", "1.25"))
+
 TOTAL_SD_FLOOR = float(os.getenv("NFL_TOTAL_SD_FLOOR", "5.5"))
 TOTAL_SD_CEIL = float(os.getenv("NFL_TOTAL_SD_CEIL", "14.5"))
 TOTAL_PRIMARY_BOOST = float(os.getenv("NFL_TOTAL_PRIMARY_BOOST", "1.25"))
@@ -454,7 +452,6 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
 def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
     st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nfl"]
-
     events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_from))
 
     train_ps: list = []
@@ -666,7 +663,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         except Exception:
             p_home = p_comp
 
-        # Key fix: blend toward market when market exists
+        # Blend toward market when market exists
         if (not np.isnan(mkt_home_p)) and MARKET_PRIOR_W > 0:
             w = float(_clamp(MARKET_PRIOR_W, 0.0, 0.85))
             p_home = float(_clamp((1.0 - w) * p_home + w * float(mkt_home_p), 0.01, 0.99))
@@ -725,11 +722,11 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         # ----------------------------
         _, _, model_total_outcome = _expected_points_total(home=home, away=away, league_pts=float(league_pts), team_tbl=team_tbl)
 
-        # Key fix: signed injury impact (can push totals UP or DOWN)
+        # Signed injury impact (UP or DOWN)
         total_adj_inj = float(INJ_POINTS_TO_TOTAL_PTS) * float(inj_pts)
         total_adj_inj = float(_clamp(total_adj_inj, -MAX_TOTAL_INJ_ADJ, MAX_TOTAL_INJ_ADJ))
 
-        # QB still deducts (QB issues usually reduce scoring)
+        # QB still deducts
         total_adj_qb = -float(QB_POINTS_PER_QB_IMPACT) * (abs(float(qb_home)) + abs(float(qb_away)))
         total_adj_qb = float(_clamp(total_adj_qb, -MAX_TOTAL_QB_DEDUCT, 0.0))
 
@@ -765,6 +762,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             hi = float(market_total + TOTAL_MAX_DEVIATION_FROM_MARKET)
             model_total_outcome = float(_clamp(model_total_outcome, lo, hi))
 
+        # anchor toward market, but not too hard
         if not np.isnan(market_total):
             model_total = float(TOTAL_ANCHOR_W * model_total_outcome + (1.0 - TOTAL_ANCHOR_W) * market_total)
         else:
@@ -795,7 +793,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         total_pass_reason = _total_gate_reason(total_side, total_edge_vs_be, total_edge_pts)
         total_recommendation = _total_reco(total_side, total_edge_vs_be, total_edge_pts)
 
-        # Primary (keep your existing scheme)
+        # Primary
         ml_score = float(abs(edge_home)) if not np.isnan(edge_home) else -999.0
         ats_score = float(ats_edge_vs_be) if str(spread_reco).startswith("Model PICK ATS:") else -999.0
         tot_score = float(total_edge_vs_be) if str(total_recommendation).startswith("Model PICK TOTAL:") else -999.0
@@ -819,7 +817,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "model_spread_home": float(model_spread_home),
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
-                "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
+                "edge_away": float(edge_away) if not np.isnan(edge_away) else np.nan,
                 "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
                 "ats_home_cover_prob": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
                 "ats_pick_side": ats_side,
