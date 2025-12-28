@@ -2,27 +2,34 @@
 from __future__ import annotations
 
 import os
-import json
-import time
-from datetime import datetime, date, timedelta, timezone
-from typing import Dict, Tuple, Optional, Any
+from datetime import datetime, timedelta
+from typing import Dict, Tuple, Any, Optional
 
+import pandas as pd
 import requests
 
-# ------------------------------------------------------------
-# Sports keys (Odds API sport keys)
-# ------------------------------------------------------------
+ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
+
+# Canon sport keys used by the Odds API
 SPORT_TO_ODDS_KEY = {
     "nba": "basketball_nba",
     "nfl": "americanfootball_nfl",
     "nhl": "icehockey_nhl",
 }
 
-ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
+DEFAULT_REGIONS = os.getenv("ODDS_REGIONS", "us")
+DEFAULT_MARKETS = os.getenv("ODDS_MARKETS", "h2h,spreads,totals")
+DEFAULT_ODDS_FORMAT = os.getenv("ODDS_FORMAT", "american")
+DEFAULT_DATE_FORMAT = os.getenv("ODDS_DATE_FORMAT", "iso")
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
+
+def _get_odds_api_key() -> str:
+    k = os.getenv("ODDS_API_KEY", "") or os.getenv("THE_ODDS_API_KEY", "")
+    if not k:
+        raise RuntimeError("Missing ODDS_API_KEY in environment.")
+    return k
+
+
 def _safe_float(x, default=float("nan")) -> float:
     try:
         if x is None:
@@ -32,155 +39,144 @@ def _safe_float(x, default=float("nan")) -> float:
         return default
 
 
-def _utc_window_for_date(game_date: date) -> Tuple[str, str]:
-    """
-    Odds API expects UTC ISO strings.
-    We use a forgiving window: from game_date-1 00:00Z to game_date+1 23:59Z.
-    This prevents timezone/late games from dropping out.
-    """
-    start = datetime(game_date.year, game_date.month, game_date.day, tzinfo=timezone.utc) - timedelta(days=1)
-    end = datetime(game_date.year, game_date.month, game_date.day, tzinfo=timezone.utc) + timedelta(days=1, hours=23, minutes=59, seconds=59)
-    return (start.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z"))
+def _parse_mmddyyyy(game_date: str) -> datetime:
+    return datetime.strptime(str(game_date), "%m/%d/%Y")
 
 
-def _pick_bookmaker(bookmakers: list) -> Optional[dict]:
+def _iso(dt: datetime) -> str:
+    # always treat as UTC-ish; Odds API accepts ISO without timezone too,
+    # but we’ll include Z style by leaving it naive and letting requests encode
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pick_best_bookmaker(bookmakers: list[dict]) -> Optional[dict]:
     """
-    Prefer a common sharp-ish/consistent book if present, otherwise first.
+    Choose a bookmaker object to read lines from.
+    Preference: the one with most markets present.
     """
     if not bookmakers:
         return None
-    preferred = {"draftkings", "fanduel", "betmgm", "pointsbetus", "caesars", "williamhill_us"}
-    for b in bookmakers:
-        try:
-            if str(b.get("key", "")).lower() in preferred:
-                return b
-        except Exception:
-            continue
-    return bookmakers[0]
+
+    best = None
+    best_score = -1
+    for bk in bookmakers:
+        mkts = bk.get("markets") or []
+        mset = {m.get("key") for m in mkts if m.get("key")}
+        score = 0
+        if "h2h" in mset:
+            score += 3
+        if "spreads" in mset:
+            score += 2
+        if "totals" in mset:
+            score += 2
+        # tie-break: number of outcomes
+        if score > best_score:
+            best = bk
+            best_score = score
+    return best
 
 
-def _extract_markets(bookmaker: dict) -> Dict[str, dict]:
-    out = {}
-    for m in (bookmaker or {}).get("markets", []) or []:
-        key = m.get("key")
-        if key:
-            out[str(key)] = m
-    return out
+def _extract_market(bk: dict, key: str) -> Optional[dict]:
+    for m in (bk.get("markets") or []):
+        if m.get("key") == key:
+            return m
+    return None
 
 
-def _extract_h2h(home: str, away: str, markets: Dict[str, dict]) -> Tuple[float, float]:
+def _extract_h2h(bk: dict, home: str, away: str) -> Tuple[float, float]:
+    """
+    Returns (home_ml, away_ml) in American odds.
+    """
+    h2h = _extract_market(bk, "h2h")
+    if not h2h:
+        return (float("nan"), float("nan"))
+
     home_ml = float("nan")
     away_ml = float("nan")
-    m = markets.get("h2h")
-    if not m:
-        return home_ml, away_ml
-    for o in m.get("outcomes", []) or []:
-        name = o.get("name")
-        price = o.get("price")
-        if name == home:
-            home_ml = _safe_float(price)
-        elif name == away:
-            away_ml = _safe_float(price)
-    return home_ml, away_ml
+    for o in (h2h.get("outcomes") or []):
+        nm = o.get("name")
+        price = _safe_float(o.get("price"))
+        if nm == home:
+            home_ml = price
+        elif nm == away:
+            away_ml = price
+    return (home_ml, away_ml)
 
 
-def _extract_spreads(home: str, away: str, markets: Dict[str, dict]) -> Tuple[float, float]:
+def _extract_spreads(bk: dict, home: str, away: str) -> Tuple[float, float]:
     """
-    Returns:
-      home_spread: points for HOME (e.g. -3.5 means home favored by 3.5)
-      spread_price: price for the HOME spread (usually -110). If missing, NaN.
+    Returns (home_spread, spread_price) where spread_price is the American price
+    for the home spread line (if available). If price differs per side, we still
+    grab the home side’s price.
     """
+    sp = _extract_market(bk, "spreads")
+    if not sp:
+        return (float("nan"), float("nan"))
+
     home_spread = float("nan")
-    spread_price = float("nan")
-    m = markets.get("spreads")
-    if not m:
-        return home_spread, spread_price
-
-    for o in m.get("outcomes", []) or []:
-        name = o.get("name")
-        point = o.get("point")
-        price = o.get("price")
-        if name == home:
-            home_spread = _safe_float(point)
-            spread_price = _safe_float(price)
-            break
-    return home_spread, spread_price
+    home_price = float("nan")
+    for o in (sp.get("outcomes") or []):
+        nm = o.get("name")
+        point = _safe_float(o.get("point"))
+        price = _safe_float(o.get("price"))
+        if nm == home:
+            home_spread = point
+            home_price = price
+    return (home_spread, home_price)
 
 
-def _extract_totals(markets: Dict[str, dict]) -> Tuple[float, float, float]:
+def _extract_totals(bk: dict) -> Tuple[float, float, float]:
     """
-    Returns:
-      total_points, over_price, under_price
+    Returns (total_points, over_price, under_price).
     """
+    tot = _extract_market(bk, "totals")
+    if not tot:
+        return (float("nan"), float("nan"), float("nan"))
+
     total_points = float("nan")
     over_price = float("nan")
     under_price = float("nan")
-    m = markets.get("totals")
-    if not m:
-        return total_points, over_price, under_price
 
-    # totals outcomes often look like:
-    # {"name":"Over","point":47.5,"price":-110}, {"name":"Under","point":47.5,"price":-110}
-    for o in m.get("outcomes", []) or []:
-        nm = str(o.get("name", "")).lower()
-        pt = o.get("point")
-        pr = o.get("price")
-        if not (pt is None):
-            total_points = _safe_float(pt, default=total_points)
-        if nm == "over":
-            over_price = _safe_float(pr)
-        elif nm == "under":
-            under_price = _safe_float(pr)
-    return total_points, over_price, under_price
+    for o in (tot.get("outcomes") or []):
+        nm = (o.get("name") or "").lower()
+        point = _safe_float(o.get("point"))
+        price = _safe_float(o.get("price"))
+        # "Over"/"Under"
+        if "over" in nm:
+            total_points = point
+            over_price = price
+        elif "under" in nm:
+            total_points = point
+            under_price = price
+
+    return (total_points, over_price, under_price)
 
 
-def _odds_api_get(url: str, params: dict, *, max_retries: int = 5) -> Any:
-    last_err = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            r = requests.get(url, params=params, timeout=30)
-            # helpful debug
-            try:
-                print(f"[odds_api DEBUG] status: {r.status_code}")
-                print(f"[odds_api DEBUG] url: {r.url}")
-                print(f"[odds_api DEBUG] remaining: {r.headers.get('x-requests-remaining')}")
-                print(f"[odds_api DEBUG] used: {r.headers.get('x-requests-used')}")
-                print(f"[odds_api DEBUG] last: {r.headers.get('x-requests-last')}")
-            except Exception:
-                pass
-
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last_err = e
-            sleep_s = min(2 ** attempt, 20)
-            time.sleep(sleep_s)
-    raise RuntimeError(f"Odds API request failed after retries: {last_err}")
-
-
-# ------------------------------------------------------------
-# Public API: Odds loaders
-# ------------------------------------------------------------
 def fetch_odds_for_date_from_odds_api(
+    game_date: str,
     *,
     sport_key: str,
-    game_date: date,
-    regions: str = "us",
-    markets: str = "h2h,spreads,totals",
-    odds_format: str = "american",
-    date_format: str = "iso",
-) -> Dict[Tuple[str, str], dict]:
+    days_padding: int = 1,
+    regions: str = DEFAULT_REGIONS,
+    markets: str = DEFAULT_MARKETS,
+    odds_format: str = DEFAULT_ODDS_FORMAT,
+    date_format: str = DEFAULT_DATE_FORMAT,
+) -> Tuple[Dict[Tuple[str, str], dict], Dict[Tuple[str, str], dict]]:
     """
-    Returns odds_dict keyed by (home_team, away_team) with fields:
-      home_ml, away_ml, home_spread, spread_price,
-      total_points, over_price, under_price,
-      commence_time
-    """
-    api_key = os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")
-    if not api_key:
-        raise RuntimeError("Missing ODDS_API_KEY (or THE_ODDS_API_KEY) in environment.")
+    Returns:
+      odds_dict[(home, away)] = {
+        home_ml, away_ml, home_spread, spread_price,
+        total_points, over_price, under_price,
+        commence_time, bookmakers(optional)
+      }
 
-    commence_from, commence_to = _utc_window_for_date(game_date)
+      spreads_dict[(home, away)] = {"home_spread":..., "spread_price":...}
+    """
+    api_key = _get_odds_api_key()
+
+    d0 = _parse_mmddyyyy(game_date)
+    start = d0 - timedelta(days=int(days_padding))
+    end = d0 + timedelta(days=int(days_padding), hours=23, minutes=59, seconds=59)
 
     url = f"{ODDS_API_BASE_URL}/sports/{sport_key}/odds"
     params = {
@@ -189,26 +185,45 @@ def fetch_odds_for_date_from_odds_api(
         "markets": markets,
         "oddsFormat": odds_format,
         "dateFormat": date_format,
-        "commenceTimeFrom": commence_from,
-        "commenceTimeTo": commence_to,
+        "commenceTimeFrom": _iso(start),
+        "commenceTimeTo": _iso(end),
     }
 
-    events = _odds_api_get(url, params=params) or []
+    r = requests.get(url, params=params, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Odds API error {r.status_code}: {r.text[:200]}")
+
+    events = r.json() or []
     odds_dict: Dict[Tuple[str, str], dict] = {}
+    spreads_dict: Dict[Tuple[str, str], dict] = {}
 
     for ev in events:
         home = ev.get("home_team")
         away = ev.get("away_team")
+        commence_time = ev.get("commence_time")
         if not home or not away:
             continue
 
-        bm = _pick_bookmaker(ev.get("bookmakers") or [])
-        mkts = _extract_markets(bm or {})
-        home_ml, away_ml = _extract_h2h(home, away, mkts)
-        home_spread, spread_price = _extract_spreads(home, away, mkts)
-        total_points, over_price, under_price = _extract_totals(mkts)
+        bk = _pick_best_bookmaker(ev.get("bookmakers") or [])
+        if not bk:
+            # still record teams/commence_time so downstream can see game exists
+            odds_dict[(home, away)] = {
+                "home_ml": float("nan"),
+                "away_ml": float("nan"),
+                "home_spread": float("nan"),
+                "spread_price": float("nan"),
+                "total_points": float("nan"),
+                "over_price": float("nan"),
+                "under_price": float("nan"),
+                "commence_time": commence_time,
+            }
+            continue
 
-        odds_dict[(str(home), str(away))] = {
+        home_ml, away_ml = _extract_h2h(bk, home, away)
+        home_spread, spread_price = _extract_spreads(bk, home, away)
+        total_points, over_price, under_price = _extract_totals(bk)
+
+        payload = {
             "home_ml": home_ml,
             "away_ml": away_ml,
             "home_spread": home_spread,
@@ -216,36 +231,43 @@ def fetch_odds_for_date_from_odds_api(
             "total_points": total_points,
             "over_price": over_price,
             "under_price": under_price,
-            "commence_time": ev.get("commence_time"),
-            "bookmaker_key": (bm or {}).get("key"),
+            "commence_time": commence_time,
         }
 
-    print(f"[odds_api] Loaded odds for {len(odds_dict)} games.")
-    return odds_dict
+        odds_dict[(home, away)] = payload
+        spreads_dict[(home, away)] = {"home_spread": home_spread, "spread_price": spread_price}
+
+    return odds_dict, spreads_dict
 
 
-def fetch_odds_for_date_from_csv(csv_path: str) -> Dict[Tuple[str, str], dict]:
+def fetch_odds_for_date_from_csv(game_date: str, *, sport: str) -> Tuple[Dict[Tuple[str, str], dict], Dict[Tuple[str, str], dict]]:
     """
-    Reads a CSV in your common format:
+    CSV fallback. Expects:
+      odds/odds_MM-DD-YYYY.csv
+    with at least:
       date,home,away,home_ml,away_ml,home_spread
-    Optional columns supported if present:
+    Optional columns:
       spread_price,total_points,over_price,under_price,commence_time
     """
-    import pandas as pd
+    mmddyyyy = _parse_mmddyyyy(game_date)
+    fname = f"odds/odds_{mmddyyyy.strftime('%m-%d-%Y')}.csv"
+    if not os.path.exists(fname):
+        raise FileNotFoundError(f"CSV odds file not found: {fname}")
 
-    if not csv_path or not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV not found: {csv_path}")
+    df = pd.read_csv(fname)
+    if df is None or df.empty:
+        return {}, {}
 
-    df = pd.read_csv(csv_path)
-    out: Dict[Tuple[str, str], dict] = {}
+    odds_dict: Dict[Tuple[str, str], dict] = {}
+    spreads_dict: Dict[Tuple[str, str], dict] = {}
 
     for _, r in df.iterrows():
-        home = str(r.get("home", "")).strip()
-        away = str(r.get("away", "")).strip()
+        home = str(r.get("home") or "").strip()
+        away = str(r.get("away") or "").strip()
         if not home or not away:
             continue
 
-        out[(home, away)] = {
+        payload = {
             "home_ml": _safe_float(r.get("home_ml")),
             "away_ml": _safe_float(r.get("away_ml")),
             "home_spread": _safe_float(r.get("home_spread")),
@@ -253,30 +275,9 @@ def fetch_odds_for_date_from_csv(csv_path: str) -> Dict[Tuple[str, str], dict]:
             "total_points": _safe_float(r.get("total_points")),
             "over_price": _safe_float(r.get("over_price")),
             "under_price": _safe_float(r.get("under_price")),
-            "commence_time": r.get("commence_time"),
+            "commence_time": str(r.get("commence_time") or ""),
         }
+        odds_dict[(home, away)] = payload
+        spreads_dict[(home, away)] = {"home_spread": payload["home_spread"], "spread_price": payload["spread_price"]}
 
-    return out
-
-
-def save_odds_cache(path: str, odds_dict: Dict[Tuple[str, str], dict]) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    payload = {f"{k[0]}|||{k[1]}": v for k, v in (odds_dict or {}).items()}
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-
-
-def load_odds_cache(path: str) -> Dict[Tuple[str, str], dict]:
-    if not path or not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f) or {}
-        out = {}
-        for k, v in payload.items():
-            if "|||" in k:
-                a, b = k.split("|||", 1)
-                out[(a, b)] = v
-        return out
-    except Exception:
-        return {}
+    return odds_dict, spreads_dict
