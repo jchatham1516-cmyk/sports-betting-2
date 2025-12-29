@@ -12,10 +12,21 @@ from typing import Dict, Set, Tuple, Iterator
 class EloState:
     """
     Stores team Elo ratings + a set of processed game keys to avoid double-updating.
+    
+    `processed_games` is kept for backward-compatibility with older call sites/tests
+    that used this keyword; it aliases `processed` internally.
     """
+    
     ratings: Dict[str, float] = field(default_factory=dict)
     processed: Set[str] = field(default_factory=set)
+    processed_games: Set[str] = field(default_factory=set, repr=False, compare=False)
     default_elo: float = 1500.0
+
+    def __post_init__(self) -> None:
+        if self.processed_games and not self.processed:
+            self.processed = set(self.processed_games)
+        elif self.processed and not self.processed_games:
+            self.processed_games = set(self.processed)
 
     # ---- dict-like conveniences (prevents "EloState is not iterable" bugs) ----
     def __contains__(self, team: object) -> bool:
