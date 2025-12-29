@@ -56,6 +56,7 @@ NORMAL_REST_BONUS_ELO = float(os.getenv("NBA_NORMAL_REST_BONUS_ELO", "0.0"))
 FORM_LOOKBACK_DAYS = int(os.getenv("NBA_FORM_LOOKBACK_DAYS", "35"))
 FORM_MIN_GAMES = int(os.getenv("NBA_FORM_MIN_GAMES", "2"))
 FORM_ELO_PER_POINT = float(os.getenv("NBA_FORM_ELO_PER_POINT", "1.35"))
+FORM_ELO_PER_NET = float(os.getenv("NBA_FORM_ELO_PER_NET", "1.35"))
 FORM_ELO_CLAMP = float(os.getenv("NBA_FORM_ELO_CLAMP", "40.0"))
 
 # Prob compression
@@ -126,6 +127,42 @@ def _calc_days_off(target: Optional[date], last: Optional[date]) -> Optional[int
     if delta < 0 or delta > 30:
         return None
     return int(delta)
+
+def _build_form_adjustments(stats_df: Optional[pd.DataFrame]) -> Dict[str, float]:
+    """Translate recent offensive/defensive ratings into Elo-style adjustments."""
+
+    if stats_df is None or stats_df.empty:
+        return {}
+
+    if "ORtg_RECENT" not in stats_df.columns or "DRtg_RECENT" not in stats_df.columns:
+        return {}
+
+    df = stats_df.copy()
+    try:
+        df["net_recent"] = df["ORtg_RECENT"].astype(float) - df["DRtg_RECENT"].astype(float)
+    except Exception:
+        return {}
+
+    if df["net_recent"].empty:
+        return {}
+
+    league_avg = float(np.nanmean(df["net_recent"]))
+    adjs: Dict[str, float] = {}
+
+    for _, row in df.iterrows():
+        try:
+            team = str(row.get("TEAM_NAME") or row.get("team") or row.get("team_name") or "").strip()
+            if not team:
+                continue
+            net = float(row.get("net_recent"))
+        except Exception:
+            continue
+
+        centered = float(net - league_avg)
+        adj = _clamp(centered * FORM_ELO_PER_NET, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
+        adjs[team] = float(adj)
+
+    return adjs
 
 
 def _rest_elo(days_off: Optional[int]) -> float:
@@ -467,12 +504,32 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     return st
 
 
-def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
+    def backfill_nba_elo_state(*, force_full_rebuild: bool = False) -> EloState:
+    """Backward-compatible alias for rebuilding the NBA Elo state."""
+
+    return update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
+
+
+def load_nba_calibrator():
+    """Backward-compatible alias for loading the margin calibrator."""
+
+    try:
+        return load_margin_cal(MARGIN_CAL_PATH)
+    except Exception:
+        return None
+
+
+def update_and_save_nba_calibration():
+    """Placeholder hook to match older interfaces (returns current calibrator)."""
+
+    return load_nba_calibrator()
+
+
+def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
 
     platt = load_platt(PLATT_PATH)
-    margin_cal = load_margin_cal(MARGIN_CAL_PATH)
-
+    margin_cal = load_nba_calibrator()
     try:
         target_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
     except Exception:
@@ -486,8 +543,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         injuries_map = {}
 
     last_played = _build_last_game_date_map(days_back=21)
-    form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
-
+    form_map = _build_form_adjustments(stats_df)
+    if not form_map:
+        form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
     # Historical MARKET totals lines
     sport_key = SPORT_TO_ODDS_KEY.get("nba")
     team_total_lines: Dict[str, Dict[str, float]] = {}
@@ -544,6 +602,18 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             return float(-(elo_diff / ELO_PER_POINT))
 
     rows: list[dict] = []
+    def _form_adj(team: str) -> float:
+        val = form_map.get(team, 0.0)
+        if isinstance(val, dict):
+            try:
+                return float(val.get("elo_adj", 0.0))
+            except Exception:
+                return 0.0
+        try:
+            return float(val)
+        except Exception:
+            return 0.0
+            
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
         away = canon_team(away_in)
@@ -572,8 +642,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         inj_pts = float(INJ_DAMP) * _clamp(inj_pts_raw, -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
 
         # Form
-        form_home = float((form_map.get(home) or {}).get("elo_adj", 0.0))
-        form_away = float((form_map.get(away) or {}).get("elo_adj", 0.0))
+        form_home = _form_adj(home)
+        form_away = _form_adj(away)
         form_diff = float(form_home - form_away)
 
         # Effective elos
@@ -701,6 +771,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
                 "edge_away": float(edge_away) if not np.isnan(edge_home) else np.nan,
+                "elo_diff": float(elo_diff),
                 "model_spread_home": float(model_spread_home),
                 "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
                 "ml_recommendation": ml_pick,
