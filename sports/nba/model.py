@@ -682,6 +682,16 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         if not np.isnan(home_ml) and not np.isnan(away_ml):
             mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
 
+        # If both teams are missing from the Elo state, fall back to market or a neutral 50/50
+        # probability instead of defaulting to a heavy home lean.
+        home_missing = home not in (st.ratings or {})
+        away_missing = away not in (st.ratings or {})
+        if home_missing and away_missing:
+            fallback_p = float(mkt_home_p) if not np.isnan(mkt_home_p) else 0.5
+            p_home = float(_clamp(fallback_p, 0.01, 0.99))
+            if np.isnan(mkt_home_p):
+                mkt_home_p = float(fallback_p)
+
         edge_home = float(p_home - mkt_home_p) if not np.isnan(mkt_home_p) else float("nan")
         edge_away = float(-edge_home) if not np.isnan(edge_home) else float("nan")
 
@@ -732,6 +742,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         else:
             model_total = float("nan")
 
+        if np.isnan(model_total) and not np.isnan(total_points):
+            model_total = float(total_points)
+               
         sd = float("nan")
         if not np.isnan(home_sd) and not np.isnan(away_sd):
             sd = 0.5 * (home_sd + away_sd)
