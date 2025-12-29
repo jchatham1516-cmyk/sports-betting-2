@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import math
 import os
-from collections import defaultdict
-from datetime import datetime, date
-from typing import Dict, Optional, Tuple
+from datetime import datetime, date, timedelta, timezone
+from typing import Dict, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
+import requests
 
 from sports.common.teams import canon_team
 from sports.common.elo import EloState, elo_win_prob, elo_update
@@ -16,7 +16,6 @@ from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.historical_totals import build_team_historical_total_lines
 
-# probability + margin calibrators
 from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 
@@ -24,40 +23,18 @@ ELO_PATH = "results/elo_state_nhl.json"
 PLATT_PATH = "results/prob_cal_nhl.json"
 MARGIN_CAL_PATH = "results/margin_cal_nhl.json"
 
-# ----------------------------
-# Tunables (NHL-specific)
-# ----------------------------
 HOME_ADV = float(os.getenv("NHL_HOME_ADV", "45.0"))
 ELO_K = float(os.getenv("NHL_ELO_K", "18.0"))
 
-# IMPORTANT: if this is too small, Elo never separates and probs look identical
-ELO_TRAIN_DAYS = int(os.getenv("NHL_ELO_TRAIN_DAYS", "180"))
-
-# Elo -> goals (fallback until margin calibrator is trained)
-ELO_PER_GOAL = float(os.getenv("NHL_ELO_PER_GOAL", "55.0"))
-MAX_ABS_MODEL_SPREAD = float(os.getenv("NHL_MAX_ABS_MODEL_SPREAD", "2.5"))
-
-# Prob compression
 BASE_COMPRESS = float(os.getenv("NHL_BASE_COMPRESS", "0.78"))
 MIN_ML_EDGE = float(os.getenv("NHL_MIN_ML_EDGE", "0.02"))
 
-# Calibration
+# If Elo training fails, allow market->elo inference (prevents constant 0.520 outputs)
+FALLBACK_USE_MARKET_IF_EMPTY = os.getenv("NHL_FALLBACK_USE_MARKET_IF_EMPTY", "1") == "1"
+MARKET_FALLBACK_BLEND = float(os.getenv("NHL_MARKET_FALLBACK_BLEND", "0.35"))  # 0..0.85
+
 CAL_MIN_GAMES = int(os.getenv("NHL_CAL_MIN_GAMES", "120"))
 
-# Rest effects (Elo points)
-SHORT_REST_PENALTY_ELO = float(os.getenv("NHL_SHORT_REST_PENALTY_ELO", "-10.0"))
-NORMAL_REST_BONUS_ELO = float(os.getenv("NHL_NORMAL_REST_BONUS_ELO", "0.0"))
-
-# Recent form (margin = goals_for - goals_against)
-FORM_LOOKBACK_DAYS = int(os.getenv("NHL_FORM_LOOKBACK_DAYS", "35"))
-FORM_MIN_GAMES = int(os.getenv("NHL_FORM_MIN_GAMES", "2"))
-FORM_ELO_PER_GOAL = float(os.getenv("NHL_FORM_ELO_PER_GOAL", "7.0"))
-FORM_ELO_CLAMP = float(os.getenv("NHL_FORM_ELO_CLAMP", "35.0"))
-
-# Missing-Elo handling: shrink toward 0.5 if a team is missing in Elo state
-MISSING_ELO_SHRINK = float(os.getenv("NHL_MISSING_ELO_SHRINK", "0.40"))
-
-# Totals (historical market totals lines)
 TOTAL_DEFAULT_PRICE = float(os.getenv("NHL_TOTAL_DEFAULT_PRICE", "-110.0"))
 TOTAL_HIST_DAYS = int(os.getenv("NHL_TOTAL_HIST_DAYS", "21"))
 TOTAL_REGRESS_WEIGHT = float(os.getenv("NHL_TOTAL_REGRESS_WEIGHT", "0.40"))
@@ -66,13 +43,9 @@ TOTAL_SD_CEIL = float(os.getenv("NHL_TOTAL_SD_CEIL", "1.35"))
 TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NHL_TOTAL_MIN_EDGE_VS_BE", "0.02"))
 TOTAL_MIN_GOALS_EDGE = float(os.getenv("NHL_TOTAL_MIN_GOALS_EDGE", "0.35"))
 
-# Sanity behavior: warn by default, optionally raise
 STRICT_SANITY = os.getenv("NHL_STRICT_SANITY", "0") == "1"
 
 
-# ----------------------------
-# Helpers
-# ----------------------------
 def _clamp(x: float, lo: float, hi: float) -> float:
     try:
         return float(max(lo, min(hi, float(x))))
@@ -99,24 +72,6 @@ def _parse_iso_date(s: str) -> Optional[date]:
         return dt.date()
     except Exception:
         return None
-
-
-def _calc_days_off(target: Optional[date], last: Optional[date]) -> Optional[int]:
-    if target is None or last is None:
-        return None
-    delta = (target - last).days - 1
-    if delta < 0 or delta > 30:
-        return None
-    return int(delta)
-
-
-def _rest_elo(days_off: Optional[int]) -> float:
-    if days_off is None:
-        return 0.0
-    # back-to-back / 0 days rest
-    if days_off <= 0:
-        return float(SHORT_REST_PENALTY_ELO)
-    return float(NORMAL_REST_BONUS_ELO)
 
 
 def _american_to_prob(ml: float) -> float:
@@ -169,109 +124,47 @@ def _ml_recommendation(model_p: float, market_p: float, min_edge: float = MIN_ML
     return "No ML bet (edge too small)"
 
 
-def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
-    sport_key = SPORT_TO_ODDS_KEY["nhl"]
-    events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
-
-    last_played: Dict[str, date] = {}
-    for ev in events:
-        home_raw = ev.get("home_team")
-        away_raw = ev.get("away_team")
-        if not home_raw or not away_raw:
-            continue
-
-        home = canon_team(home_raw)
-        away = canon_team(away_raw)
-        if not home or not away:
-            continue
-
-        d = _parse_iso_date(ev.get("commence_time") or "")
-        if d is None:
-            continue
-
-        if (home not in last_played) or (d > last_played[home]):
-            last_played[home] = d
-        if (away not in last_played) or (d > last_played[away]):
-            last_played[away] = d
-
-    return last_played
-
-
-def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, Dict[str, float]]:
-    sport_key = SPORT_TO_ODDS_KEY.get("nhl")
-    if not sport_key:
-        return {}
-
+def _odds_scores_fallback(sport_key: str, days_from: int) -> list[dict]:
+    """
+    Direct Odds API scores endpoint fallback:
+      GET /v4/sports/{sport_key}/scores?daysFrom=...
+    """
+    key = os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY") or os.getenv("ODDS_API") or ""
+    if not key:
+        return []
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     try:
-        events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
+        r = requests.get(url, params={"apiKey": key, "daysFrom": int(days_from)}, timeout=20)
+        if r.status_code != 200:
+            return []
+        return r.json() or []
     except Exception:
-        return {}
-
-    margins = defaultdict(list)
-    for ev in events:
-        home_raw = ev.get("home_team")
-        away_raw = ev.get("away_team")
-        scores = ev.get("scores")
-        if not home_raw or not away_raw or not scores:
-            continue
-
-        d = _parse_iso_date(ev.get("commence_time") or "")
-        if d is None:
-            continue
-
-        home = canon_team(home_raw)
-        away = canon_team(away_raw)
-        if not home or not away:
-            continue
-
-        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
-        try:
-            hs = float(score_map.get(home_raw) or score_map.get(home))
-            aw = float(score_map.get(away_raw) or score_map.get(away))
-        except Exception:
-            continue
-
-        margin = float(hs - aw)
-        margins[home].append((d, margin))
-        margins[away].append((d, -margin))
-
-    out: Dict[str, Dict[str, float]] = {}
-    for team, lst in margins.items():
-        lst = sorted(lst, key=lambda x: x[0], reverse=True)
-        margins_only = [m for _, m in lst]
-        games = len(margins_only)
-        if games < FORM_MIN_GAMES:
-            continue
-
-        avg_margin = float(np.mean(margins_only))
-        elo_adj = _clamp(avg_margin * FORM_ELO_PER_GOAL, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
-        out[team] = {"avg_margin": float(avg_margin), "games": int(games), "elo_adj": float(elo_adj)}
-    return out
+        return []
 
 
-def update_elo_from_recent_scores(*, days_from: int = None, force_full_rebuild: bool = False) -> EloState:
-    """
-    Updates Elo ratings from recent completed NHL games.
-
-    IMPORTANT: if days_from is too small, Elo stays near-default and daily probs look identical.
-    """
-    # Full rebuild = wipe processed + ratings
-    if force_full_rebuild:
-        st = EloState()
-    else:
-        st = EloState.load(ELO_PATH)
-
+def update_elo_from_recent_scores(days_from: int = 120) -> EloState:
+    st = EloState.load(ELO_PATH)
     sport_key = SPORT_TO_ODDS_KEY["nhl"]
-    train_days = int(days_from) if days_from is not None else int(ELO_TRAIN_DAYS)
-    train_days = int(max(30, train_days))
 
-    events = fetch_recent_scores(sport_key=sport_key, days_from=train_days)
+    train_days = int(max(30, int(days_from or 120)))
+    events = []
+    try:
+        events = fetch_recent_scores(sport_key=sport_key, days_from=train_days) or []
+    except Exception:
+        events = []
+
+    # If scores source returns nothing, fallback to Odds API scores endpoint
+    if not events:
+        print("[nhl] WARNING: fetch_recent_scores returned 0 events; using Odds API /scores fallback.")
+        events = _odds_scores_fallback(sport_key=sport_key, days_from=train_days)
 
     train_ps: list[float] = []
     train_ys: list[float] = []
     train_xs: list[float] = []
     train_margins: list[float] = []
 
+    processed_any = False
+
     for ev in events:
         home_raw = ev.get("home_team")
         away_raw = ev.get("away_team")
@@ -284,9 +177,8 @@ def update_elo_from_recent_scores(*, days_from: int = None, force_full_rebuild: 
         if not home or not away:
             continue
 
-        # If not rebuilding, avoid double-processing games
         game_key = f"{ev.get('id','')}|{ev.get('commence_time','')}|{home}|{away}"
-        if (not force_full_rebuild) and st.is_processed(game_key):
+        if st.is_processed(game_key):
             continue
 
         score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
@@ -312,11 +204,14 @@ def update_elo_from_recent_scores(*, days_from: int = None, force_full_rebuild: 
         st.set(home, nh)
         st.set(away, na)
         st.mark_processed(game_key)
+        processed_any = True
 
     os.makedirs("results", exist_ok=True)
     st.save(ELO_PATH)
 
-    # optional calibration
+    if not processed_any:
+        print("[nhl] WARNING: Elo update processed 0 games. Ratings may stay empty/constant.")
+
     try:
         if len(train_ps) >= CAL_MIN_GAMES:
             cal = fit_platt(np.array(train_ps, dtype=float), np.array(train_ys, dtype=float))
@@ -331,18 +226,7 @@ def update_elo_from_recent_scores(*, days_from: int = None, force_full_rebuild: 
 
 
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
-    # If you want to force rebuild from runner without changing runner code:
-    # set env NHL_FORCE_FULL_REBUILD=1 once, run, then unset.
-    force = os.getenv("NHL_FORCE_FULL_REBUILD", "0") == "1"
-    st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS, force_full_rebuild=force)
-
-    try:
-        target_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
-    except Exception:
-        target_date = None
-
-    last_played = _build_last_game_date_map(days_back=21)
-    form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
+    st = update_elo_from_recent_scores(days_from=120)
 
     # Historical totals lines
     sport_key = SPORT_TO_ODDS_KEY.get("nhl")
@@ -373,73 +257,43 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     league_sd_total = float(np.mean(league_sds)) if league_sds else 0.95
 
     def _team_line_avg_sd(team_canon: str, team_raw: str) -> Tuple[float, float]:
-        candidates = []
-        if team_raw:
-            candidates.append(str(team_raw))
-            candidates.append(str(team_raw).strip())
-        if team_canon:
-            candidates.append(str(team_canon))
-            candidates.append(str(team_canon).strip())
-
-        for k in candidates:
+        for k in [team_canon, team_raw, (team_raw or "").strip(), (team_canon or "").strip()]:
+            if not k:
+                continue
             v = (team_total_lines or {}).get(k)
             if isinstance(v, dict) and v.get("avg") is not None:
                 return (_safe_float(v.get("avg")), _safe_float(v.get("sd"), default=np.nan))
         return (float("nan"), float("nan"))
 
-    def _form_adj(team: str) -> float:
-        try:
-            return float((form_map.get(team) or {}).get("elo_adj", 0.0))
-        except Exception:
-            return 0.0
+    ratings_map = getattr(st, "ratings", {}) or {}
+    if not ratings_map:
+        print("[nhl] WARNING: Elo ratings map is empty after update. Expect constant probs unless fallback enabled.")
 
     rows: list[dict] = []
-    default_ct = 0
-
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
         away = canon_team(away_in)
         if not home or not away:
             continue
 
-        eh = st.get(home)
-        ea = st.get(away)
-
-        if eh == st.default_elo or ea == st.default_elo:
-            default_ct += 1
-            msg = f"[NHL WARNING] Default Elo used: home={home_in}->{home} eh={eh}, away={away_in}->{away} ea={ea}"
-            if STRICT_SANITY:
-                raise RuntimeError(msg)
-            print(msg)
-
-        # Rest
-        home_days_off = _calc_days_off(target_date, last_played.get(home))
-        away_days_off = _calc_days_off(target_date, last_played.get(away))
-        rest_adj = _rest_elo(home_days_off) - _rest_elo(away_days_off)
-
-        # Form
-        form_diff = float(_form_adj(home) - _form_adj(away))
-
-        # Effective Elo
-        eh_eff = float(eh) + float(rest_adj) + 0.5 * float(form_diff)
-        ea_eff = float(ea) - 0.5 * float(form_diff)
-
-        # Model win prob
-        p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
-        p_home = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
-
-        # Market ML
+        # Market prob
         home_ml = _safe_float((oi or {}).get("home_ml"))
         away_ml = _safe_float((oi or {}).get("away_ml"))
         mkt_home_p = float("nan")
         if not np.isnan(home_ml) and not np.isnan(away_ml):
             mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
 
-        # Missing-Elo shrink (prevents crazy default-based biases, but DOES NOT copy market)
-        home_missing = home not in (st.ratings or {})
-        away_missing = away not in (st.ratings or {})
-        if home_missing or away_missing:
-            p_home = float(_clamp(0.5 + float(MISSING_ELO_SHRINK) * (p_home - 0.5), 0.01, 0.99))
+        # Elo-based prob (if we actually have ratings)
+        eh = st.get(home)
+        ea = st.get(away)
+        p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
+        p_home = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
+
+        # If ratings empty (or both default), blend toward market but do NOT copy it 1:1
+        if FALLBACK_USE_MARKET_IF_EMPTY and (not ratings_map or (eh == st.default_elo and ea == st.default_elo)):
+            if not np.isnan(mkt_home_p):
+                w = float(_clamp(MARKET_FALLBACK_BLEND, 0.0, 0.85))
+                p_home = float(_clamp((1.0 - w) * p_home + w * float(mkt_home_p), 0.01, 0.99))
 
         edge_home = float(p_home - mkt_home_p) if not np.isnan(mkt_home_p) else float("nan")
         ml_pick = _ml_recommendation(p_home, mkt_home_p)
@@ -472,6 +326,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             sd = away_sd
         else:
             sd = league_sd_total
+
         sd = _clamp(sd, TOTAL_SD_FLOOR, TOTAL_SD_CEIL)
 
         total_side = "NONE"
@@ -483,10 +338,8 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             z = (model_total - total_points) / sd
             p_over = float(_clamp(_phi(z), 0.001, 0.999))
             p_under = 1.0 - p_over
-
             be_over = _breakeven_prob_from_american(over_price)
             be_under = _breakeven_prob_from_american(under_price)
-
             edge_over = p_over - be_over
             edge_under = p_under - be_under
 
@@ -511,14 +364,10 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "model_home_prob": float(p_home),
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
+                "edge_away": float(-edge_home) if not np.isnan(edge_home) else np.nan,
                 "ml_recommendation": ml_pick,
                 "home_ml": home_ml,
                 "away_ml": away_ml,
-                "rest_days_home": np.nan if home_days_off is None else float(home_days_off),
-                "rest_days_away": np.nan if away_days_off is None else float(away_days_off),
-                "form_elo_home": float(_form_adj(home)),
-                "form_elo_away": float(_form_adj(away)),
-                # totals
                 "total_points": float(total_points) if not np.isnan(total_points) else np.nan,
                 "total_over_price": float(over_price),
                 "total_under_price": float(under_price),
@@ -530,20 +379,14 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             }
         )
 
-    # Sanity: constant probability detector + too-many-default warning
+    # Warn if near-constant probs
     if len(rows) >= 5:
         probs = [round(r["model_home_prob"], 3) for r in rows if not np.isnan(r.get("model_home_prob", np.nan))]
         if len(set(probs)) <= 2:
-            msg = "Model produced near-constant probabilities — likely default Elo / short training window / mapping issue."
+            msg = "Model produced near-constant probabilities — check scores feed / team mapping."
             if STRICT_SANITY:
                 raise RuntimeError(msg)
             print(f"[NHL WARNING] {msg}")
-
-    if len(rows) > 0 and default_ct / max(1, len(rows)) >= 0.50:
-        print(
-            f"[NHL WARNING] {default_ct}/{len(rows)} games used default Elo. "
-            f"Try NHL_FORCE_FULL_REBUILD=1 once, or increase NHL_ELO_TRAIN_DAYS."
-        )
 
     return pd.DataFrame(rows)
 
