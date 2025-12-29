@@ -504,8 +504,9 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     return st
 
 
-    def backfill_nba_elo_state(*, force_full_rebuild: bool = False) -> EloState:
+   def backfill_nba_elo_state(*, force_full_rebuild: bool = False) -> EloState:
     """Backward-compatible alias for rebuilding the NBA Elo state."""
+    return rebuild_nba_elo_state(force_full_rebuild=force_full_rebuild)
 
     return update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
 
