@@ -773,7 +773,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         else:
             model_total = float("nan")
 
-         if np.isnan(model_total) and not np.isnan(league_avg_total):
+        if np.isnan(model_total) and not np.isnan(league_avg_total):
             model_total = float(league_avg_total)
         elif np.isnan(model_total) and TOTAL_USE_MARKET_FALLBACK and not np.isnan(total_points):
             model_total = float(total_points)
