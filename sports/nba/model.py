@@ -63,6 +63,10 @@ FORM_ELO_CLAMP = float(os.getenv("NBA_FORM_ELO_CLAMP", "40.0"))
 BASE_COMPRESS = float(os.getenv("NBA_BASE_COMPRESS", "0.95"))
 MIN_ML_EDGE = float(os.getenv("NBA_MIN_ML_EDGE", "0.02"))
 
+# Missing-Elo handling
+MISSING_ELO_SHRINK = float(os.getenv("NBA_MISSING_ELO_SHRINK", "0.35"))
+MISSING_ELO_MARKET_BLEND = float(os.getenv("NBA_MISSING_ELO_MARKET_BLEND", "0.25"))
+
 # Calibration minimum games
 CAL_MIN_GAMES = int(os.getenv("NBA_CAL_MIN_GAMES", "80"))
 
@@ -682,6 +686,28 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         if not np.isnan(home_ml) and not np.isnan(away_ml):
             mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
 
+        # If both teams are missing from the Elo state, shrink the model toward neutral and
+        # optionally blend a small amount of the market probability. This avoids a heavy default
+        # home lean without flattening edges to zero.
+        home_missing = home not in (st.ratings or {})
+        away_missing = away not in (st.ratings or {})
+        if home_missing and away_missing:
+            neutralized = 0.5 + float(MISSING_ELO_SHRINK) * (p_comp - 0.5)
+            neutralized = float(_clamp(neutralized, 0.05, 0.95))
+
+            if np.isnan(mkt_home_p):
+                p_home = neutralized
+                mkt_home_p = float(p_home)
+            else:
+                blend = float(_clamp(MISSING_ELO_MARKET_BLEND, 0.0, 1.0))
+                p_home = float(
+                    _clamp(
+                        (1.0 - blend) * neutralized + blend * float(mkt_home_p),
+                        0.01,
+                        0.99,
+                    )
+                )
+
         # If both teams are missing from the Elo state, fall back to market or a neutral 50/50
         # probability instead of defaulting to a heavy home lean.
         home_missing = home not in (st.ratings or {})
@@ -741,6 +767,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             model_total = float((1.0 - TOTAL_REGRESS_WEIGHT) * base_total + TOTAL_REGRESS_WEIGHT * league_avg_total)
         else:
             model_total = float("nan")
+
+        if np.isnan(model_total) and not np.isnan(total_points):
+            model_total = float(total_points)
 
         if np.isnan(model_total) and not np.isnan(total_points):
             model_total = float(total_points)
