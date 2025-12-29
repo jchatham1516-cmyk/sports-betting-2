@@ -95,6 +95,49 @@ def _ml_pick(model_p: float, market_p: float, th: Thresholds) -> str:
     return "No ML bet (edge too small)"
 
 
+# ---------------------------------------------------------------------------
+# Legacy helpers (kept for compatibility with older tests/usage)
+# ---------------------------------------------------------------------------
+def ml_recommendation(edge_home: float, th: Thresholds = Thresholds()) -> str:
+    """Return a moneyline recommendation based on the probability edge.
+
+    This is a thin wrapper around the legacy API that operated on the
+    probability edge instead of absolute probabilities.
+    """
+
+    if edge_home >= th.ml_edge_strong:
+        return "Model PICK: HOME ML (strong)"
+    if edge_home >= th.ml_edge_lean:
+        return "Model lean: HOME ML"
+    if edge_home <= -th.ml_edge_strong:
+        return "Model PICK: AWAY ML (strong)"
+    if edge_home <= -th.ml_edge_lean:
+        return "Model lean: AWAY ML"
+    return "No ML bet (edge too small)"
+
+
+def ats_recommendation(spread_edge_home: float, th: Thresholds = Thresholds()) -> str:
+    """Return an ATS recommendation using the point-edge perspective."""
+
+    if spread_edge_home >= th.ats_edge_strong_pts:
+        return "Model PICK ATS: HOME (strong)"
+    if spread_edge_home >= th.ats_edge_lean_pts:
+        return "Model PICK ATS: HOME (lean)"
+    if spread_edge_home <= -th.ats_edge_strong_pts:
+        return "Model PICK ATS: AWAY (strong)"
+    if spread_edge_home <= -th.ats_edge_lean_pts:
+        return "Model PICK ATS: AWAY (lean)"
+    return "Too close to call ATS (edge too small)"
+
+
+def choose_primary(ml_reco: str, ats_reco: str) -> str:
+    """Select which recommendation to prioritize (ATS wins only if strong)."""
+
+    if isinstance(ats_reco, str) and ("Model PICK ATS" in ats_reco) and ("(strong)" in ats_reco):
+        return ats_reco
+    return ml_reco
+
+
 def _ats_pick(model_spread_home: float, market_home_spread: float, th: Thresholds) -> str:
     """
     Convention:
