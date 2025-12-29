@@ -65,6 +65,10 @@ MIN_ML_EDGE = float(os.getenv("NBA_MIN_ML_EDGE", "0.02"))
 
 # Missing-Elo handling
 MISSING_ELO_SHRINK = float(os.getenv("NBA_MISSING_ELO_SHRINK", "0.35"))
+MISSING_ELO_MARKET_BLEND = float(os.getenv("NBA_MISSING_ELO_MARKET_BLEND", "0.0"))
+
+# Missing-Elo handling
+MISSING_ELO_SHRINK = float(os.getenv("NBA_MISSING_ELO_SHRINK", "0.35"))
 MISSING_ELO_MARKET_BLEND = float(os.getenv("NBA_MISSING_ELO_MARKET_BLEND", "0.25"))
 
 # Calibration minimum games
@@ -73,8 +77,8 @@ CAL_MIN_GAMES = int(os.getenv("NBA_CAL_MIN_GAMES", "80"))
 # ATS model
 ATS_SD_PTS = float(os.getenv("NBA_ATS_SD_PTS", "13.5"))
 ATS_DEFAULT_PRICE = float(os.getenv("NBA_ATS_DEFAULT_PRICE", "-110.0"))
-ATS_MIN_EDGE_VS_BE = float(os.getenv("NBA_ATS_MIN_EDGE_VS_BE", "0.03"))
-ATS_MIN_PTS_EDGE = float(os.getenv("NBA_ATS_MIN_PTS_EDGE", "2.0"))
+ATS_MIN_EDGE_VS_BE = float(os.getenv("NBA_ATS_MIN_EDGE_VS_BE", "0.02"))
+ATS_MIN_PTS_EDGE = float(os.getenv("NBA_ATS_MIN_PTS_EDGE", "1.5"))
 ATS_BIG_LINE = float(os.getenv("NBA_ATS_BIG_LINE", "7.0"))
 ATS_TINY_MODEL = float(os.getenv("NBA_ATS_TINY_MODEL", "2.0"))
 ATS_BIGLINE_FORCE_PASS = os.getenv("NBA_ATS_BIGLINE_FORCE_PASS", "1") == "1"
@@ -86,8 +90,9 @@ TOTAL_HIST_DAYS = int(os.getenv("NBA_TOTAL_HIST_DAYS", "14"))
 TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.45"))  # stronger regression
 TOTAL_SD_FLOOR = float(os.getenv("NBA_TOTAL_SD_FLOOR", "9.0"))
 TOTAL_SD_CEIL = float(os.getenv("NBA_TOTAL_SD_CEIL", "20.0"))
-TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NBA_TOTAL_MIN_EDGE_VS_BE", "0.02"))
-TOTAL_MIN_PTS_EDGE = float(os.getenv("NBA_TOTAL_MIN_PTS_EDGE", "3.0"))
+TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NBA_TOTAL_MIN_EDGE_VS_BE", "0.015"))
+TOTAL_MIN_PTS_EDGE = float(os.getenv("NBA_TOTAL_MIN_PTS_EDGE", "2.5"))
+TOTAL_USE_MARKET_FALLBACK = os.getenv("NBA_TOTAL_USE_MARKET_FALLBACK", "0") == "1"
 
 # Sanity behavior: warn by default, optionally raise
 STRICT_SANITY = os.getenv("NBA_STRICT_SANITY", "0") == "1"
@@ -768,6 +773,11 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         else:
             model_total = float("nan")
 
+         if np.isnan(model_total) and not np.isnan(league_avg_total):
+            model_total = float(league_avg_total)
+        elif np.isnan(model_total) and TOTAL_USE_MARKET_FALLBACK and not np.isnan(total_points):
+            model_total = float(total_points)
+            
         if np.isnan(model_total) and not np.isnan(total_points):
             model_total = float(total_points)
 
