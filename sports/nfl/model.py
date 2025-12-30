@@ -61,6 +61,10 @@ CAL_MIN_GAMES = int(os.getenv("NFL_CAL_MIN_GAMES", "60"))
 
 MARKET_PRIOR_W = float(os.getenv("NFL_MARKET_PRIOR_W", "0.35"))  # 0.0 disables
 
+# Missing-Elo handling (soften outputs if training data is empty)
+MISSING_ELO_SHRINK = float(os.getenv("NFL_MISSING_ELO_SHRINK", "0.35"))
+MISSING_ELO_MARKET_BLEND = float(os.getenv("NFL_MISSING_ELO_MARKET_BLEND", "0.20"))
+
 # ATS
 ATS_SD_PTS = float(os.getenv("NFL_ATS_SD_PTS", "13.5"))
 ATS_DEFAULT_PRICE = float(os.getenv("NFL_ATS_DEFAULT_PRICE", "-110.0"))
@@ -663,6 +667,19 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             p_home = _clamp(float(platt.predict(float(p_comp))), 0.01, 0.99)
         except Exception:
             p_home = p_comp
+
+        # If Elo state is empty for either team, soften toward 0.50 and lightly blend market
+        home_missing = home not in (getattr(st, "ratings", {}) or {})
+        away_missing = away not in (getattr(st, "ratings", {}) or {})
+        if home_missing or away_missing:
+            neutralized = 0.5 + float(MISSING_ELO_SHRINK) * (p_home - 0.5)
+            neutralized = float(_clamp(neutralized, 0.05, 0.95))
+
+            if (not np.isnan(mkt_home_p)) and MISSING_ELO_MARKET_BLEND > 0:
+                w = float(_clamp(MISSING_ELO_MARKET_BLEND, 0.0, 0.85))
+                p_home = float(_clamp((1.0 - w) * neutralized + w * float(mkt_home_p), 0.01, 0.99))
+            else:
+                p_home = neutralized
 
         # Blend toward market when market exists
         if (not np.isnan(mkt_home_p)) and MARKET_PRIOR_W > 0:
