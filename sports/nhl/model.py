@@ -42,6 +42,14 @@ TOTAL_SD_FLOOR = float(os.getenv("NHL_TOTAL_SD_FLOOR", "0.55"))
 TOTAL_SD_CEIL = float(os.getenv("NHL_TOTAL_SD_CEIL", "1.35"))
 TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NHL_TOTAL_MIN_EDGE_VS_BE", "0.02"))
 TOTAL_MIN_GOALS_EDGE = float(os.getenv("NHL_TOTAL_MIN_GOALS_EDGE", "0.35"))
+TOTAL_LINE_BLEND = float(os.getenv("NHL_TOTAL_LINE_BLEND", "0.35"))
+
+# Recent scoring model
+PTS_LOOKBACK_DAYS = int(os.getenv("NHL_PTS_LOOKBACK_DAYS", "45"))
+PTS_MIN_GAMES = int(os.getenv("NHL_PTS_MIN_GAMES", "2"))
+PTS_REGRESS = float(os.getenv("NHL_PTS_REGRESS", "0.35"))
+PTS_LEAGUE_CLAMP_MIN = float(os.getenv("NHL_PTS_LEAGUE_CLAMP_MIN", "2.4"))
+PTS_LEAGUE_CLAMP_MAX = float(os.getenv("NHL_PTS_LEAGUE_CLAMP_MAX", "3.6"))
 
 STRICT_SANITY = os.getenv("NHL_STRICT_SANITY", "0") == "1"
 
@@ -225,6 +233,65 @@ def update_elo_from_recent_scores(days_from: int = 120) -> EloState:
     return st
 
 
+def _build_team_scoring_table(days_back: int) -> pd.DataFrame:
+    sport_key = SPORT_TO_ODDS_KEY["nhl"]
+    events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
+
+    rows = []
+    for ev in events:
+        home_raw = ev.get("home_team")
+        away_raw = ev.get("away_team")
+        scores = ev.get("scores")
+        if not home_raw or not away_raw or not scores:
+            continue
+
+        home = canon_team(home_raw)
+        away = canon_team(away_raw)
+        if not home or not away:
+            continue
+
+        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
+        try:
+            hs = float(score_map.get(home_raw) or score_map.get(home))
+            aw = float(score_map.get(away_raw) or score_map.get(away))
+        except Exception:
+            continue
+
+        rows.append({"team": home, "opp": away, "pts_for": hs, "pts_against": aw})
+        rows.append({"team": away, "opp": home, "pts_for": aw, "pts_against": hs})
+
+    return pd.DataFrame(rows)
+
+
+def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd.DataFrame) -> Tuple[float, float, float]:
+    if team_tbl is None or team_tbl.empty or league_pts <= 1e-6:
+        return (league_pts, league_pts, 2.0 * league_pts)
+
+    def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
+        sub = team_tbl[team_tbl["team"] == t]
+        if sub.empty or len(sub) < PTS_MIN_GAMES:
+            return (None, None)
+        return (float(sub["pts_for"].mean()), float(sub["pts_against"].mean()))
+
+    hf, ha = _team_means(home)
+    af, aa = _team_means(away)
+
+    def _strength(x: Optional[float]) -> float:
+        if x is None or np.isnan(x):
+            return 1.0
+        raw = float(x) / float(league_pts)
+        return float((1.0 - PTS_REGRESS) * raw + PTS_REGRESS * 1.0)
+
+    home_off = _strength(hf)
+    home_def = _strength(ha)
+    away_off = _strength(af)
+    away_def = _strength(aa)
+
+    exp_home = float(league_pts * home_off * away_def)
+    exp_away = float(league_pts * away_off * home_def)
+    return (exp_home, exp_away, float(exp_home + exp_away))
+
+
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=120)
 
@@ -255,6 +322,20 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     league_avg_total = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 0.95
+
+    team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS)
+    if team_tbl is None or team_tbl.empty:
+        team_tbl = _build_team_scoring_table(days_back=120)
+
+    league_pts = 3.0
+    try:
+        if not np.isnan(league_avg_total) and league_avg_total > 1.0:
+            league_pts = float(league_avg_total / 2.0)
+        elif team_tbl is not None and not team_tbl.empty:
+            league_pts = float(team_tbl["pts_for"].mean())
+        league_pts = _clamp(league_pts, PTS_LEAGUE_CLAMP_MIN, PTS_LEAGUE_CLAMP_MAX)
+    except Exception:
+        league_pts = 3.0
 
     def _team_line_avg_sd(team_canon: str, team_raw: str) -> Tuple[float, float]:
         for k in [team_canon, team_raw, (team_raw or "").strip(), (team_canon or "").strip()]:
@@ -306,16 +387,27 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         home_avg, home_sd = _team_line_avg_sd(home, home_in)
         away_avg, away_sd = _team_line_avg_sd(away, away_in)
 
-        base_total = float("nan")
-        if not np.isnan(home_avg) and not np.isnan(away_avg):
-            base_total = 0.5 * (home_avg + away_avg)
-        elif not np.isnan(league_avg_total):
-            base_total = float(league_avg_total)
+        exp_home, exp_away, exp_total = _expected_points_total(home, away, league_pts, team_tbl)
 
-        if not np.isnan(base_total) and not np.isnan(league_avg_total):
-            model_total = float((1.0 - TOTAL_REGRESS_WEIGHT) * base_total + TOTAL_REGRESS_WEIGHT * league_avg_total)
+        hist_base = float("nan")
+        if not np.isnan(home_avg) and not np.isnan(away_avg):
+            hist_base = 0.5 * (home_avg + away_avg)
+        elif not np.isnan(league_avg_total):
+            hist_base = float(league_avg_total)
+
+        base_total = float(exp_total)
+        if not np.isnan(hist_base):
+            w = _clamp(TOTAL_LINE_BLEND, 0.0, 1.0)
+            base_total = float((1.0 - w) * base_total + w * hist_base)
+
+        league_anchor_total = league_avg_total
+        if np.isnan(league_anchor_total):
+            league_anchor_total = float(2.0 * league_pts) if league_pts > 0 else float("nan")
+
+        if not np.isnan(base_total) and not np.isnan(league_anchor_total):
+            model_total = float((1.0 - TOTAL_REGRESS_WEIGHT) * base_total + TOTAL_REGRESS_WEIGHT * league_anchor_total)
         else:
-            model_total = float("nan")
+            model_total = float(base_total)
 
         sd = float("nan")
         if not np.isnan(home_sd) and not np.isnan(away_sd):
