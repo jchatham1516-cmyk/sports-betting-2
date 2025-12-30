@@ -33,6 +33,10 @@ MIN_ML_EDGE = float(os.getenv("NHL_MIN_ML_EDGE", "0.02"))
 FALLBACK_USE_MARKET_IF_EMPTY = os.getenv("NHL_FALLBACK_USE_MARKET_IF_EMPTY", "1") == "1"
 MARKET_FALLBACK_BLEND = float(os.getenv("NHL_MARKET_FALLBACK_BLEND", "0.35"))  # 0..0.85
 
+# Missing-Elo softening (lightly neutralize toward 0.50, optional market blend)
+MISSING_ELO_SHRINK = float(os.getenv("NHL_MISSING_ELO_SHRINK", "0.35"))
+MISSING_ELO_MARKET_BLEND = float(os.getenv("NHL_MISSING_ELO_MARKET_BLEND", "0.20"))
+
 CAL_MIN_GAMES = int(os.getenv("NHL_CAL_MIN_GAMES", "120"))
 
 TOTAL_DEFAULT_PRICE = float(os.getenv("NHL_TOTAL_DEFAULT_PRICE", "-110.0"))
@@ -288,6 +292,19 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         ea = st.get(away)
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_home = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
+
+        # Missing-Elo softening (do not fully copy market)
+        home_missing = home not in ratings_map
+        away_missing = away not in ratings_map
+        if home_missing or away_missing:
+            neutralized = 0.5 + float(MISSING_ELO_SHRINK) * (p_home - 0.5)
+            neutralized = float(_clamp(neutralized, 0.05, 0.95))
+
+            if (not np.isnan(mkt_home_p)) and MISSING_ELO_MARKET_BLEND > 0:
+                w = float(_clamp(MISSING_ELO_MARKET_BLEND, 0.0, 0.85))
+                p_home = float(_clamp((1.0 - w) * neutralized + w * float(mkt_home_p), 0.01, 0.99))
+            else:
+                p_home = neutralized
 
         # If ratings empty (or both default), blend toward market but do NOT copy it 1:1
         if FALLBACK_USE_MARKET_IF_EMPTY and (not ratings_map or (eh == st.default_elo and ea == st.default_elo)):

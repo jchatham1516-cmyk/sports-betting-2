@@ -518,11 +518,11 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         # Missing-Elo softening ONLY (no “copy market”)
         home_missing = home not in (getattr(st, "ratings", {}) or {})
         away_missing = away not in (getattr(st, "ratings", {}) or {})
-        if home_missing and away_missing:
+        if home_missing or away_missing:
             neutralized = 0.5 + float(MISSING_ELO_SHRINK) * (p_home - 0.5)
             neutralized = float(_clamp(neutralized, 0.05, 0.95))
 
-            if not np.isnan(mkt_home_p):
+            if (not np.isnan(mkt_home_p)) and MISSING_ELO_MARKET_BLEND > 0:
                 w = float(_clamp(MISSING_ELO_MARKET_BLEND, 0.0, 0.85))
                 p_home = float(_clamp((1.0 - w) * neutralized + w * float(mkt_home_p), 0.01, 0.99))
             else:
