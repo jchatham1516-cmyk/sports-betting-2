@@ -280,13 +280,17 @@ def _build_team_scoring_table(days_back: int) -> pd.DataFrame:
         away = canon_team(away_raw)
         if not home or not away:
             continue
-
-        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
-        try:
-            hs = float(score_map.get(home_raw) or score_map.get(home))
-            aw = float(score_map.get(away_raw) or score_map.get(away))
-        except Exception:
-            continue
+            
+score_map = {}
+for s in scores:
+    nm = s.get("name")
+    sc = s.get("score")
+    if not nm:
+        continue
+    score_map[nm] = sc
+    c = canon_team(nm)
+    if c:
+        score_map[c] = sc
 
         rows.append({"team": home, "opp": away, "pts_for": hs, "pts_against": aw})
         rows.append({"team": away, "opp": home, "pts_for": aw, "pts_against": hs})
@@ -298,11 +302,21 @@ def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd
     if team_tbl is None or team_tbl.empty or league_pts <= 1e-6:
         return (league_pts, league_pts, 2.0 * league_pts)
 
-    def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
-        sub = team_tbl[team_tbl["team"] == t]
-        if sub.empty or len(sub) < PTS_MIN_GAMES:
-            return (None, None)
-        return (float(sub["pts_for"].mean()), float(sub["pts_against"].mean()))
+def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
+    if team_tbl is None or team_tbl.empty:
+        return (None, None)
+
+    t0 = (t or "").strip()
+    t1 = canon_team(t0) or t0
+
+    sub = team_tbl[(team_tbl["team"] == t0) | (team_tbl["team"] == t1)]
+    if sub.empty:
+        sub = team_tbl[team_tbl["team"].astype(str).str.lower() == t1.lower()]
+
+    if sub.empty or len(sub) < PTS_MIN_GAMES:
+        return (None, None)
+
+    return (float(sub["pts_for"].mean()), float(sub["pts_against"].mean()))
 
     hf, ha = _team_means(home)
     af, aa = _team_means(away)
