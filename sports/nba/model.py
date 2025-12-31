@@ -60,7 +60,7 @@ PTS_LEAGUE_CLAMP_MAX = float(os.getenv("NBA_PTS_LEAGUE_CLAMP_MAX", "122.0"))
 
 TOTAL_HIST_DAYS = int(os.getenv("NBA_TOTAL_HIST_DAYS", "14"))
 TOTAL_LINE_BLEND = float(os.getenv("NBA_TOTAL_LINE_BLEND", "0.35"))
-TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.45"))
+TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.25"))
 TOTAL_SD_FLOOR = float(os.getenv("NBA_TOTAL_SD_FLOOR", "9.0"))
 TOTAL_SD_CEIL = float(os.getenv("NBA_TOTAL_SD_CEIL", "20.0"))
 TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NBA_TOTAL_MIN_EDGE_VS_BE", "0.015"))
@@ -550,6 +550,19 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         elo_diff = (eh + HOME_ADV) - ea
         model_spread_home = _clamp(_margin_model_spread_from_elo_diff(float(elo_diff)), -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
 
+        elo_diff = (eh + HOME_ADV) - ea
+        # ALWAYS have a baseline spread
+        spread_linear = -elo_diff / 30.0  # +elo_diff => home stronger => negative spread
+
+        model_spread_home = _margin_model_spread_from_elo_diff(float(elo_diff))
+
+        # If calibrator returns 0/near-0 despite meaningful elo_diff, fall back
+        if np.isnan(model_spread_home) or (abs(elo_diff) >= 40 and abs(model_spread_home) < 0.75):
+            model_spread_home = spread_linear
+
+        # final clamp
+        model_spread_home = _clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
+        mu_margin_home = -model_spread_home
         # home margin in points
         mu_margin_home = float(-model_spread_home)
 
@@ -599,7 +612,14 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             model_total = float((1.0 - TOTAL_REGRESS_WEIGHT) * base_total + TOTAL_REGRESS_WEIGHT * league_anchor_total)
         else:
             model_total = float(base_total)
+        home_gt = _team_game_total_mean(home, team_tbl)
+        away_gt = _team_game_total_mean(away, team_tbl)
 
+        pace_mult = 1.0
+        if not np.isnan(home_gt) and not np.isnan(away_gt) and not np.isnan(league_avg_total) and league_avg_total > 1e-6:
+            pace_mult = _clamp(0.5 * (home_gt + away_gt) / league_avg_total, 0.90, 1.12)
+
+        exp_total = float(exp_total) * float(pace_mult)
         # total sd: prefer hist sd, else league sd
         sd = float("nan")
         if not np.isnan(h_sd) and not np.isnan(a_sd):
