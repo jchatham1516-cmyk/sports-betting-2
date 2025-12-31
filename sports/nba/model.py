@@ -513,7 +513,6 @@ def load_nba_calibrator():
     except Exception:
         return None
 
-
 def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
     platt = load_platt(PLATT_PATH)
@@ -561,7 +560,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
     league_avg_total = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 14.0
 
-    team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS, as_of_date=date_in)
+    team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS, as_of_date=target_date or datetime.utcnow().date())
     if team_tbl is None or team_tbl.empty:
         team_tbl = _build_team_scoring_table(days_back=60)
 
