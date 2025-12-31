@@ -130,3 +130,56 @@ def fetch_recent_scores(sport_key: str, days_from: int = 3) -> List[Dict[str, An
             print(f"[scores] WARNING: failed to fetch scores ({type(e).__name__}: {e}). Returning no scores.")
             return []
     return []
+from datetime import datetime, timedelta, date
+
+def fetch_scores_history_by_day(
+    sport_key: str,
+    *,
+    as_of_date: date,
+    days_back: int,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch scores/history for many days by calling the Odds API *historical events* endpoint.
+    This is the correct way to go beyond scores endpoint daysFrom=1..3.
+
+    Returns a flat list of event dicts (one per game) across the date range.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        print("[scores] WARNING: ODDS_API_KEY missing. Returning no scores.")
+        return []
+
+    try:
+        n = int(days_back)
+    except Exception:
+        n = 14
+    n = max(1, n)
+
+    all_events: List[Dict[str, Any]] = []
+
+    # loop backward over days and call historical events endpoint
+    for i in range(n):
+        d = as_of_date - timedelta(days=i)
+        # noon UTC avoids date-boundary weirdness
+        iso = datetime(d.year, d.month, d.day, 12, 0, 0).isoformat() + "Z"
+
+        url = f"{ODDS_API_HOST}/v4/historical/sports/{sport_key}/events"
+        params = {"apiKey": api_key, "date": iso, "dateFormat": "iso"}
+
+        try:
+            r = requests.get(url, params=params, timeout=DEFAULT_TIMEOUT)
+            _debug_headers(r)
+            r.raise_for_status()
+            payload = r.json()
+        except Exception as e:
+            print(f"[scores] WARNING: historical events fetch failed for {d}: {e}")
+            continue
+
+        # payload shape: {"timestamp": "...", "previous_timestamp": "...", "next_timestamp": "...", "data": [...]}
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            continue
+
+        all_events.extend(data)
+
+    return all_events
