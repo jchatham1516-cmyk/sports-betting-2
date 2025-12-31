@@ -33,7 +33,7 @@ MARGIN_CAL_PATH = "results/margin_cal_nba.json"
 # ----------------------------
 # Tunables
 # ----------------------------
-HOME_ADV = float(os.getenv("NBA_HOME_ADV", "55.0"))
+HOME_ADV = float(os.getenv("NBA_HOME_ADV", "35.0"))
 ELO_K = float(os.getenv("NBA_ELO_K", "20.0"))
 
 ELO_TRAIN_DAYS = int(os.getenv("NBA_ELO_TRAIN_DAYS", "200"))
@@ -173,6 +173,13 @@ def _pace_proxy_from_total(exp_total: float, league_total: float) -> float:
     except Exception:
         return 1.0
 
+def _team_game_total_mean(team: str, team_tbl: pd.DataFrame) -> float:
+    if team_tbl is None or team_tbl.empty:
+        return float("nan")
+    sub = team_tbl[team_tbl["team"] == team]
+    if sub.empty:
+        return float("nan")
+    return float((sub["pts_for"] + sub["pts_against"]).mean())
 
 def _ml_recommendation(p_home: float, mkt_home_p: float, *, min_edge: float = 0.02) -> str:
     if np.isnan(p_home) or np.isnan(mkt_home_p):
@@ -187,22 +194,33 @@ def _ml_recommendation(p_home: float, mkt_home_p: float, *, min_edge: float = 0.
 def _margin_model_spread_from_elo_diff(elo_diff: float) -> float:
     """
     Convert elo_diff -> model_spread_home (negative means home favored).
-    Robust fallback if the margin calibrator is missing/bad.
+    Use margin calibrator only if it behaves sensibly; otherwise fallback linear.
     """
-    # 1) try calibrator
+    # Linear fallback: positive elo_diff => home stronger => home favored => negative spread
+    fallback = float(-float(elo_diff) / 30.0)
+
     try:
         cal = load_margin_cal(MARGIN_CAL_PATH)
-        if cal is not None:
-            y = float(cal.predict(float(elo_diff)))
-            if not np.isnan(y) and abs(y) <= 200:  # sanity
-                return y
+        if cal is None:
+            return fallback
+
+        y = float(cal.predict(float(elo_diff)))
+
+        # Reject broken calibrator outputs (this is what’s happening to you now)
+        if np.isnan(y):
+            return fallback
+
+        # If it always spits near 0 even for big elo_diff, it's useless
+        if abs(float(elo_diff)) >= 60 and abs(y) < 0.75:
+            return fallback
+
+        # Sanity clamp (protect against crazy predictions)
+        if abs(y) > 40:
+            return fallback
+
+        return y
     except Exception:
-        pass
-
-    # 2) fallback linear mapping (tunable)
-    # Positive elo_diff => home stronger => home favored => negative spread
-    return float(-elo_diff / 30.0)  # ~30 Elo ≈ 1 point
-
+        return fallback
 # ----------------------------
 # Historical totals (your repo format)
 # ----------------------------
@@ -535,7 +553,14 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         exp_home_pts, exp_away_pts, exp_total = _expected_points_total(home, away, league_pts, team_tbl)
         pace_proxy = _pace_proxy_from_total(exp_total, league_avg_total) if not np.isnan(league_avg_total) else 1.0
         margin_sd = float(MARGIN_SD_BASE) * float(_clamp(0.92 + 0.20 * pace_proxy, 0.85, 1.15))
+        home_gt = _team_game_total_mean(home, team_tbl)
+        away_gt = _team_game_total_mean(away, team_tbl)
 
+        pace_mult = 1.0
+        if not np.isnan(home_gt) and not np.isnan(away_gt) and not np.isnan(league_avg_total) and league_avg_total > 1e-6:
+            pace_mult = float(_clamp(0.5 * (home_gt + away_gt) / league_avg_total, 0.90, 1.12))
+
+        exp_total = float(exp_total) * pace_mult
         win_prob_home = _mix_norm_win_prob(mu_margin_home, margin_sd)
         blowout_prob_abs15 = _mix_norm_tail_prob_abs_ge(15.0, mu_margin_home, margin_sd)
         blowout_prob_abs25 = _mix_norm_tail_prob_abs_ge(25.0, mu_margin_home, margin_sd)
@@ -559,7 +584,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         base_total = float(exp_total)
         if not np.isnan(hist_base):
-            w = _clamp(TOTAL_LINE_BLEND, 0.0, 1.0)
+            w = _clamp(TOTAL_LINE_BLEND, 0.20, 0.25)
             base_total = float((1.0 - w) * base_total + w * hist_base)
 
         league_anchor_total = league_avg_total
