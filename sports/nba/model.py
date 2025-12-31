@@ -10,11 +10,9 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from sports.common.scores_sources import fetch_scores_history_by_day
 from sports.common.scores_sources import fetch_recent_scores, fetch_scores_history_by_day
 from sports.common.teams import canon_team
 from sports.common.elo import EloState, elo_win_prob, elo_update
-from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.historical_totals import build_team_historical_total_lines
 from sports.nba.injuries import (
@@ -265,6 +263,7 @@ def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
         return f"No total bet (edge_vs_be<{TOTAL_MIN_EDGE_VS_BE:.3f})"
     return f"Model PICK TOTAL: {side}"
 
+
 def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
     sport_key = SPORT_TO_ODDS_KEY["nba"]
 
@@ -312,25 +311,26 @@ def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["team", "pts_for", "pts_against"])
 
 
+# ✅ FIXED: this function was broken by indentation/unreachable code
 def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd.DataFrame) -> Tuple[float, float, float]:
     if team_tbl is None or team_tbl.empty or league_pts <= 1e-6:
         return (league_pts, league_pts, 2.0 * league_pts)
-        
-def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
-    if team_tbl is None or team_tbl.empty:
-        return (None, None)
 
-    t0 = (t or "").strip()
-    t1 = canon_team(t0) or t0
+    def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
+        if team_tbl is None or team_tbl.empty:
+            return (None, None)
 
-    sub = team_tbl[(team_tbl["team"] == t0) | (team_tbl["team"] == t1)]
-    if sub.empty:
-        sub = team_tbl[team_tbl["team"].astype(str).str.lower() == t1.lower()]
+        t0 = (t or "").strip()
+        t1 = canon_team(t0) or t0
 
-    if sub.empty or len(sub) < PTS_MIN_GAMES:
-        return (None, None)
+        sub = team_tbl[(team_tbl["team"] == t0) | (team_tbl["team"] == t1)]
+        if sub.empty:
+            sub = team_tbl[team_tbl["team"].astype(str).str.lower() == t1.lower()]
 
-    return (float(sub["pts_for"].mean()), float(sub["pts_against"].mean()))
+        if sub.empty or len(sub) < PTS_MIN_GAMES:
+            return (None, None)
+
+        return (float(sub["pts_for"].mean()), float(sub["pts_against"].mean()))
 
     hf, ha = _team_means(home)
     af, aa = _team_means(away)
@@ -349,6 +349,7 @@ def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
     exp_home = float(league_pts * home_off * away_def)
     exp_away = float(league_pts * away_off * home_def)
     return (exp_home, exp_away, float(exp_home + exp_away))
+
 
 def _build_last_game_date_map(days_back: int = 3) -> Dict[str, date]:
     """
@@ -385,19 +386,15 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
     Lightweight recent-form adjustments using Elo deltas over the last N days.
     Returns: team -> {"off": x, "def": y} where values are small multipliers around 1.0.
     """
-    # If your codebase already has a more detailed implementation, keep it.
-    # This version is safe + correctly indented.
     try:
         st = update_elo_from_recent_scores(days_from=max(1, min(3, int(days_back))))
     except Exception:
         return {}
 
     out: Dict[str, Dict[str, float]] = {}
-    # EloState likely holds ratings; we convert to a gentle multiplier
     try:
         items = getattr(st, "ratings", {})
         for team, elo in items.items():
-            # center around 1500 -> multiplier ~1.0
             mult = 1.0 + (float(elo) - 1500.0) / 15000.0
             out[str(team)] = {"off": float(mult), "def": float(mult)}
     except Exception:
@@ -482,6 +479,7 @@ def load_nba_calibrator():
     except Exception:
         return None
 
+
 def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
     platt = load_platt(PLATT_PATH)
@@ -529,9 +527,12 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
     league_avg_total = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 14.0
 
-    team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS, as_of_date=target_date or datetime.utcnow().date())
+    # ✅ FIXED: date_in doesn't exist here; use a real as_of_date
+    as_of_date = target_date or datetime.utcnow().date()
+
+    team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS, as_of_date=as_of_date)
     if team_tbl is None or team_tbl.empty:
-        team_tbl = _build_team_scoring_table(days_back=60, as_of_date=date_in)
+        team_tbl = _build_team_scoring_table(days_back=60, as_of_date=as_of_date)
 
     league_pts = 110.0
     try:
@@ -620,7 +621,11 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         # Spread
         elo_diff = (eh_eff - ea_eff) + HOME_ADV
-        model_spread_home = _clamp(_margin_model_spread_from_elo_diff(float(elo_diff)), -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD)
+        model_spread_home = _clamp(
+            _margin_model_spread_from_elo_diff(float(elo_diff)),
+            -MAX_ABS_MODEL_SPREAD,
+            MAX_ABS_MODEL_SPREAD,
+        )
 
         home_spread = _safe_float((oi or {}).get("home_spread"))
         spread_price = _safe_float((oi or {}).get("spread_price"), default=ATS_DEFAULT_PRICE)
@@ -656,7 +661,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 ats_pass_reason = f"|spread_edge|<{ATS_MIN_PTS_EDGE:.1f}"
 
         if not ats_allowed:
-            ats_strength = "pass"
             spread_reco = f"No ATS bet (gated): {ats_pass_reason}"
         else:
             ats_strength = _ats_strength_label(ats_edge_vs_be)
