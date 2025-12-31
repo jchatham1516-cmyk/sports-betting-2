@@ -556,11 +556,20 @@ def run_daily_nba(game_date_str: str, odds_dict: dict) -> pd.DataFrame:
 
     rows = []
 
-    for _, oi in (odds_dict or {}).items():
-        home = canon_team(str(oi.get("home"))) or str(oi.get("home"))
-        away = canon_team(str(oi.get("away"))) or str(oi.get("away"))
-        if not home or not away:
-            continue
+for matchup, oi in (odds_dict or {}).items():
+    # --- FIX: odds_dict may store teams in the key, not in oi ---
+    home_raw = oi.get("home")
+    away_raw = oi.get("away")
+
+    if (home_raw is None or away_raw is None) and isinstance(matchup, (tuple, list)) and len(matchup) == 2:
+        home_raw, away_raw = matchup[0], matchup[1]
+
+    home = canon_team(str(home_raw)) if home_raw is not None else None
+    away = canon_team(str(away_raw)) if away_raw is not None else None
+
+    # still missing? skip
+    if not home or not away:
+        continue
 
         eh = st.get(home)
         ea = st.get(away)
