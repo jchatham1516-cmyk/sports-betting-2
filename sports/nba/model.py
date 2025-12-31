@@ -350,32 +350,36 @@ def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
     exp_away = float(league_pts * away_off * home_def)
     return (exp_home, exp_away, float(exp_home + exp_away))
 
+def _build_last_game_date_map(days_back: int = 3) -> Dict[str, date]:
+    """
+    Map team -> most recent game date found in the last `days_back` days.
 
-def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
+    NOTE: This is only used for REST/FATIGUE, not totals. We don't need 60 days here.
+    """
     sport_key = SPORT_TO_ODDS_KEY["nba"]
-events = fetch_scores_history_by_day(
-    sport_key=sport_key,
-    as_of_date=pd.to_datetime(game_date_str).date(),  # or date_in if you already have it
-    days_back=int(days_back),
-)
+    events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back)) or []
 
     last_played: Dict[str, date] = {}
     for ev in events:
-        home_raw = ev.get("home_team")
-        away_raw = ev.get("away_team")
+        home_raw = ev.get("home")
+        away_raw = ev.get("away")
+
         if not home_raw or not away_raw:
             continue
-        home = canon_team(home_raw)
-        away = canon_team(away_raw)
+
+        home = canon_team(home_raw) or str(home_raw)
+        away = canon_team(away_raw) or str(away_raw)
+
         d = _parse_iso_date(ev.get("commence_time") or "")
         if d is None:
             continue
+
         if (home not in last_played) or (d > last_played[home]):
             last_played[home] = d
         if (away not in last_played) or (d > last_played[away]):
             last_played[away] = d
-    return last_played
 
+    return last_played
 
 def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, Dict[str, float]]:
     sport_key = SPORT_TO_ODDS_KEY.get("nba")
