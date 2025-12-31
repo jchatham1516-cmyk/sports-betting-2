@@ -531,7 +531,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
     team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS, as_of_date=target_date or datetime.utcnow().date())
     if team_tbl is None or team_tbl.empty:
-        team_tbl = _build_team_scoring_table(days_back=60)
+        team_tbl = _build_team_scoring_table(days_back=60, as_of_date=date_in)
 
     league_pts = 110.0
     try:
