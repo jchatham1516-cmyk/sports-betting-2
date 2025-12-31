@@ -10,6 +10,8 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from sports.common.scores_sources import fetch_scores_history_by_day
+from sports.common.scores_sources import fetch_recent_scores, fetch_scores_history_by_day
 from sports.common.teams import canon_team
 from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.scores_sources import fetch_recent_scores
@@ -263,38 +265,52 @@ def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
         return f"No total bet (edge_vs_be<{TOTAL_MIN_EDGE_VS_BE:.3f})"
     return f"Model PICK TOTAL: {side}"
 
-def _build_team_scoring_table(days_back: int) -> pd.DataFrame:
+def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
     """
     Build a team scoring table over the last `days_back` days.
     Returns columns: team, pts_for, pts_against (one row per team-game).
-    """
-   sport_key = SPORT_TO_ODDS_KEY["nba"]
-   scores = fetch_recent_scores(sport_key=sport_key, days_from=3) or []
 
-    if not scores:
+    Uses historical events endpoint so days_back can be > 3.
+    """
+    sport_key = SPORT_TO_ODDS_KEY["nba"]
+
+    # Pull many days via historical events (not the 1..3 "scores" endpoint)
+    events = fetch_scores_history_by_day(
+        sport_key=sport_key,
+        as_of_date=as_of_date,
+        days_back=int(days_back),
+    ) or []
+
+    if not events:
         return pd.DataFrame(columns=["team", "pts_for", "pts_against"])
 
-    # --- robust score lookup: store raw AND canonical names ---
-    score_map = {}
-    for s in scores:
-        nm = s.get("name")
-        sc = s.get("score")
-        if not nm:
-            continue
-        score_map[nm] = sc
-        c = canon_team(nm)
-        if c:
-            score_map[c] = sc
-
     rows = []
-    for g in scores:
-        home_raw = g.get("home")
-        away_raw = g.get("away")
-        home = canon_team(home_raw) or (home_raw or "")
-        away = canon_team(away_raw) or (away_raw or "")
+    for ev in events:
+        # Odds API event fields
+        home_raw = ev.get("home_team") or ev.get("home")
+        away_raw = ev.get("away_team") or ev.get("away")
 
-        hs = score_map.get(home_raw) or score_map.get(home)
-        as_ = score_map.get(away_raw) or score_map.get(away)
+        scores = ev.get("scores")  # list like [{"name": "...", "score": ...}, ...]
+        if not home_raw or not away_raw or not isinstance(scores, list):
+            continue
+
+        # Robust score lookup: store raw AND canonical names
+        score_map = {}
+        for s in scores:
+            nm = s.get("name")
+            sc = s.get("score")
+            if nm is None or sc is None:
+                continue
+            score_map[str(nm)] = sc
+            c = canon_team(str(nm))
+            if c:
+                score_map[c] = sc
+
+        home = canon_team(home_raw) or str(home_raw)
+        away = canon_team(away_raw) or str(away_raw)
+
+        hs = score_map.get(str(home_raw)) or score_map.get(home)
+        as_ = score_map.get(str(away_raw)) or score_map.get(away)
 
         if hs is None or as_ is None:
             continue
@@ -346,7 +362,11 @@ def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
 
 def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
     sport_key = SPORT_TO_ODDS_KEY["nba"]
-    events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
+events = fetch_scores_history_by_day(
+    sport_key=sport_key,
+    as_of_date=pd.to_datetime(game_date_str).date(),  # or date_in if you already have it
+    days_back=int(days_back),
+)
 
     last_played: Dict[str, date] = {}
     for ev in events:
@@ -550,9 +570,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
     league_avg_total = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 14.0
 
-    team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS)
+    team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS, as_of_date=date_in)
     if team_tbl is None or team_tbl.empty:
-        team_tbl = _build_team_scoring_table(days_back=120)
+        team_tbl = _build_team_scoring_table(days_back=60)
 
     league_pts = 110.0
     try:
