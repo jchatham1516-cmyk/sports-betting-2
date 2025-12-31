@@ -268,7 +268,9 @@ def _build_team_scoring_table(days_back: int) -> pd.DataFrame:
     Build a team scoring table over the last `days_back` days.
     Returns columns: team, pts_for, pts_against (one row per team-game).
     """
-    scores = fetch_recent_scores("nba", days_back=days_back) or []
+   sport_key = SPORT_TO_ODDS_KEY["nba"]
+   scores = fetch_recent_scores(sport_key=sport_key, days_from=3) or []
+
     if not scores:
         return pd.DataFrame(columns=["team", "pts_for", "pts_against"])
 
@@ -390,7 +392,16 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
         if not home or not away:
             continue
 
-        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
+score_map = {}
+for s in scores:
+    nm = s.get("name")
+    sc = s.get("score")
+    if not nm:
+        continue
+    score_map[nm] = sc
+    c = canon_team(nm)
+    if c:
+        score_map[c] = sc
         try:
             hs = float(score_map.get(home_raw) or score_map.get(home))
             aw = float(score_map.get(away_raw) or score_map.get(away))
