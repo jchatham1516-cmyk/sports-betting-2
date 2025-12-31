@@ -184,20 +184,24 @@ def _ml_recommendation(p_home: float, mkt_home_p: float, *, min_edge: float = 0.
         return "Model PICK: HOME ML (strong)"
     return "Model PICK: AWAY ML (strong)"
 
-
 def _margin_model_spread_from_elo_diff(elo_diff: float) -> float:
     """
-    Convert elo_diff -> model_spread_home (market convention: negative = home favored).
-    Uses saved margin calibration if present; otherwise linear fallback.
+    Convert elo_diff -> model_spread_home (negative means home favored).
+    Robust fallback if the margin calibrator is missing/bad.
     """
+    # 1) try calibrator
     try:
         cal = load_margin_cal(MARGIN_CAL_PATH)
         if cal is not None:
-            return float(cal.predict(float(elo_diff)))
+            y = float(cal.predict(float(elo_diff)))
+            if not np.isnan(y) and abs(y) <= 200:  # sanity
+                return y
     except Exception:
         pass
-    return float(-elo_diff / 30.0)  # ~30 Elo ~= 1 point
 
+    # 2) fallback linear mapping (tunable)
+    # Positive elo_diff => home stronger => home favored => negative spread
+    return float(-elo_diff / 30.0)  # ~30 Elo ≈ 1 point
 
 # ----------------------------
 # Historical totals (your repo format)
@@ -211,6 +215,18 @@ def _team_hist_total_stats(team: str, hist: Dict[str, Dict[str, float]]) -> Tupl
     sd = _safe_float(d.get("sd"))
     n = int(d.get("n") or 0)
     return (float(avg), float(sd), int(n))
+def _lookup_hist(team: str, hist: Dict[str, Dict[str, float]]) -> Optional[Dict[str, float]]:
+    if not hist:
+        return None
+    t = canon_team(team) or team
+    if t in hist:
+        return hist[t]
+    # fallback: case-insensitive search
+    tl = t.lower()
+    for k, v in hist.items():
+        if str(k).lower() == tl:
+            return v
+    return None
 
 
 # ----------------------------
@@ -290,8 +306,8 @@ def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd
 
     def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
         sub = team_tbl[team_tbl["team"] == t]
-        if sub.empty or len(sub) < PTS_MIN_GAMES:
-            return (None, None)
+    if sub.empty:
+        return (None, None)
         return (float(sub["pts_for"].mean()), float(sub["pts_against"].mean()))
 
     hf, ha = _team_means(home)
@@ -364,7 +380,7 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
             eh = st.get(home)
             ea = st.get(away)
 
-            p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
+            p_raw = float(elo_win_prob(eh + HOME_ADV, ea))
             p_comp = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
 
             train_ps.append(p_comp)
