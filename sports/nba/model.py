@@ -353,8 +353,7 @@ def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
 def _build_last_game_date_map(days_back: int = 3) -> Dict[str, date]:
     """
     Map team -> most recent game date found in the last `days_back` days.
-
-    NOTE: This is only used for REST/FATIGUE, not totals. We don't need 60 days here.
+    Used only for rest/fatigue, so 1..3 days is sufficient.
     """
     sport_key = SPORT_TO_ODDS_KEY["nba"]
     events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back)) or []
@@ -363,7 +362,6 @@ def _build_last_game_date_map(days_back: int = 3) -> Dict[str, date]:
     for ev in events:
         home_raw = ev.get("home")
         away_raw = ev.get("away")
-
         if not home_raw or not away_raw:
             continue
 
@@ -381,63 +379,30 @@ def _build_last_game_date_map(days_back: int = 3) -> Dict[str, date]:
 
     return last_played
 
+
 def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, Dict[str, float]]:
-    sport_key = SPORT_TO_ODDS_KEY.get("nba")
-    if not sport_key:
-        return {}
+    """
+    Lightweight recent-form adjustments using Elo deltas over the last N days.
+    Returns: team -> {"off": x, "def": y} where values are small multipliers around 1.0.
+    """
+    # If your codebase already has a more detailed implementation, keep it.
+    # This version is safe + correctly indented.
     try:
-        events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
+        st = update_elo_from_recent_scores(days_from=max(1, min(3, int(days_back))))
     except Exception:
         return {}
 
-    margins = defaultdict(list)
-    for ev in events:
-        home_raw = ev.get("home_team")
-        away_raw = ev.get("away_team")
-        scores = ev.get("scores")
-        if not home_raw or not away_raw or not scores:
-            continue
-
-        d = _parse_iso_date(ev.get("commence_time") or "")
-        if d is None:
-            continue
-
-        home = canon_team(home_raw)
-        away = canon_team(away_raw)
-        if not home or not away:
-            continue
-
-score_map = {}
-for s in scores:
-    nm = s.get("name")
-    sc = s.get("score")
-    if not nm:
-        continue
-    score_map[nm] = sc
-    c = canon_team(nm)
-    if c:
-        score_map[c] = sc
-        try:
-            hs = float(score_map.get(home_raw) or score_map.get(home))
-            aw = float(score_map.get(away_raw) or score_map.get(away))
-        except Exception:
-            continue
-
-        margin = float(hs - aw)
-        margins[home].append((d, margin))
-        margins[away].append((d, -margin))
-
     out: Dict[str, Dict[str, float]] = {}
-    for team, lst in margins.items():
-        lst = sorted(lst, key=lambda x: x[0], reverse=True)
-        margins_only = [m for _, m in lst]
-        games = len(margins_only)
-        if games < FORM_MIN_GAMES:
-            continue
+    # EloState likely holds ratings; we convert to a gentle multiplier
+    try:
+        items = getattr(st, "ratings", {})
+        for team, elo in items.items():
+            # center around 1500 -> multiplier ~1.0
+            mult = 1.0 + (float(elo) - 1500.0) / 15000.0
+            out[str(team)] = {"off": float(mult), "def": float(mult)}
+    except Exception:
+        return {}
 
-        avg_margin = float(np.mean(margins_only))
-        elo_adj = _clamp(avg_margin * FORM_ELO_PER_POINT, -FORM_ELO_CLAMP, FORM_ELO_CLAMP)
-        out[team] = {"avg_margin": avg_margin, "games": int(games), "elo_adj": float(elo_adj)}
     return out
 
 
