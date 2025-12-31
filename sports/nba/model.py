@@ -9,10 +9,10 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from sports.common.scores_sources import fetch_recent_scores, fetch_scores_history_by_day
 from sports.common.teams import canon_team
 from sports.common.elo import EloState, elo_win_prob, elo_update
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
+from sports.common.scores_sources import fetch_recent_scores, fetch_scores_history_by_day
 from sports.common.historical_totals import build_team_historical_total_lines
 from sports.nba.injuries import (
     fetch_official_nba_injuries,
@@ -39,7 +39,6 @@ ELO_PER_POINT = float(os.getenv("NBA_ELO_PER_POINT", "40.0"))
 MAX_ABS_INJ_POINTS = float(os.getenv("NBA_MAX_ABS_INJ_POINTS", "6.0"))
 INJ_DAMP = float(os.getenv("NBA_INJ_DAMP", "0.60"))
 
-# NOTE: you said you want to stop hard capping it — we won’t clamp spread to this anymore
 MAX_ABS_MODEL_SPREAD = float(os.getenv("NBA_MAX_ABS_MODEL_SPREAD", "17.0"))
 
 SHORT_REST_PENALTY_ELO = float(os.getenv("NBA_SHORT_REST_PENALTY_ELO", "-14.0"))
@@ -82,7 +81,8 @@ TOTAL_USE_MARKET_FALLBACK = os.getenv("NBA_TOTAL_USE_MARKET_FALLBACK", "0") == "
 TOTAL_LINE_BLEND = float(os.getenv("NBA_TOTAL_LINE_BLEND", "0.35"))  # weight on historical lines vs scoring model
 
 # Recent scoring model
-PTS_LOOKBACK_DAYS = int(os.getenv("NBA_PTS_LOOKBACK_DAYS", "45"))
+# (You asked for 60; keep env override but default higher than 4)
+PTS_LOOKBACK_DAYS = int(os.getenv("NBA_PTS_LOOKBACK_DAYS", "60"))
 PTS_MIN_GAMES = int(os.getenv("NBA_PTS_MIN_GAMES", "3"))
 PTS_REGRESS = float(os.getenv("NBA_PTS_REGRESS", "0.30"))
 PTS_LEAGUE_CLAMP_MIN = float(os.getenv("NBA_PTS_LEAGUE_CLAMP_MIN", "104.0"))
@@ -265,6 +265,10 @@ def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
 
 
 def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
+    """
+    Pull completed game scores for the last `days_back` days (as-of `as_of_date`)
+    and return team-level rows: team, pts_for, pts_against.
+    """
     sport_key = SPORT_TO_ODDS_KEY["nba"]
 
     events = fetch_scores_history_by_day(
@@ -311,18 +315,15 @@ def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["team", "pts_for", "pts_against"])
 
 
-# ---------------------------
-# FIXED: this function was the reason all model_total values were identical.
-# It must actually compute team-specific expected points using team_tbl.
-# ---------------------------
 def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd.DataFrame) -> Tuple[float, float, float]:
+    """
+    Core totals engine: expected points from (team pts_for) vs (opp pts_against).
+    This MUST vary by matchup; if data missing, fall back gracefully.
+    """
     if team_tbl is None or team_tbl.empty or league_pts <= 1e-6:
         return (league_pts, league_pts, 2.0 * league_pts)
 
     def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
-        if team_tbl is None or team_tbl.empty:
-            return (None, None)
-
         t0 = (t or "").strip()
         t1 = canon_team(t0) or t0
 
@@ -339,13 +340,14 @@ def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd
     af, aa = _team_means(away)
 
     def _strength(x: Optional[float]) -> float:
-        if x is None or (isinstance(x, float) and np.isnan(x)):
+        if x is None or np.isnan(x):
             return 1.0
         raw = float(x) / float(league_pts)
+        # regress toward league average (1.0)
         return float((1.0 - PTS_REGRESS) * raw + PTS_REGRESS * 1.0)
 
     home_off = _strength(hf)
-    home_def = _strength(ha)  # higher allowed means weaker defense
+    home_def = _strength(ha)
     away_off = _strength(af)
     away_def = _strength(aa)
 
@@ -354,10 +356,10 @@ def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd
     return (exp_home, exp_away, float(exp_home + exp_away))
 
 
-def _build_last_game_date_map(days_back: int = 3) -> Dict[str, date]:
+def _build_last_game_date_map(days_back: int = 21) -> Dict[str, date]:
     """
     Map team -> most recent game date found in the last `days_back` days.
-    Used only for rest/fatigue; scores endpoint supports 1..3 days.
+    Used for rest/fatigue (21 is safe; doesn’t change totals).
     """
     sport_key = SPORT_TO_ODDS_KEY["nba"]
     events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back)) or []
@@ -390,16 +392,16 @@ def _recent_form_adjustments(days_back: int = FORM_LOOKBACK_DAYS) -> Dict[str, D
     Returns: team -> {"off": x, "def": y} where values are small multipliers around 1.0.
     """
     try:
-        st = update_elo_from_recent_scores(days_from=max(1, min(3, int(days_back))))
+        st = update_elo_from_recent_scores(days_from=max(7, min(int(days_back), 120)))
     except Exception:
         return {}
 
     out: Dict[str, Dict[str, float]] = {}
     try:
-        items = getattr(st, "ratings", {})
+        items = getattr(st, "ratings", {}) or {}
         for team, elo in items.items():
             mult = 1.0 + (float(elo) - 1500.0) / 15000.0
-            out[str(team)] = {"off": float(mult), "def": float(mult)}
+            out[str(team)] = {"elo_adj": (float(elo) - 1500.0) / 50.0, "off": float(mult), "def": float(mult)}
     except Exception:
         return {}
 
@@ -413,7 +415,7 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     train_days = int(days_from) if days_from is not None else int(ELO_TRAIN_DAYS)
     train_days = int(max(7, train_days))
 
-    events = fetch_recent_scores(sport_key=sport_key, days_from=train_days)
+    events = fetch_recent_scores(sport_key=sport_key, days_from=train_days) or []
 
     train_ps: list[float] = []
     train_ys: list[float] = []
@@ -421,8 +423,8 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     train_margins: list[float] = []
 
     for ev in events:
-        home_raw = ev.get("home_team")
-        away_raw = ev.get("away_team")
+        home_raw = ev.get("home_team") or ev.get("home")
+        away_raw = ev.get("away_team") or ev.get("away")
         scores = ev.get("scores")
         if not home_raw or not away_raw or not scores:
             continue
@@ -436,10 +438,20 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
         if st.is_processed(game_key):
             continue
 
-        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
+        score_map = {}
+        for s in scores:
+            nm = s.get("name")
+            sc = s.get("score")
+            if nm is None or sc is None:
+                continue
+            score_map[str(nm)] = sc
+            c = canon_team(str(nm))
+            if c:
+                score_map[c] = sc
+
         try:
-            hs = float(score_map.get(home_raw) or score_map.get(home))
-            aw = float(score_map.get(away_raw) or score_map.get(away))
+            hs = float(score_map.get(str(home_raw)) or score_map.get(home))
+            aw = float(score_map.get(str(away_raw)) or score_map.get(away))
         except Exception:
             continue
 
@@ -491,7 +503,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
     try:
         target_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
     except Exception:
-        target_date = None
+        target_date = datetime.utcnow().date()
 
     try:
         injuries_map = fetch_official_nba_injuries()
@@ -499,7 +511,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         print(f"[nba injuries] WARNING: failed to load injuries: {e}")
         injuries_map = {}
 
-    last_played = _build_last_game_date_map(days_back=3)  # rest uses 1..3 days (scores endpoint limit)
+    last_played = _build_last_game_date_map(days_back=21)
     form_map = _recent_form_adjustments(days_back=FORM_LOOKBACK_DAYS)
 
     # Historical MARKET totals lines
@@ -530,9 +542,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
     league_avg_total = float(np.mean(league_avgs)) if league_avgs else float("nan")
     league_sd_total = float(np.mean(league_sds)) if league_sds else 14.0
 
-    # Build 45-day (or your env) scoring table as-of target_date (or today)
-    asof = target_date or datetime.utcnow().date()
-    team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS, as_of_date=asof)
+    # ✅ FIX: build scoring table as-of target_date (no date_in NameError)
+    team_tbl = _build_team_scoring_table(days_back=PTS_LOOKBACK_DAYS, as_of_date=target_date)
 
     league_pts = 110.0
     try:
@@ -621,9 +632,11 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         # Spread
         elo_diff = (eh_eff - ea_eff) + HOME_ADV
-
-        # FIX: remove hard cap clamp (you asked to stop hard capping)
-        model_spread_home = float(_margin_model_spread_from_elo_diff(float(elo_diff)))
+        model_spread_home = _clamp(
+            _margin_model_spread_from_elo_diff(float(elo_diff)),
+            -MAX_ABS_MODEL_SPREAD,
+            MAX_ABS_MODEL_SPREAD,
+        )
 
         home_spread = _safe_float((oi or {}).get("home_spread"))
         spread_price = _safe_float((oi or {}).get("spread_price"), default=ATS_DEFAULT_PRICE)
@@ -664,7 +677,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             ats_strength = _ats_strength_label(ats_edge_vs_be)
             spread_reco = _ats_reco(ats_side, ats_strength)
 
-        # TOTALS (historical market lines + scoring model)
+        # TOTALS (hybrid: recent scoring + historical market line averages)
         home_avg, home_sd = _team_line_avg_sd(home, home_in)
         away_avg, away_sd = _team_line_avg_sd(away, away_in)
 
