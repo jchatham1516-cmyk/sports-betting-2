@@ -263,45 +263,50 @@ def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
         return f"No total bet (edge_vs_be<{TOTAL_MIN_EDGE_VS_BE:.3f})"
     return f"Model PICK TOTAL: {side}"
 
-
 def _build_team_scoring_table(days_back: int) -> pd.DataFrame:
-    sport_key = SPORT_TO_ODDS_KEY["nba"]
-    events = fetch_recent_scores(sport_key=sport_key, days_from=int(days_back))
+    """
+    Build a team scoring table over the last `days_back` days.
+    Returns columns: team, pts_for, pts_against (one row per team-game).
+    """
+    scores = fetch_recent_scores("nba", days_back=days_back) or []
+    if not scores:
+        return pd.DataFrame(columns=["team", "pts_for", "pts_against"])
+
+    # --- robust score lookup: store raw AND canonical names ---
+    score_map = {}
+    for s in scores:
+        nm = s.get("name")
+        sc = s.get("score")
+        if not nm:
+            continue
+        score_map[nm] = sc
+        c = canon_team(nm)
+        if c:
+            score_map[c] = sc
 
     rows = []
-    for ev in events:
-        home_raw = ev.get("home_team")
-        away_raw = ev.get("away_team")
-        scores = ev.get("scores")
-        if not home_raw or not away_raw or not scores:
+    for g in scores:
+        home_raw = g.get("home")
+        away_raw = g.get("away")
+        home = canon_team(home_raw) or (home_raw or "")
+        away = canon_team(away_raw) or (away_raw or "")
+
+        hs = score_map.get(home_raw) or score_map.get(home)
+        as_ = score_map.get(away_raw) or score_map.get(away)
+
+        if hs is None or as_ is None:
             continue
 
-        home = canon_team(home_raw)
-        away = canon_team(away_raw)
-        if not home or not away:
-            continue
-            
-score_map = {}
-for s in scores:
-    nm = s.get("name")
-    sc = s.get("score")
-    if not nm:
-        continue
-    score_map[nm] = sc
-    c = canon_team(nm)
-    if c:
-        score_map[c] = sc
+        rows.append({"team": home, "pts_for": float(hs), "pts_against": float(as_)})
+        rows.append({"team": away, "pts_for": float(as_), "pts_against": float(hs)})
 
-        rows.append({"team": home, "opp": away, "pts_for": hs, "pts_against": aw})
-        rows.append({"team": away, "opp": home, "pts_for": aw, "pts_against": hs})
-
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["team", "pts_for", "pts_against"])
 
 
 def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd.DataFrame) -> Tuple[float, float, float]:
     if team_tbl is None or team_tbl.empty or league_pts <= 1e-6:
         return (league_pts, league_pts, 2.0 * league_pts)
-
+        
 def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
     if team_tbl is None or team_tbl.empty:
         return (None, None)
