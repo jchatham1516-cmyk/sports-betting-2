@@ -317,40 +317,44 @@ def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
 
 def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd.DataFrame) -> Tuple[float, float, float]:
     """
-    Objective expected total using recent scoring table.
+    Objective expected points using recent scoring table.
+    Returns (exp_home_pts, exp_away_pts, exp_total).
     """
     if team_tbl is None or team_tbl.empty or np.isnan(league_pts) or league_pts <= 1e-6:
         return (league_pts, league_pts, 2.0 * league_pts)
 
-    def _team_means(t: str) -> Tuple[Optional[float], Optional[float]]:
-        sub = team_tbl[team_tbl["team"] == t]
-    if sub.empty:
-        return (None, None)
-        return (float(sub["pts_for"].mean()), float(sub["pts_against"].mean()))
+    def _team_means(team: str) -> Tuple[Optional[float], Optional[float], int]:
+        # IMPORTANT: define sub here so it always exists
+        sub = team_tbl[team_tbl["team"] == team]
+        if sub.empty:
+            return (None, None, 0)
+        pf = float(sub["pts_for"].mean())
+        pa = float(sub["pts_against"].mean())
+        n = int(len(sub))
+        return (pf, pa, n)
 
-    hf, ha = _team_means(home)
-    af, aa = _team_means(away)
+    h_pf, h_pa, _ = _team_means(home)
+    a_pf, a_pa, _ = _team_means(away)
 
-    def _strength(x: Optional[float]) -> float:
-        if x is None or np.isnan(x):
+    # convert to relative strengths, regressed toward league
+    def _rel(v: Optional[float]) -> float:
+        if v is None or np.isnan(v):
             return 1.0
-        raw = float(x) / float(league_pts)
-        # regress to 1.0 (league)
+        raw = float(v) / float(league_pts)
         return float((1.0 - PTS_REGRESS) * raw + PTS_REGRESS * 1.0)
 
-    home_off = _strength(hf)
-    home_def = _strength(ha)
-    away_off = _strength(af)
-    away_def = _strength(aa)
+    home_off = _rel(h_pf)
+    home_def = _rel(h_pa)   # higher allowed => weaker defense (we keep it multiplicative)
+    away_off = _rel(a_pf)
+    away_def = _rel(a_pa)
 
-    exp_home = float(league_pts * home_off * away_def)
-    exp_away = float(league_pts * away_off * home_def)
+    exp_home = float(league_pts) * home_off * away_def
+    exp_away = float(league_pts) * away_off * home_def
 
     exp_home = _clamp(exp_home, PTS_LEAGUE_CLAMP_MIN, PTS_LEAGUE_CLAMP_MAX)
     exp_away = _clamp(exp_away, PTS_LEAGUE_CLAMP_MIN, PTS_LEAGUE_CLAMP_MAX)
 
-    return (exp_home, exp_away, float(exp_home + exp_away))
-
+    return (float(exp_home), float(exp_away), float(exp_home + exp_away))
 
 # ----------------------------
 # Elo + calibration
