@@ -266,15 +266,8 @@ def _total_reco(side: str, edge_vs_be: float, edge_points: float) -> str:
     return f"Model PICK TOTAL: {side}"
 
 def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
-    """
-    Build a team scoring table over the last `days_back` days.
-    Returns columns: team, pts_for, pts_against (one row per team-game).
-
-    Uses historical events endpoint so days_back can be > 3.
-    """
     sport_key = SPORT_TO_ODDS_KEY["nba"]
 
-    # Pull many days via historical events (not the 1..3 "scores" endpoint)
     events = fetch_scores_history_by_day(
         sport_key=sport_key,
         as_of_date=as_of_date,
@@ -286,15 +279,13 @@ def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
 
     rows = []
     for ev in events:
-        # Odds API event fields
         home_raw = ev.get("home_team") or ev.get("home")
         away_raw = ev.get("away_team") or ev.get("away")
+        scores = ev.get("scores")
 
-        scores = ev.get("scores")  # list like [{"name": "...", "score": ...}, ...]
         if not home_raw or not away_raw or not isinstance(scores, list):
             continue
 
-        # Robust score lookup: store raw AND canonical names
         score_map = {}
         for s in scores:
             nm = s.get("name")
