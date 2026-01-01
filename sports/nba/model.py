@@ -491,6 +491,33 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         print(f"[nba totals] WARNING: failed to build historical totals lines: {e}")
         hist_lines = {}
 
+    # Blend league anchors with historical totals so totals do not collapse when scoring table is sparse
+    hist_avgs: list[float] = []
+    hist_sds: list[float] = []
+    for v in (hist_lines or {}).values():
+        try:
+            if v.get("avg") is not None:
+                hist_avgs.append(float(v.get("avg")))
+            if v.get("sd") is not None and not np.isnan(float(v.get("sd"))):
+                hist_sds.append(float(v.get("sd")))
+        except Exception:
+            continue
+
+    hist_league_avg = float(np.mean(hist_avgs)) if hist_avgs else float("nan")
+    hist_league_sd = float(np.mean(hist_sds)) if hist_sds else float("nan")
+
+    if not np.isnan(hist_league_avg):
+        if np.isnan(league_avg_total):
+            league_avg_total = hist_league_avg
+        else:
+            league_avg_total = float(0.5 * league_avg_total + 0.5 * hist_league_avg)
+
+    if not np.isnan(hist_league_sd):
+        if np.isnan(league_sd_total):
+            league_sd_total = hist_league_sd
+        else:
+            league_sd_total = float(0.5 * league_sd_total + 0.5 * hist_league_sd)
+
     # injuries
     try:
         injury_data = fetch_official_nba_injuries()

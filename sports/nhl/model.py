@@ -337,6 +337,19 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     except Exception:
         league_pts = 3.0
 
+    # If historical lines were empty, anchor league totals to the scoring table so totals model still runs
+    if np.isnan(league_avg_total) and not np.isnan(league_pts):
+        try:
+            league_avg_total = float(2.0 * league_pts)
+        except Exception:
+            pass
+
+    if np.isnan(league_sd_total) and team_tbl is not None and not team_tbl.empty:
+        try:
+            league_sd_total = float((team_tbl["pts_for"] + team_tbl["pts_against"]).std(ddof=0))
+        except Exception:
+            pass
+
     def _team_line_avg_sd(team_canon: str, team_raw: str) -> Tuple[float, float]:
         for k in [team_canon, team_raw, (team_raw or "").strip(), (team_canon or "").strip()]:
             if not k:
