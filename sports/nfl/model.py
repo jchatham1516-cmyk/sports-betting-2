@@ -600,6 +600,19 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     except Exception:
         league_pts = 22.0
 
+    # If historical totals are missing, anchor league totals to scoring table to stabilize outputs
+    if np.isnan(league_avg_total_line) and team_tbl is not None and not team_tbl.empty:
+        try:
+            league_avg_total_line = float((team_tbl["pts_for"] + team_tbl["pts_against"]).mean())
+        except Exception:
+            pass
+
+    if np.isnan(league_sd_total) and team_tbl is not None and not team_tbl.empty:
+        try:
+            league_sd_total = float((team_tbl["pts_for"] + team_tbl["pts_against"]).std(ddof=0))
+        except Exception:
+            pass
+
     rows = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
