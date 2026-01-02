@@ -664,9 +664,16 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             except Exception:
                 pass
 
-        edge_home = float(p_home - mkt_home_p) if not (np.isnan(p_home) or np.isnan(mkt_home_p)) else float("nan")
+        BLEND_W = 0.65
+        p_home_blend = (
+            float(BLEND_W * p_home + (1.0 - BLEND_W) * mkt_home_p)
+            if not (np.isnan(p_home) or np.isnan(mkt_home_p))
+            else float(p_home)
+        )
+
+        edge_home = float(p_home_blend - mkt_home_p) if not (np.isnan(p_home_blend) or np.isnan(mkt_home_p)) else float("nan")
         edge_away = float(-edge_home) if not np.isnan(edge_home) else float("nan")
-        ml_reco = _ml_recommendation(p_home, mkt_home_p, min_edge=MIN_ML_EDGE)
+        ml_reco = _ml_recommendation(p_home_blend, mkt_home_p, min_edge=MIN_ML_EDGE)
 
         # -------- spread / margin (clean, single path) --------
         elo_diff = (eh + HOME_ADV) - ea
@@ -791,7 +798,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "date": game_date_str,
                 "home": home,
                 "away": away,
-                "model_home_prob": float(p_home),
+                "model_home_prob": float(p_home_blend),
+                "model_home_prob_raw": float(p_home),
                 "market_home_imp": float(p_home_imp) if not np.isnan(p_home_imp) else np.nan,
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "market_home_delta": float(market_home_delta) if not np.isnan(market_home_delta) else np.nan,
