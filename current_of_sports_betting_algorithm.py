@@ -9,7 +9,7 @@ import pandas as pd
 
 from recommendations import add_recommendations_to_df, Thresholds
 
-from sports.common.eval import evaluate_predictions
+from sports.common.eval import evaluate_predictions, update_eval_history_with_scores
 from sports.common.odds_sources import (
     fetch_odds_for_date_from_odds_api,
     fetch_odds_for_date_from_csv,
@@ -254,6 +254,16 @@ def main(argv=None):
         print(f"[eval] Saved daily evaluation -> {eval_out}")
     except Exception as e:
         print(f"[eval] WARNING: failed to save evaluation CSV: {e}")
+
+    try:
+        update_eval_history_with_scores(
+            sport=args.sport,
+            preds_dir="results",
+            out_path=f"results/eval_history_{args.sport}.csv",
+            days_back=14,
+        )
+    except Exception as e:
+        print(f"[eval history] WARNING: rolling evaluation update failed: {e}")
     return 0
 
 

@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import math
+import re
+from datetime import date, datetime
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
+from sports.common.odds_sources import (
+    SPORT_TO_ODDS_KEY,
+    _parse_spread_from_bookmakers,
+    _parse_total_from_bookmakers,
+)
+from sports.common.scores_sources import fetch_scores_history_by_day
 from sports.common.teams import canon_team
 
 
@@ -28,6 +37,36 @@ def _find_score_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]
     home_col = next((c for c in score_candidates if c in df.columns), None)
     away_col = next((c for c in opp_candidates if c in df.columns), None)
     return home_col, away_col
+
+
+def _to_iso_date_str(date_in) -> str:
+    if date_in is None:
+        return ""
+
+    try:
+        dt = pd.to_datetime(date_in, errors="coerce")
+        if pd.notna(dt):
+            return dt.date().isoformat()
+    except Exception:
+        pass
+
+    try:
+        dt = datetime.strptime(str(date_in), "%m/%d/%Y")
+        return dt.date().isoformat()
+    except Exception:
+        return str(date_in)
+
+
+def build_game_key(event_id, date_str: str, home: str, away: str) -> str:
+    """Stable key for matching predictions to scores."""
+
+    if event_id is not None:
+        event_id_str = str(event_id).strip()
+        if event_id_str:
+            return event_id_str
+
+    date_iso = _to_iso_date_str(date_str)
+    return f"{date_iso}|{canon_team(home)}|{canon_team(away)}"
 
 
 def brier_score(y_true: Iterable[float], p: Iterable[float]) -> float:
@@ -218,3 +257,292 @@ def evaluate_predictions(
         ]
     )
     return out_row
+
+
+def _load_recent_predictions(
+    sport: str,
+    *,
+    preds_dir: str,
+    today: date,
+    days_back: int,
+) -> pd.DataFrame:
+    files: List[Path] = []
+    pattern = re.compile(rf"predictions_{sport}_(\d{{2}}-\d{{2}}-\d{{4}})\.csv")
+    for path in Path(preds_dir).glob(f"predictions_{sport}_*.csv"):
+        match = pattern.search(path.name)
+        game_date = None
+        if match:
+            try:
+                game_date = datetime.strptime(match.group(1), "%m-%d-%Y").date()
+            except Exception:
+                game_date = None
+        if game_date is None:
+            files.append(path)
+            continue
+        if (today - game_date).days <= days_back:
+            files.append(path)
+
+    frames: List[pd.DataFrame] = []
+    for path in files:
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            continue
+
+        df = df.copy()
+        df["__source_file"] = path.name
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    out = pd.concat(frames, ignore_index=True)
+
+    if "game_key" not in out.columns:
+        out["game_key"] = out.apply(
+            lambda r: build_game_key(
+                r.get("event_id"),
+                r.get("date"),
+                r.get("home"),
+                r.get("away"),
+            ),
+            axis=1,
+        )
+    else:
+        out["game_key"] = out["game_key"].fillna(
+            out.apply(
+                lambda r: build_game_key(
+                    r.get("event_id"),
+                    r.get("date"),
+                    r.get("home"),
+                    r.get("away"),
+                ),
+                axis=1,
+            )
+        )
+
+    return out
+
+
+def _scores_events_to_df(events: List[Dict[str, object]]) -> pd.DataFrame:
+    rows: List[Dict[str, object]] = []
+    for ev in events or []:
+        home = canon_team(ev.get("home_team")) if ev.get("home_team") else None
+        away = canon_team(ev.get("away_team")) if ev.get("away_team") else None
+        if not home or not away:
+            continue
+
+        commence = ev.get("commence_time") or ""
+        event_id = ev.get("id")
+        game_date_iso = _to_iso_date_str(commence)
+
+        scores = ev.get("scores") or []
+        home_score = np.nan
+        away_score = np.nan
+        for s in scores:
+            try:
+                name = canon_team(s.get("name"))
+                sc = float(s.get("score"))
+            except Exception:
+                continue
+            if name == home:
+                home_score = sc
+            elif name == away:
+                away_score = sc
+
+        if np.isnan(home_score) or np.isnan(away_score):
+            continue
+
+        bookmakers = ev.get("bookmakers") or []
+        closing_spread, closing_spread_price = _parse_spread_from_bookmakers(bookmakers, ev.get("home_team"))
+        closing_total, closing_over_price, closing_under_price = _parse_total_from_bookmakers(bookmakers)
+
+        rows.append(
+            {
+                "game_key": build_game_key(event_id, game_date_iso, home, away),
+                "event_id": event_id or "",
+                "home": home,
+                "away": away,
+                "home_score": home_score,
+                "away_score": away_score,
+                "score_date": game_date_iso,
+                "commence_time": commence,
+                "closing_home_spread": float(closing_spread) if closing_spread is not None else float("nan"),
+                "closing_spread_price": closing_spread_price if closing_spread_price is not None else np.nan,
+                "closing_total_points": float(closing_total) if closing_total is not None else float("nan"),
+                "closing_over_price": closing_over_price if closing_over_price is not None else np.nan,
+                "closing_under_price": closing_under_price if closing_under_price is not None else np.nan,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def update_eval_history_with_scores(
+    *,
+    sport: str,
+    preds_dir: str,
+    out_path: str,
+    days_back: int = 14,
+) -> pd.DataFrame:
+    today = datetime.utcnow().date()
+    preds = _load_recent_predictions(sport, preds_dir=preds_dir, today=today, days_back=days_back)
+    if preds.empty:
+        print("[eval history] No recent predictions found; skipping rolling eval update.")
+        return pd.DataFrame()
+
+    sport_key = SPORT_TO_ODDS_KEY.get(sport)
+    if not sport_key:
+        print(f"[eval history] Unsupported sport for rolling eval: {sport}")
+        return pd.DataFrame()
+
+    events = fetch_scores_history_by_day(sport_key, as_of_date=today, days_back=days_back)
+    scores_df = _scores_events_to_df(events)
+    if scores_df.empty:
+        print("[eval history] No completed scores fetched; skipping.")
+        return pd.DataFrame()
+
+    preds = preds.drop_duplicates(subset=["game_key"], keep="last")
+    merged = preds.merge(scores_df, on="game_key", how="inner", suffixes=("", "_score"))
+    if merged.empty:
+        print("[eval history] No prediction/score overlaps; skipping.")
+        return pd.DataFrame()
+
+    merged["actual_home_win"] = merged.apply(
+        lambda r: float(r.get("home_score") > r.get("away_score")) if not (pd.isna(r.get("home_score")) or pd.isna(r.get("away_score"))) else float("nan"),
+        axis=1,
+    )
+    merged["model_home_prob"] = pd.to_numeric(merged.get("model_home_prob"), errors="coerce")
+
+    merged["brier"] = (merged["model_home_prob"] - merged["actual_home_win"]) ** 2
+
+    eps = 1e-6
+    merged["log_loss"] = -(
+        merged["actual_home_win"] * np.log(np.clip(merged["model_home_prob"], eps, 1 - eps))
+        + (1.0 - merged["actual_home_win"]) * np.log(np.clip(1.0 - merged["model_home_prob"], eps, 1 - eps))
+    )
+
+    def _ats_outcome(row) -> Tuple[str, str]:
+        try:
+            model_spread = float(row.get("model_spread_home"))
+            closing_spread = float(row.get("closing_home_spread"))
+            hs = float(row.get("home_score"))
+            ascore = float(row.get("away_score"))
+        except Exception:
+            return ("", "")
+
+        if any(np.isnan(x) for x in [model_spread, closing_spread, hs, ascore]):
+            return ("", "")
+
+        pick = ""
+        if model_spread < closing_spread:
+            pick = "home"
+        elif model_spread > closing_spread:
+            pick = "away"
+
+        margin = hs - ascore + closing_spread
+        cover = "push"
+        if margin > 0:
+            cover = "home"
+        elif margin < 0:
+            cover = "away"
+
+        if pick and cover != "push":
+            outcome = "win" if pick == cover else "loss"
+        else:
+            outcome = "push"
+        return (pick, outcome)
+
+    def _totals_outcome(row) -> Tuple[str, str]:
+        try:
+            model_total = float(row.get("model_total"))
+            closing_total = float(row.get("closing_total_points"))
+            hs = float(row.get("home_score"))
+            ascore = float(row.get("away_score"))
+        except Exception:
+            return ("", "")
+
+        if any(np.isnan(x) for x in [model_total, closing_total, hs, ascore]):
+            return ("", "")
+
+        pick = ""
+        if model_total > closing_total:
+            pick = "over"
+        elif model_total < closing_total:
+            pick = "under"
+
+        total_scored = hs + ascore
+        result = "push"
+        if total_scored > closing_total:
+            result = "over"
+        elif total_scored < closing_total:
+            result = "under"
+
+        if pick and result != "push":
+            outcome = "win" if pick == result else "loss"
+        else:
+            outcome = "push"
+        return (pick, outcome)
+
+    merged[["ats_pick", "ats_outcome"]] = merged.apply(lambda r: pd.Series(_ats_outcome(r)), axis=1)
+    merged[["totals_pick", "totals_outcome"]] = merged.apply(lambda r: pd.Series(_totals_outcome(r)), axis=1)
+
+    keep_cols = [
+        "game_key",
+        "event_id",
+        "score_date",
+        "home",
+        "away",
+        "model_home_prob",
+        "actual_home_win",
+        "brier",
+        "log_loss",
+        "model_spread_home",
+        "closing_home_spread",
+        "ats_pick",
+        "ats_outcome",
+        "model_total",
+        "closing_total_points",
+        "totals_pick",
+        "totals_outcome",
+        "home_score",
+        "away_score",
+        "__source_file",
+    ]
+
+    merged = merged[[c for c in keep_cols if c in merged.columns]]
+
+    history = pd.DataFrame()
+    try:
+        history = pd.read_csv(out_path)
+    except Exception:
+        history = pd.DataFrame(columns=keep_cols)
+
+    combined = pd.concat([history, merged], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["game_key"], keep="last")
+
+    combined.to_csv(out_path, index=False)
+    print(f"[eval history] Saved {len(combined)} rows -> {out_path}")
+
+    combined_sorted = combined.copy()
+    combined_sorted["score_date"] = pd.to_datetime(combined_sorted["score_date"], errors="coerce")
+    combined_sorted = combined_sorted.sort_values("score_date")
+
+    last30 = combined_sorted.tail(30)
+    last100 = combined_sorted.tail(100)
+    brier30 = float(last30["brier"].mean(skipna=True)) if not last30.empty else float("nan")
+    brier100 = float(last100["brier"].mean(skipna=True)) if not last100.empty else float("nan")
+
+    ats_games = combined_sorted[combined_sorted["ats_outcome"].isin(["win", "loss"])]
+    ats_win_pct = float((ats_games["ats_outcome"] == "win").mean()) if not ats_games.empty else float("nan")
+
+    totals_games = combined_sorted[combined_sorted["totals_outcome"].isin(["win", "loss"])]
+    totals_win_pct = float((totals_games["totals_outcome"] == "win").mean()) if not totals_games.empty else float("nan")
+
+    print(
+        "last_30_games_brier={:.4f}, last_100_games_brier={:.4f}, ATS win%={:.3f}, totals win%={:.3f}".format(
+            brier30, brier100, ats_win_pct, totals_win_pct
+        )
+    )
+
+    return combined

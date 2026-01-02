@@ -328,6 +328,8 @@ def fetch_odds_for_date_from_odds_api(
         if not home or not away:
             continue
 
+        event_id = ev.get("id")
+
         bms = ev.get("bookmakers") or []
         if ODDS_PREFERRED_BOOKMAKER:
             preferred = [
@@ -345,6 +347,7 @@ def fetch_odds_for_date_from_odds_api(
         total_points, over_price, under_price = _parse_total_from_bookmakers(bms)
 
         odds_dict[(str(home), str(away))] = {
+            "event_id": event_id or "",
             "home_ml": float(home_ml) if home_ml is not None else float("nan"),
             "away_ml": float(away_ml) if away_ml is not None else float("nan"),
             "home_spread": float(home_spread) if home_spread is not None else float("nan"),
@@ -385,6 +388,8 @@ def fetch_odds_for_date_from_csv(game_date_str: str, *, sport: str) -> Tuple[dic
             if not home or not away:
                 continue
 
+            event_id = row.get("event_id")
+
             def sf(x):
                 try:
                     return float(x)
@@ -392,6 +397,7 @@ def fetch_odds_for_date_from_csv(game_date_str: str, *, sport: str) -> Tuple[dic
                     return float("nan")
 
             odds_dict[(home, away)] = {
+                "event_id": event_id or "",
                 "home_ml": sf(row.get("home_ml")),
                 "away_ml": sf(row.get("away_ml")),
                 "home_spread": sf(row.get("home_spread")),
