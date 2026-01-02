@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from sports.common.util import american_to_implied_prob
+
 
 SPORT_TO_ODDS_KEY: Dict[str, str] = {
     "nba": "basketball_nba",
@@ -121,6 +123,79 @@ def _parse_best_price_from_bookmakers(
                         # mixed signs, compare implied prob is overkill; keep first
                         pass
     return best
+
+
+def _extract_moneyline_pairs(
+    bookmakers: List[Dict[str, Any]], home_team: str, away_team: str
+) -> List[Dict[str, Any]]:
+    pairs: List[Dict[str, Any]] = []
+
+    for bm in bookmakers or []:
+        bm_key = str(bm.get("key") or "")
+        bm_title = str(bm.get("title") or "")
+        home_price: Optional[int] = None
+        away_price: Optional[int] = None
+
+        for m in (bm.get("markets") or []):
+            if m.get("key") != "h2h":
+                continue
+
+            for o in (m.get("outcomes") or []):
+                name = str(o.get("name"))
+                price = o.get("price")
+                if price is None:
+                    continue
+                try:
+                    price_i = int(price)
+                except Exception:
+                    continue
+
+                if name == str(home_team):
+                    home_price = price_i
+                elif name == str(away_team):
+                    away_price = price_i
+
+            # only one h2h market per bookmaker expected
+            break
+
+        if home_price is None or away_price is None:
+            continue
+
+        p_home = american_to_implied_prob(home_price)
+        p_away = american_to_implied_prob(away_price)
+        denom = p_home + p_away
+        if denom <= 0:
+            continue
+
+        pairs.append(
+            {
+                "home_ml": home_price,
+                "away_ml": away_price,
+                "no_vig_home": p_home / denom,
+                "bm_key": bm_key,
+                "bm_title": bm_title,
+            }
+        )
+
+    return pairs
+
+
+def _select_moneyline_pair(
+    bookmakers: List[Dict[str, Any]], home_team: str, away_team: str
+) -> Tuple[Optional[int], Optional[int], Optional[str], Optional[str]]:
+    pairs = _extract_moneyline_pairs(bookmakers, home_team, away_team)
+    if not pairs:
+        return None, None, None, None
+
+    pairs.sort(key=lambda p: p.get("no_vig_home", 0.5))
+    selected = pairs[len(pairs) // 2]
+
+    return (
+        selected.get("home_ml"),
+        selected.get("away_ml"),
+        selected.get("bm_key"),
+        selected.get("bm_title"),
+    )
 
 
 def _parse_spread_from_bookmakers(
@@ -262,8 +337,9 @@ def fetch_odds_for_date_from_odds_api(
             ]
             if preferred:
                 bms = preferred
-        home_ml = _parse_best_price_from_bookmakers(bms, "h2h", home)
-        away_ml = _parse_best_price_from_bookmakers(bms, "h2h", away)
+        home_ml, away_ml, ml_book_key, ml_book_title = _select_moneyline_pair(
+            bms, home, away
+        )
 
         home_spread, spread_price = _parse_spread_from_bookmakers(bms, home)
         total_points, over_price, under_price = _parse_total_from_bookmakers(bms)
@@ -277,6 +353,8 @@ def fetch_odds_for_date_from_odds_api(
             "over_price": float(over_price) if over_price is not None else float("nan"),
             "under_price": float(under_price) if under_price is not None else float("nan"),
             "commence_time": ev.get("commence_time"),
+            "ml_book_key": ml_book_key or "",
+            "ml_book_title": ml_book_title or "",
         }
 
     return odds_dict, spreads_dict
