@@ -458,6 +458,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             days_back=TOTAL_HIST_DAYS,
             minutes_before_commence=10,
         )
+        print(f"[hist_lines] n_teams={len(hist_lines or {})}")
     except Exception as e:
         print(f"[nba totals] WARNING: failed to build historical totals lines: {e}")
         hist_lines = {}
