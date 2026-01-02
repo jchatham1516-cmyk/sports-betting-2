@@ -546,7 +546,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         # -------- spread / margin (clean, single path) --------
         elo_diff = (eh + HOME_ADV) - ea
-        model_spread_home = float(-float(elo_diff) / 28.0)
+        model_spread_home = float(-float(elo_diff) / 16.0)
         model_spread_home = float(_clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
         mu_margin_home = float(-model_spread_home)
 
