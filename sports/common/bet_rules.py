@@ -24,6 +24,15 @@ MIN_PLAY_EDGE_ABS = MIN_EV_TO_PLAY
 MIN_PRIMARY_EDGE_ABS = 0.04   # not enforced here, but useful if you want later
 
 
+def _to_float(x):
+    try:
+        if x is None:
+            return np.nan
+        return float(x)
+    except Exception:
+        return np.nan
+
+
 def american_to_decimal(odds: float) -> float:
     try:
         odds = float(odds)
@@ -48,33 +57,24 @@ def breakeven_prob_from_american(odds: float) -> float:
 def profit_per_dollar_from_american(odds: float) -> float:
     """Return the profit (not total return) for a $1 stake at given odds."""
 
-    try:
-        odds = float(odds)
-    except Exception:
-        return float("nan")
-
-    if odds is None or np.isnan(odds):
+    odds = _to_float(odds)
+    if not np.isfinite(odds) or odds == 0:
         return float("nan")
     if odds > 0:
         return odds / 100.0
-    if odds < 0:
-        return 100.0 / abs(odds)
-    return float("nan")
+    return 100.0 / abs(odds)
 
 
 def ev_per_dollar(p_win: float, american_odds: float) -> float:
     """Expected profit per $1 staked for a given win prob + price."""
 
-    try:
-        p_win = float(p_win)
-    except Exception:
+    p_win = _to_float(p_win)
+    if not np.isfinite(p_win):
         return float("nan")
 
-    if p_win is None or np.isnan(p_win):
-        return float("nan")
-
+    p_win = min(1.0, max(0.0, p_win))
     profit = profit_per_dollar_from_american(american_odds)
-    if profit is None or np.isnan(profit):
+    if not np.isfinite(profit):
         return float("nan")
 
     # stake is $1; lose stake on loss

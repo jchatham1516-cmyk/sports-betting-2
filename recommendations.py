@@ -9,7 +9,7 @@ from typing import Optional, Tuple, Dict, List
 import numpy as np
 import pandas as pd
 
-from sports.common.bet_rules import breakeven_prob_from_american, ev_per_dollar
+from sports.common.bet_rules import _to_float, breakeven_prob_from_american, ev_per_dollar
 
 
 @dataclass
@@ -214,7 +214,6 @@ def add_recommendations_to_df(
     """
     out = df.copy()
     sport = str(sport or "nba").lower().strip()
-    primary_order = SPORT_PRIMARY_ORDER.get(sport, ["TOTAL", "ATS", "ML"])
 
     # Ensure market_home_prob exists if MLs exist
     if "market_home_prob" not in out.columns:
@@ -317,80 +316,60 @@ def add_recommendations_to_df(
         if c not in out.columns:
             out[c] = pd.Series([np.nan] * len(out), index=out.index, dtype=object)
 
-    for i in out.index:
-        mlr = str(out.loc[i, "ml_recommendation"])
-        atr = str(out.loc[i, "spread_recommendation"])
-        tor = str(out.loc[i, "total_recommendation"])
-
-        def _safe_num(x):
-            try:
-                if x is None:
-                    return np.nan
-                if isinstance(x, str) and x.strip() == "":
-                    return np.nan
-                return float(x)
-            except Exception:
+    def _safe_num(x):
+        try:
+            if x is None:
                 return np.nan
+            if isinstance(x, str) and x.strip() == "":
+                return np.nan
+            return float(x)
+        except Exception:
+            return np.nan
 
-        # ML EV
-        ml_ev = np.nan
-        ml_side = ""
-        if _is_real_pick(mlr):
-            p_ml = _safe_num(out.loc[i, "win_prob_home"]) if "win_prob_home" in out.columns else np.nan
-            if np.isnan(p_ml):
-                p_ml = _safe_num(out.loc[i, "model_home_prob"]) if "model_home_prob" in out.columns else np.nan
-            home_odds = _safe_num(out.loc[i, "home_ml"]) if "home_ml" in out.columns else np.nan
-            away_odds = _safe_num(out.loc[i, "away_ml"]) if "away_ml" in out.columns else np.nan
+    def _best_ev(ev_home: float, ev_away: float, home_label: str, away_label: str):
+        cands = [(ev_home, home_label), (ev_away, away_label)]
+        cands = [(v, s) for v, s in cands if np.isfinite(v)]
+        if not cands:
+            return np.nan, ""
+        return max(cands, key=lambda x: x[0])
 
-            p_ml_away = 1.0 - p_ml if not np.isnan(p_ml) else np.nan
-            ev_home = ev_per_dollar(p_ml, home_odds)
-            ev_away = ev_per_dollar(p_ml_away, away_odds)
-            cands = [(ev_home, "HOME"), (ev_away, "AWAY")]
-            cands = [(v, s) for v, s in cands if not pd.isna(v)]
-            if cands:
-                ml_ev, ml_side = max(cands, key=lambda x: x[0])
+    for i in out.index:
+        row = out.loc[i]
 
-        # ATS EV
-        ats_ev = np.nan
-        ats_side = ""
-        if _is_real_pick(atr):
-            p_home_cover = _safe_num(out.loc[i, "p_home_cover"]) if "p_home_cover" in out.columns else np.nan
-            spread_price = _safe_num(out.loc[i, "spread_price"]) if "spread_price" in out.columns else np.nan
-            ev_home = ev_per_dollar(p_home_cover, spread_price)
-            ev_away = ev_per_dollar(1.0 - p_home_cover, spread_price)
-            cands = [(ev_home, "HOME"), (ev_away, "AWAY")]
-            cands = [(v, s) for v, s in cands if not pd.isna(v)]
-            if cands:
-                ats_ev, ats_side = max(cands, key=lambda x: x[0])
+        # ML EV (NFL/NBA/NHL): use model_home_prob + odds
+        p_home = _to_float(row.get("model_home_prob", np.nan))
+        p_away = 1.0 - p_home if np.isfinite(p_home) else np.nan
+        ml_ev_home = ev_per_dollar(p_home, row.get("home_ml"))
+        ml_ev_away = ev_per_dollar(p_away, row.get("away_ml"))
+        ml_ev, ml_side = _best_ev(ml_ev_home, ml_ev_away, "HOME", "AWAY")
 
-        # TOTAL EV
-        total_ev = np.nan
-        total_side = ""
-        if _is_real_pick(tor):
-            total_points = _safe_num(out.loc[i, "total_points"]) if "total_points" in out.columns else np.nan
-            model_total = _safe_num(out.loc[i, "model_total"]) if "model_total" in out.columns else np.nan
-            total_sd = _safe_num(out.loc[i, "total_sd"]) if "total_sd" in out.columns else np.nan
-            over_price = _safe_num(out.loc[i, "total_over_price"]) if "total_over_price" in out.columns else np.nan
-            under_price = _safe_num(out.loc[i, "total_under_price"]) if "total_under_price" in out.columns else np.nan
+        # ATS EV: use ats_home_cover_prob + spread price
+        p_home_cover = _to_float(row.get("ats_home_cover_prob", row.get("p_home_cover", np.nan)))
+        p_away_cover = 1.0 - _to_float(p_home_cover) if np.isfinite(_to_float(p_home_cover)) else np.nan
+        ats_price = row.get("spread_price")
+        ats_ev_home = ev_per_dollar(p_home_cover, ats_price)
+        ats_ev_away = ev_per_dollar(p_away_cover, ats_price)
+        ats_ev, ats_side = _best_ev(ats_ev_home, ats_ev_away, "HOME", "AWAY")
 
-            total_inputs_valid = (
-                np.isfinite(total_points)
-                and np.isfinite(model_total)
-                and np.isfinite(total_sd)
-                and total_sd > 1e-6
-                and np.isfinite(over_price)
-                and np.isfinite(under_price)
-            )
+        # TOTAL EV: compute probability of OVER/UNDER with fallbacks
+        p_over = np.nan
+        total_sd = _to_float(row.get("total_sd", np.nan))
+        if np.isfinite(total_sd) and total_sd > 1e-6:
+            z = (_to_float(row.get("total_points")) - _to_float(row.get("model_total"))) / total_sd
+            p_over = 1.0 - _norm_cdf(z)
+        else:
+            side = str(row.get("total_pick_side", "")).upper().strip()
+            prob = _to_float(row.get("total_pick_prob", np.nan))
+            if np.isfinite(prob):
+                if side == "OVER":
+                    p_over = prob
+                elif side == "UNDER":
+                    p_over = 1.0 - prob
 
-            if total_inputs_valid:
-                p_over = p_over_total(model_total, total_points, total_sd)
-                p_under = 1.0 - p_over if np.isfinite(p_over) else np.nan
-                over_ev = ev_per_dollar(p_over, over_price)
-                under_ev = ev_per_dollar(p_under, under_price)
-                cands = [(over_ev, "OVER"), (under_ev, "UNDER")]
-                cands = [(v, s) for v, s in cands if not pd.isna(v)]
-                if cands:
-                    total_ev, total_side = max(cands, key=lambda x: x[0])
+        p_under = 1.0 - _to_float(p_over) if np.isfinite(_to_float(p_over)) else np.nan
+        over_ev = ev_per_dollar(p_over, row.get("total_over_price"))
+        under_ev = ev_per_dollar(p_under, row.get("total_under_price"))
+        total_ev, total_side = _best_ev(over_ev, under_ev, "OVER", "UNDER")
 
         out.loc[i, "ml_ev_best"] = ml_ev
         out.loc[i, "ml_ev_side"] = ml_side
@@ -400,14 +379,11 @@ def add_recommendations_to_df(
         out.loc[i, "total_ev_side"] = total_side
 
         # Save best score (used for filtering)
-        ev_options = [v for v in [ml_ev, ats_ev, total_ev] if not pd.isna(v)]
+        ev_options = [v for v in [ml_ev, ats_ev, total_ev] if np.isfinite(v)]
         out.loc[i, "pick_score"] = float(max(ev_options)) if ev_options else np.nan
 
     # --------
-    # Primary recommendation (sport-aware preference)
-    # Rule:
-    #   1) among REAL picks, choose highest score
-    #   2) if scores are close/tied, break ties using sport preference order
+    # Primary recommendation: choose market with highest finite EV (NaN ignored)
     # --------
     out["primary_recommendation"] = out.get("primary_recommendation", "")
     out["why_primary"] = out.get("why_primary", "")
@@ -426,10 +402,9 @@ def add_recommendations_to_df(
             "ATS": _safe_num(row.get("ats_ev_best")),
             "TOTAL": _safe_num(row.get("total_ev_best")),
         }
-        scores = {k: float(v) if np.isfinite(v) else float("-inf") for k, v in evs.items()}
-        best_score = max(scores.values())
 
-        if not np.isfinite(best_score):
+        choices = {k: v for k, v in evs.items() if np.isfinite(v)}
+        if not choices:
             out.loc[i, "primary_recommendation"] = ""
             out.loc[i, "why_primary"] = (
                 "Primary=NONE (no finite EV) "
@@ -440,32 +415,20 @@ def add_recommendations_to_df(
             out.loc[i, "primary_side"] = ""
             continue
 
-        eps = 1e-9
-        cands = [k for k, v in scores.items() if v >= best_score - eps]
-
-        # tie-break by sport preference order
-        chosen = None
-        for pref in primary_order:
-            if pref in cands:
-                chosen = pref
-                break
-        if chosen is None:
-            chosen = cands[0]
+        chosen = max(choices, key=lambda k: choices[k])
+        out.loc[i, "primary_ev"] = choices[chosen]
+        out.loc[i, "primary_market"] = chosen
 
         if chosen == "TOTAL":
             out.loc[i, "primary_recommendation"] = str(row.get("total_recommendation", ""))
-            out.loc[i, "primary_market"] = "TOTAL"
             out.loc[i, "primary_side"] = str(row.get("total_ev_side", ""))
         elif chosen == "ATS":
             out.loc[i, "primary_recommendation"] = str(row.get("spread_recommendation", ""))
-            out.loc[i, "primary_market"] = "ATS"
             out.loc[i, "primary_side"] = str(row.get("ats_ev_side", ""))
         else:
             out.loc[i, "primary_recommendation"] = str(row.get("ml_recommendation", ""))
-            out.loc[i, "primary_market"] = "ML"
             out.loc[i, "primary_side"] = str(row.get("ml_ev_side", ""))
 
-        out.loc[i, "primary_ev"] = evs.get(chosen, np.nan)
         out.loc[i, "why_primary"] = (
             f"Primary={chosen} (EV={_fmt_ev(evs.get(chosen))} "
             f"ML={_fmt_ev(evs['ML'])} ATS={_fmt_ev(evs['ATS'])} TOTAL={_fmt_ev(evs['TOTAL'])})"
