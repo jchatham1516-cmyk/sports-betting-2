@@ -21,7 +21,7 @@ from sports.nba.injuries import (
 )
 
 from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
-from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
+from sports.common.margin_calibration import save as save_margin_cal, fit as fit_margin
 
 # BallDontLie client (already in your repo)
 from sports.nba.bdl_client import bdl_get, season_start_year_for_date, get_bdl_api_key
@@ -196,38 +196,6 @@ def _ml_recommendation(p_home: float, mkt_home_p: float, *, min_edge: float = 0.
     if edge > 0:
         return "Model PICK: HOME ML (strong)"
     return "Model PICK: AWAY ML (strong)"
-
-
-def _margin_model_spread_from_elo_diff(elo_diff: float) -> float:
-    """
-    Convert elo_diff -> model_spread_home (negative means home favored).
-    Use margin calibrator only if it behaves sensibly; otherwise fallback linear.
-    """
-    # Linear fallback: positive elo_diff => home stronger => home favored => negative spread
-    fallback = float(-float(elo_diff) / 30.0)
-
-    try:
-        cal = load_margin_cal(MARGIN_CAL_PATH)
-        if cal is None:
-            return fallback
-
-        y = float(cal.predict(float(elo_diff)))
-
-        # Reject broken calibrator outputs
-        if np.isnan(y):
-            return fallback
-
-        # If it always spits near 0 even for big elo_diff, it's useless
-        if abs(float(elo_diff)) >= 60 and abs(y) < 0.75:
-            return fallback
-
-        # Sanity clamp (protect against crazy predictions)
-        if abs(y) > 40:
-            return fallback
-
-        return y
-    except Exception:
-        return fallback
 
 
 # ----------------------------
@@ -449,16 +417,11 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
 def _load_calibrators():
     platt = None
-    margin = None
     try:
         platt = load_platt(PLATT_PATH)
     except Exception:
         platt = None
-    try:
-        margin = load_margin_cal(MARGIN_CAL_PATH)
-    except Exception:
-        margin = None
-    return platt, margin
+    return platt
 
 
 # ----------------------------
@@ -474,7 +437,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
     game_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
 
     st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
-    platt, _margin_cal = _load_calibrators()
+    platt = _load_calibrators()
 
     # Build scoring table (as-of yesterday)
     as_of = game_date - timedelta(days=1)
@@ -583,12 +546,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         # -------- spread / margin (clean, single path) --------
         elo_diff = (eh + HOME_ADV) - ea
-        spread_linear = -float(elo_diff) / 30.0
-
-        model_spread_home = float(_margin_model_spread_from_elo_diff(float(elo_diff)))
-        if np.isnan(model_spread_home) or (abs(float(elo_diff)) >= 40 and abs(float(model_spread_home)) < 0.75):
-            model_spread_home = float(spread_linear)
-
+        model_spread_home = float(-float(elo_diff) / 28.0)
         model_spread_home = float(_clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
         mu_margin_home = float(-model_spread_home)
 
@@ -747,7 +705,45 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             }
         )
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+
+    try:
+        spreads = pd.to_numeric(df.get("model_spread_home"), errors="coerce") if not df.empty else pd.Series(dtype=float)
+        totals = pd.to_numeric(df.get("model_total"), errors="coerce") if not df.empty else pd.Series(dtype=float)
+        win_probs = pd.to_numeric(df.get("model_home_prob"), errors="coerce") if not df.empty else pd.Series(dtype=float)
+
+        def _stat(series: pd.Series, fn) -> float:
+            if series is None or series.empty:
+                return float("nan")
+            clean = series.dropna()
+            if clean.empty:
+                return float("nan")
+            return float(fn(clean))
+
+        num_games = len(df)
+        near_zero_spreads = int((spreads.abs() < 0.25).sum()) if not df.empty else 0
+        spread_min = _stat(spreads, np.min)
+        spread_med = _stat(spreads, np.median)
+        spread_max = _stat(spreads, np.max)
+        total_min = _stat(totals, np.min)
+        total_med = _stat(totals, np.median)
+        total_max = _stat(totals, np.max)
+        prob_min = _stat(win_probs, np.min)
+        prob_med = _stat(win_probs, np.median)
+        prob_max = _stat(win_probs, np.max)
+
+        print(
+            "[nba diagnostics]"
+            f" games={num_games}"
+            f" spreads≈0={near_zero_spreads}"
+            f" spread_min={spread_min:.2f} med={spread_med:.2f} max={spread_max:.2f}"
+            f" total_min={total_min:.1f} med={total_med:.1f} max={total_max:.1f}"
+            f" win_p_min={prob_min:.3f} med={prob_med:.3f} max={prob_max:.3f}"
+        )
+    except Exception:
+        pass
+
+    return df
 
 
 def run_daily_probs_for_date(
