@@ -62,7 +62,7 @@ TOTAL_HIST_DAYS = int(os.getenv("NBA_TOTAL_HIST_DAYS", "14"))
 TOTAL_LINE_BLEND = float(os.getenv("NBA_TOTAL_LINE_BLEND", "0.35"))
 TOTAL_REGRESS_WEIGHT = float(os.getenv("NBA_TOTAL_REGRESS_WEIGHT", "0.25"))
 TOTAL_SD_FLOOR = float(os.getenv("NBA_TOTAL_SD_FLOOR", "9.0"))
-TOTAL_SD_CEIL = float(os.getenv("NBA_TOTAL_SD_CEIL", "20.0"))
+TOTAL_SD_CEIL = float(os.getenv("NBA_TOTAL_SD_CEIL", "30.0"))
 TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NBA_TOTAL_MIN_EDGE_VS_BE", "0.015"))
 TOTAL_MIN_PTS_EDGE = float(os.getenv("NBA_TOTAL_MIN_PTS_EDGE", "2.5"))
 TOTAL_DEFAULT_PRICE = float(os.getenv("NBA_TOTAL_DEFAULT_PRICE", "-110.0"))
@@ -459,6 +459,25 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             minutes_before_commence=10,
         )
         print(f"[hist_lines] n_teams={len(hist_lines or {})}")
+        # Fallback: if historical totals API yields nothing, derive totals stats from BDL scoring table
+        # This prevents totals from collapsing toward the same league anchor.
+        if (not hist_lines) and (team_tbl is not None) and (not team_tbl.empty):
+            try:
+                g = team_tbl.copy()
+                g["game_total"] = g["pts_for"] + g["pts_against"]
+                by_team = g.groupby("team")["game_total"]
+                hist_lines = {}
+                for team, s in by_team:
+                    s = s.dropna()
+                    if len(s) >= 3:
+                        hist_lines[str(team)] = {
+                            "avg": float(s.mean()),
+                            "sd": float(s.std(ddof=0)),
+                            "n": int(len(s)),
+                        }
+                print(f"[hist_lines fallback] n_teams={len(hist_lines or {})}")
+            except Exception as e:
+                print(f"[hist_lines fallback] failed: {e}")
     except Exception as e:
         print(f"[nba totals] WARNING: failed to build historical totals lines: {e}")
         hist_lines = {}
@@ -589,7 +608,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         base_total = float(exp_total)
         if not np.isnan(hist_base):
-            w = float(_clamp(TOTAL_LINE_BLEND, 0.20, 0.25))
+            w = float(_clamp(TOTAL_LINE_BLEND, 0.20, 0.60))
             base_total = float((1.0 - w) * base_total + w * hist_base)
 
         league_anchor_total = league_avg_total
