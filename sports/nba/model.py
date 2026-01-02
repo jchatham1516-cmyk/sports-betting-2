@@ -16,9 +16,10 @@ from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.scores_sources import fetch_recent_scores
 from sports.common.historical_totals import build_team_historical_total_lines
 from sports.nba.injuries import (
-    fetch_official_nba_injuries,
     build_injury_list_for_team_nba,
     injury_adjustment_points,
+    _fetch_from_espn,
+    _fetch_from_official_nba,
 )
 
 from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
@@ -591,12 +592,30 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             league_sd_total = float(0.5 * league_sd_total + 0.5 * hist_league_sd)
 
     # injuries
+    injury_source = "OFFICIAL"
     try:
-        injury_data = fetch_official_nba_injuries()
-    except Exception:
-        injury_data = []
+        injury_data = _fetch_from_official_nba()
+    except Exception as e:
+        print(f"[nba injuries] WARNING: official NBA injury page failed ({e}); falling back to ESPN")
+        injury_source = "ESPN"
+        try:
+            injury_data = _fetch_from_espn()
+        except Exception as e2:
+            print(f"[nba injuries] WARNING: ESPN injuries failed too ({e2}); using empty injuries")
+            injury_data = {}
+            injury_source = "NONE"
 
     rows = []
+    missing_elo_home = 0
+    missing_elo_away = 0
+    missing_hist_totals_home = 0
+    missing_hist_totals_away = 0
+    missing_ml_games = 0
+    total_games_processed = 0
+    teams_seen: set[str] = set()
+    missing_elo_teams: set[str] = set()
+    missing_hist_total_teams: set[str] = set()
+    elo_warned: set[str] = set()
 
     # IMPORTANT: odds_dict may store teams in the KEY (tuple), not in oi
     for matchup, oi in (odds_dict or {}).items():
@@ -611,9 +630,28 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         if not home or not away:
             continue
 
+        teams_seen.update([home, away])
+
+        if home and home not in st:
+            missing_elo_home += 1
+            missing_elo_teams.add(home)
+            if home not in elo_warned:
+                print(f"[warn] Elo missing for: {home_raw or home} (canon={home})")
+                elo_warned.add(home)
+        if away and away not in st:
+            missing_elo_away += 1
+            missing_elo_teams.add(away)
+            if away not in elo_warned:
+                print(f"[warn] Elo missing for: {away_raw or away} (canon={away})")
+                elo_warned.add(away)
+
+        total_games_processed += 1
+
         # market ML -> no-vig
         home_ml = _safe_float((oi or {}).get("home_ml"))
         away_ml = _safe_float((oi or {}).get("away_ml"))
+        if np.isnan(home_ml) or np.isnan(away_ml):
+            missing_ml_games += 1
         p_home_imp = american_to_implied_prob(home_ml)
         p_away_imp = american_to_implied_prob(away_ml)
         mkt_home_p, _ = no_vig_pair(p_home_imp, p_away_imp)
@@ -710,6 +748,13 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         h_avg, h_sd, h_n = _team_hist_total_stats(home, hist_lines)
         a_avg, a_sd, a_n = _team_hist_total_stats(away, hist_lines)
+
+        if home and (h_n <= 0 or np.isnan(h_avg)):
+            missing_hist_totals_home += 1
+            missing_hist_total_teams.add(home)
+        if away and (a_n <= 0 or np.isnan(a_avg)):
+            missing_hist_totals_away += 1
+            missing_hist_total_teams.add(away)
 
         hist_base = float("nan")
         if not np.isnan(h_avg) and not np.isnan(a_avg):
@@ -844,6 +889,22 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "hist_total_away_n": int(a_n),
             }
         )
+
+    total_teams_seen = len([t for t in teams_seen if t])
+    total_games = total_games_processed
+    missing_elo_total = len(missing_elo_teams)
+    missing_hist_total = len(missing_hist_total_teams)
+
+    try:
+        print(
+            "[nba diag]"
+            f" missing_elo={missing_elo_total}/{total_teams_seen} teams,"
+            f" missing_hist_totals={missing_hist_total}/{total_teams_seen},"
+            f" missing_ml={missing_ml_games}/{total_games} games,"
+            f" injury_source={injury_source}."
+        )
+    except Exception:
+        pass
 
     df = pd.DataFrame(rows)
 
