@@ -45,25 +45,39 @@ def breakeven_prob_from_american(odds: float) -> float:
     return 1.0 / dec
 
 
+def profit_per_dollar_from_american(odds: float) -> float:
+    """Return the profit (not total return) for a $1 stake at given odds."""
+
+    try:
+        odds = float(odds)
+    except Exception:
+        return float("nan")
+
+    if odds is None or np.isnan(odds):
+        return float("nan")
+    if odds > 0:
+        return odds / 100.0
+    if odds < 0:
+        return 100.0 / abs(odds)
+    return float("nan")
+
+
 def ev_per_dollar(p_win: float, american_odds: float) -> float:
     """Expected profit per $1 staked for a given win prob + price."""
 
     try:
         p_win = float(p_win)
-        american_odds = float(american_odds)
     except Exception:
         return float("nan")
 
-    if np.isnan(p_win) or np.isnan(american_odds):
+    if p_win is None or np.isnan(p_win):
         return float("nan")
 
-    if american_odds > 0:
-        profit = american_odds / 100.0
-    elif american_odds < 0:
-        profit = 100.0 / abs(american_odds)
-    else:
+    profit = profit_per_dollar_from_american(american_odds)
+    if profit is None or np.isnan(profit):
         return float("nan")
 
+    # stake is $1; lose stake on loss
     return p_win * profit - (1.0 - p_win)
 
 
@@ -140,23 +154,35 @@ def choose_primary_recommendation(
     Returns:
       (primary_recommendation, why_primary)
     """
-    best_ev = float(ml_ev) if ml_ev is not None and not np.isnan(ml_ev) else -999.0
-    primary = str(ml_reco)
-    why = f"Primary=ML (EV={best_ev:+.3f})" if best_ev > -900 else "Primary=ML (missing EV)"
+    evs = {
+        "ML": float(ml_ev) if ml_ev is not None and not np.isnan(ml_ev) else float("-inf"),
+        "ATS": float(ats_ev) if ats_ev is not None and not np.isnan(ats_ev) else float("-inf"),
+        "TOTAL": float(total_ev) if total_ev is not None and not np.isnan(total_ev) else float("-inf"),
+    }
 
-    ats_ok = isinstance(spread_reco, str) and spread_reco.startswith("Model PICK ATS:")
-    ats_val = float(ats_ev) if ats_ok and ats_ev is not None and not np.isnan(ats_ev) else -999.0
-    if ats_val > best_ev:
-        best_ev = ats_val
-        primary = str(spread_reco)
-        why = f"Primary=ATS (EV={ats_val:+.3f})"
+    def _fmt_ev(v: float) -> str:
+        if v is None or np.isnan(v):
+            return "nan"
+        if not np.isfinite(v):
+            return "nan"
+        return f"{float(v):+.3f}"
 
-    tot_ok = isinstance(total_reco, str) and total_reco.startswith("Model PICK TOTAL:")
-    tot_val = float(total_ev) if tot_ok and total_ev is not None and not np.isnan(total_ev) else -999.0
-    if tot_val > best_ev:
-        best_ev = tot_val
-        primary = str(total_reco)
-        why = f"Primary=TOTAL (EV={tot_val:+.3f})"
+    primary = "NONE"
+    best_market = max(evs, key=lambda k: evs[k])
+    best_ev = evs[best_market]
+
+    if np.isfinite(best_ev):
+        primary_map = {"ML": ml_reco, "ATS": spread_reco, "TOTAL": total_reco}
+        primary = str(primary_map.get(best_market, ml_reco))
+        why = (
+            f"Primary={best_market} (EV={_fmt_ev(best_ev)} "
+            f"ML={_fmt_ev(evs['ML'])} ATS={_fmt_ev(evs['ATS'])} TOTAL={_fmt_ev(evs['TOTAL'])})"
+        )
+    else:
+        why = (
+            "Primary=NONE (no finite EV) "
+            f"ML={_fmt_ev(evs['ML'])} ATS={_fmt_ev(evs['ATS'])} TOTAL={_fmt_ev(evs['TOTAL'])}"
+        )
 
     return primary, why
 

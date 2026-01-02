@@ -105,6 +105,17 @@ def _norm_cdf(x: float) -> float:
         return float("nan")
 
 
+def p_over_total(model_total: float, total_line: float, total_sd: float) -> float:
+    """Probability that actual total goes over given line using normal model."""
+
+    try:
+        z = (float(total_line) - float(model_total)) / float(total_sd)
+    except Exception:
+        return float("nan")
+
+    return 1.0 - _norm_cdf(z)
+
+
 # ---------------------------------------------------------------------------
 # Legacy helpers (kept for compatibility with older tests/usage)
 # ---------------------------------------------------------------------------
@@ -330,8 +341,10 @@ def add_recommendations_to_df(
                 p_ml = _safe_num(out.loc[i, "model_home_prob"]) if "model_home_prob" in out.columns else np.nan
             home_odds = _safe_num(out.loc[i, "home_ml"]) if "home_ml" in out.columns else np.nan
             away_odds = _safe_num(out.loc[i, "away_ml"]) if "away_ml" in out.columns else np.nan
+
+            p_ml_away = 1.0 - p_ml if not np.isnan(p_ml) else np.nan
             ev_home = ev_per_dollar(p_ml, home_odds)
-            ev_away = ev_per_dollar(1.0 - p_ml, away_odds)
+            ev_away = ev_per_dollar(p_ml_away, away_odds)
             cands = [(ev_home, "HOME"), (ev_away, "AWAY")]
             cands = [(v, s) for v, s in cands if not pd.isna(v)]
             if cands:
@@ -360,20 +373,24 @@ def add_recommendations_to_df(
             over_price = _safe_num(out.loc[i, "total_over_price"]) if "total_over_price" in out.columns else np.nan
             under_price = _safe_num(out.loc[i, "total_under_price"]) if "total_under_price" in out.columns else np.nan
 
-            if not pd.isna(total_points) and not pd.isna(model_total) and not pd.isna(total_sd) and total_sd > 0:
-                z = (total_points - model_total) / float(total_sd)
-                p_over = 1.0 - _norm_cdf(z)
-                p_under = 1.0 - p_over
+            total_inputs_valid = (
+                np.isfinite(total_points)
+                and np.isfinite(model_total)
+                and np.isfinite(total_sd)
+                and total_sd > 1e-6
+                and np.isfinite(over_price)
+                and np.isfinite(under_price)
+            )
+
+            if total_inputs_valid:
+                p_over = p_over_total(model_total, total_points, total_sd)
+                p_under = 1.0 - p_over if np.isfinite(p_over) else np.nan
                 over_ev = ev_per_dollar(p_over, over_price)
                 under_ev = ev_per_dollar(p_under, under_price)
                 cands = [(over_ev, "OVER"), (under_ev, "UNDER")]
                 cands = [(v, s) for v, s in cands if not pd.isna(v)]
                 if cands:
                     total_ev, total_side = max(cands, key=lambda x: x[0])
-
-        ml_score = float(ml_ev) if not pd.isna(ml_ev) else -999.0
-        ats_score = float(ats_ev) if not pd.isna(ats_ev) else -999.0
-        tot_score = float(total_ev) if not pd.isna(total_ev) else -999.0
 
         out.loc[i, "ml_ev_best"] = ml_ev
         out.loc[i, "ml_ev_side"] = ml_side
@@ -383,7 +400,8 @@ def add_recommendations_to_df(
         out.loc[i, "total_ev_side"] = total_side
 
         # Save best score (used for filtering)
-        out.loc[i, "pick_score"] = float(max(ml_score, ats_score, tot_score))
+        ev_options = [v for v in [ml_ev, ats_ev, total_ev] if not pd.isna(v)]
+        out.loc[i, "pick_score"] = float(max(ev_options)) if ev_options else np.nan
 
     # --------
     # Primary recommendation (sport-aware preference)
@@ -394,39 +412,34 @@ def add_recommendations_to_df(
     out["primary_recommendation"] = out.get("primary_recommendation", "")
     out["why_primary"] = out.get("why_primary", "")
 
-    def _score_for(kind: str, row: pd.Series) -> float:
-        if kind == "ML":
-            if _is_real_pick(str(row.get("ml_recommendation", ""))):
-                v = row.get("ml_ev_best", np.nan)
-                return float(v) if not pd.isna(v) else -999.0
-            return -999.0
-        if kind == "ATS":
-            if _is_real_pick(str(row.get("spread_recommendation", ""))):
-                v = row.get("ats_ev_best", np.nan)
-                return float(v) if not pd.isna(v) else -999.0
-            return -999.0
-        if kind == "TOTAL":
-            if _is_real_pick(str(row.get("total_recommendation", ""))):
-                v = row.get("total_ev_best", np.nan)
-                return float(v) if not pd.isna(v) else -999.0
-            return -999.0
-        return -999.0
+    def _fmt_ev(v: float) -> str:
+        if v is None or np.isnan(v):
+            return "nan"
+        if not np.isfinite(v):
+            return "nan"
+        return f"{float(v):+.3f}"
 
     for i in out.index:
         row = out.loc[i]
-        scores = {k: _score_for(k, row) for k in ["ML", "ATS", "TOTAL"]}
+        evs = {
+            "ML": _safe_num(row.get("ml_ev_best")),
+            "ATS": _safe_num(row.get("ats_ev_best")),
+            "TOTAL": _safe_num(row.get("total_ev_best")),
+        }
+        scores = {k: float(v) if np.isfinite(v) else float("-inf") for k, v in evs.items()}
         best_score = max(scores.values())
 
-        if best_score <= -900:
-            # nothing is a real pick; fall back to ML reco string
-            out.loc[i, "primary_recommendation"] = str(row.get("ml_recommendation", ""))
-            out.loc[i, "why_primary"] = "Primary=NONE (no real pick)"
+        if not np.isfinite(best_score):
+            out.loc[i, "primary_recommendation"] = ""
+            out.loc[i, "why_primary"] = (
+                "Primary=NONE (no finite EV) "
+                f"ML={_fmt_ev(evs['ML'])} ATS={_fmt_ev(evs['ATS'])} TOTAL={_fmt_ev(evs['TOTAL'])}"
+            )
             out.loc[i, "primary_ev"] = np.nan
-            out.loc[i, "primary_market"] = ""
+            out.loc[i, "primary_market"] = "NONE"
             out.loc[i, "primary_side"] = ""
             continue
 
-        # candidates within epsilon of best_score
         eps = 1e-9
         cands = [k for k, v in scores.items() if v >= best_score - eps]
 
@@ -441,22 +454,22 @@ def add_recommendations_to_df(
 
         if chosen == "TOTAL":
             out.loc[i, "primary_recommendation"] = str(row.get("total_recommendation", ""))
-            out.loc[i, "why_primary"] = f"Primary=TOTAL (EV={scores['TOTAL']:+.3f} ML={scores['ML']:+.3f} ATS={scores['ATS']:+.3f})"
             out.loc[i, "primary_market"] = "TOTAL"
             out.loc[i, "primary_side"] = str(row.get("total_ev_side", ""))
-            out.loc[i, "primary_ev"] = scores["TOTAL"]
         elif chosen == "ATS":
             out.loc[i, "primary_recommendation"] = str(row.get("spread_recommendation", ""))
-            out.loc[i, "why_primary"] = f"Primary=ATS (EV={scores['ATS']:+.3f} ML={scores['ML']:+.3f} TOTAL={scores['TOTAL']:+.3f})"
             out.loc[i, "primary_market"] = "ATS"
             out.loc[i, "primary_side"] = str(row.get("ats_ev_side", ""))
-            out.loc[i, "primary_ev"] = scores["ATS"]
         else:
             out.loc[i, "primary_recommendation"] = str(row.get("ml_recommendation", ""))
-            out.loc[i, "why_primary"] = f"Primary=ML (EV={scores['ML']:+.3f} ATS={scores['ATS']:+.3f} TOTAL={scores['TOTAL']:+.3f})"
             out.loc[i, "primary_market"] = "ML"
             out.loc[i, "primary_side"] = str(row.get("ml_ev_side", ""))
-            out.loc[i, "primary_ev"] = scores["ML"]
+
+        out.loc[i, "primary_ev"] = evs.get(chosen, np.nan)
+        out.loc[i, "why_primary"] = (
+            f"Primary={chosen} (EV={_fmt_ev(evs.get(chosen))} "
+            f"ML={_fmt_ev(evs['ML'])} ATS={_fmt_ev(evs['ATS'])} TOTAL={_fmt_ev(evs['TOTAL'])})"
+        )
 
     # why_bet quick explainer
     out["why_bet"] = out.get("why_bet", "")
