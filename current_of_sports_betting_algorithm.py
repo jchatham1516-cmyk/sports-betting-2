@@ -9,6 +9,7 @@ import pandas as pd
 
 from recommendations import add_recommendations_to_df, Thresholds
 
+from sports.common.eval import evaluate_predictions
 from sports.common.odds_sources import (
     fetch_odds_for_date_from_odds_api,
     fetch_odds_for_date_from_csv,
@@ -65,6 +66,26 @@ def _cap_to_top_plays(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
             if "why_bet" in df.columns:
                 df.loc[i, "why_bet"] = str(df.loc[i, "why_bet"]) + " | filtered: top-N plays"
     return df
+
+
+def _maybe_load_results_csv(sport: str, game_date: str) -> pd.DataFrame:
+    """Attempt to load a local scores/results CSV for the given sport/date."""
+    hyphen_date = game_date.replace("/", "-")
+    candidates = [
+        f"results/scores_{sport}_{hyphen_date}.csv",
+        f"results/final_scores_{sport}_{hyphen_date}.csv",
+        f"results/results_{sport}_{hyphen_date}.csv",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                df = pd.read_csv(path)
+                print(f"[eval] Loaded results from {path} ({len(df)} rows)")
+                return df
+            except Exception as e:
+                print(f"[eval] WARNING: failed to load results CSV {path}: {e}")
+                continue
+    return pd.DataFrame()
 
 
 def main(argv=None):
@@ -211,6 +232,28 @@ def main(argv=None):
 
     print(f"\nSaved predictions to {out_name}")
     print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
+
+    # Evaluation/sanity checks
+    eval_date = None
+    try:
+        eval_date = datetime.strptime(game_date, "%m/%d/%Y").strftime("%m-%d-%Y")
+    except Exception:
+        eval_date = game_date.replace("/", "-")
+
+    results_scores_df = _maybe_load_results_csv(args.sport, game_date)
+    eval_row = evaluate_predictions(
+        results_df,
+        results_scores_df if not results_scores_df.empty else None,
+        sport=args.sport,
+        run_date_str=eval_date,
+    )
+
+    eval_out = f"results/eval_{args.sport}_{eval_date}.csv"
+    try:
+        eval_row.to_csv(eval_out, index=False)
+        print(f"[eval] Saved daily evaluation -> {eval_out}")
+    except Exception as e:
+        print(f"[eval] WARNING: failed to save evaluation CSV: {e}")
     return 0
 
 
