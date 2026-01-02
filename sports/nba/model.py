@@ -22,6 +22,7 @@ from sports.nba.injuries import (
 
 from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
 from sports.common.margin_calibration import save as save_margin_cal, fit as fit_margin
+from sports.common.calibration import load_nba_calibrator, update_and_save_nba_calibration
 
 # BallDontLie client (already in your repo)
 from sports.nba.bdl_client import bdl_get, season_start_year_for_date, get_bdl_api_key
@@ -50,6 +51,10 @@ MAX_ABS_MODEL_SPREAD = float(os.getenv("NBA_MAX_ABS_MODEL_SPREAD", "17.0"))
 # basic regularization
 BASE_COMPRESS = float(os.getenv("NBA_BASE_COMPRESS", "0.95"))
 MIN_ML_EDGE = float(os.getenv("NBA_MIN_ML_EDGE", "0.02"))
+
+# form/recency adjustments (derived from recent net ratings)
+FORM_ELO_PER_NET = float(os.getenv("NBA_FORM_ELO_PER_NET", "2.0"))
+FORM_ELO_MAX_ABS = float(os.getenv("NBA_FORM_ELO_MAX_ABS", "120.0"))
 
 # totals model
 PTS_LOOKBACK_DAYS = int(os.getenv("NBA_PTS_LOOKBACK_DAYS", "60"))
@@ -128,6 +133,43 @@ def _no_vig_probs(home_ml: float, away_ml: float) -> Tuple[float, float]:
         return (float("nan"), float("nan"))
     s = hp + ap
     return (hp / s, ap / s)
+
+
+def _build_form_adjustments(stats_df: Optional[pd.DataFrame]) -> Dict[str, float]:
+    """Return Elo-like adjustments from recent team net ratings.
+
+    Each team receives an additive Elo bump equal to (net - league_avg_net)
+    scaled by FORM_ELO_PER_NET. Adjustments are clamped to avoid runaway
+    shifts when the stats payload is sparse or noisy.
+    """
+
+    if stats_df is None:
+        return {}
+
+    required_cols = {"TEAM_NAME", "ORtg_RECENT", "DRtg_RECENT"}
+    if not required_cols.issubset(set(stats_df.columns)):
+        return {}
+
+    df = stats_df.copy()
+    df["net_recent"] = pd.to_numeric(df["ORtg_RECENT"], errors="coerce") - pd.to_numeric(
+        df["DRtg_RECENT"], errors="coerce"
+    )
+
+    league_net = float(df["net_recent"].mean(skipna=True))
+    if np.isnan(league_net):
+        league_net = 0.0
+
+    adjs: Dict[str, float] = {}
+    for _, row in df.iterrows():
+        team = row.get("TEAM_NAME")
+        net = row.get("net_recent")
+        if team is None or pd.isna(net):
+            continue
+        adj = (float(net) - float(league_net)) * float(FORM_ELO_PER_NET)
+        adj = _clamp(adj, -FORM_ELO_MAX_ABS, FORM_ELO_MAX_ABS)
+        adjs[str(team)] = float(adj)
+
+    return adjs
 
 
 def _breakeven_prob_from_american(price: float) -> float:
@@ -335,6 +377,22 @@ def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd
 # ----------------------------
 # Elo + calibration
 # ----------------------------
+def backfill_nba_elo_state(*, default_elo: float = 1500.0) -> EloState:
+    """Gracefully load persisted Elo state when live updates fail.
+
+    Keeps the helper small so tests can monkeypatch it easily and callers can
+    supply a different default baseline if desired.
+    """
+
+    try:
+        st = EloState.load(ELO_PATH)
+    except Exception:
+        st = EloState()
+
+    st.default_elo = float(default_elo)
+    return st
+
+
 def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
     """
     Uses odds-api scores endpoint (via fetch_recent_scores) to update Elo and (optionally) fit calibrators.
@@ -436,8 +494,14 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
     """
     game_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
 
-    st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
+    try:
+        st = update_elo_from_recent_scores(days_from=ELO_TRAIN_DAYS)
+    except Exception as e:
+        print(f"[nba] WARNING: Elo update failed ({e}); using backfill state")
+        st = backfill_nba_elo_state()
     platt = _load_calibrators()
+
+    form_adjs = _build_form_adjustments(stats_df) if stats_df is not None else {}
 
     # Build scoring table (as-of yesterday)
     as_of = game_date - timedelta(days=1)
@@ -553,8 +617,11 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         inj_elo_home = float(inj_pts_home) * float(ELO_PER_POINT)
         inj_elo_away = float(inj_pts_away) * float(ELO_PER_POINT)
 
-        eh = float(st.get(home)) + inj_elo_home
-        ea = float(st.get(away)) + inj_elo_away
+        form_home = float(form_adjs.get(home, 0.0))
+        form_away = float(form_adjs.get(away, 0.0))
+
+        eh = float(st.get(home)) + inj_elo_home + form_home
+        ea = float(st.get(away)) + inj_elo_away + form_away
 
         # base win prob from Elo
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
