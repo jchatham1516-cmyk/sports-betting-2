@@ -22,6 +22,7 @@ DEFAULT_TIMEOUT = 20
 ODDS_MAX_REQUESTS = int(os.getenv("ODDS_MAX_REQUESTS", "40"))
 ODDS_MIN_REMAINING = int(os.getenv("ODDS_MIN_REMAINING", "10"))
 ODDS_HARD_STOP_ON_401 = os.getenv("ODDS_HARD_STOP_ON_401", "1") == "1"
+ODDS_PREFERRED_BOOKMAKER = os.getenv("ODDS_PREFERRED_BOOKMAKER", "").lower()
 
 
 class _OddsBudget:
@@ -253,6 +254,14 @@ def fetch_odds_for_date_from_odds_api(
             continue
 
         bms = ev.get("bookmakers") or []
+        if ODDS_PREFERRED_BOOKMAKER:
+            preferred = [
+                bm
+                for bm in bms
+                if str(bm.get("key", "")).lower() == ODDS_PREFERRED_BOOKMAKER
+            ]
+            if preferred:
+                bms = preferred
         home_ml = _parse_best_price_from_bookmakers(bms, "h2h", home)
         away_ml = _parse_best_price_from_bookmakers(bms, "h2h", away)
 
