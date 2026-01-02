@@ -47,6 +47,9 @@ CANONICAL_COLUMNS: Sequence[str] = (
     "total_pick_side",
     "total_edge_vs_be",
     "total_recommendation",
+    "total_sd",
+    "p_home_cover",
+    "win_prob_home",
 )
 
 
