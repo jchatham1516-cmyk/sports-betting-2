@@ -535,7 +535,15 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         away_ml = _safe_float((oi or {}).get("away_ml"))
         mkt_home_p = float("nan")
         if not np.isnan(home_ml) and not np.isnan(away_ml):
-            mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
+            # --- odds sanity check ---
+            hp = _american_to_prob(home_ml)
+            ap = _american_to_prob(away_ml)
+            s = hp + ap
+            # Reject broken odds (bad parse / wrong market / missing side)
+            if (not np.isnan(hp)) and (not np.isnan(ap)) and (0.80 <= s <= 1.40):
+                mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
+            else:
+                mkt_home_p = float("nan")
 
         # injuries -> elo shift
         inj_list_home = build_injury_list_for_team_nba(home, injury_data)
