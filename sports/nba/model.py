@@ -1,6 +1,7 @@
 # sports/nba/model.py
 from __future__ import annotations
 
+import logging
 import math
 import os
 from datetime import datetime, date, timedelta
@@ -117,8 +118,14 @@ def _normal_ci(mu: float, sd: float, z: float = 1.96) -> Tuple[float, float]:
     return (float(mu - z * sd), float(mu + z * sd))
 
 
-def _american_to_prob(price: float) -> float:
-    price = float(price)
+def american_to_implied_prob(ml: float) -> float:
+    """Convert American moneyline to implied probability (vig still baked in)."""
+
+    try:
+        price = float(ml)
+    except Exception:
+        return float("nan")
+
     if price == 0:
         return float("nan")
     if price > 0:
@@ -126,12 +133,22 @@ def _american_to_prob(price: float) -> float:
     return (-price) / ((-price) + 100.0)
 
 
-def _no_vig_probs(home_ml: float, away_ml: float) -> Tuple[float, float]:
-    hp = _american_to_prob(home_ml)
-    ap = _american_to_prob(away_ml)
-    if np.isnan(hp) or np.isnan(ap) or (hp + ap) <= 0:
+def no_vig_pair(p_home: float, p_away: float) -> Tuple[float, float]:
+    """Normalize two implied probabilities into a no-vig pair."""
+
+    try:
+        hp = float(p_home)
+        ap = float(p_away)
+    except Exception:
         return (float("nan"), float("nan"))
+
+    if np.isnan(hp) or np.isnan(ap):
+        return (float("nan"), float("nan"))
+
     s = hp + ap
+    if s <= 0:
+        return (float("nan"), float("nan"))
+
     return (hp / s, ap / s)
 
 
@@ -597,17 +614,29 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         # market ML -> no-vig
         home_ml = _safe_float((oi or {}).get("home_ml"))
         away_ml = _safe_float((oi or {}).get("away_ml"))
-        mkt_home_p = float("nan")
-        if not np.isnan(home_ml) and not np.isnan(away_ml):
-            # --- odds sanity check ---
-            hp = _american_to_prob(home_ml)
-            ap = _american_to_prob(away_ml)
-            s = hp + ap
-            # Reject broken odds (bad parse / wrong market / missing side)
-            if (not np.isnan(hp)) and (not np.isnan(ap)) and (0.80 <= s <= 1.40):
-                mkt_home_p, _ = _no_vig_probs(home_ml, away_ml)
-            else:
-                mkt_home_p = float("nan")
+        p_home_imp = american_to_implied_prob(home_ml)
+        p_away_imp = american_to_implied_prob(away_ml)
+        mkt_home_p, _ = no_vig_pair(p_home_imp, p_away_imp)
+
+        if not np.isnan(home_ml) and not np.isnan(mkt_home_p):
+            if home_ml <= -250 and mkt_home_p < 0.50:
+                logging.warning(
+                    "[nba model] ML/prob mismatch (home favorite flipped): %s vs %s | MLs %s/%s | mkt_home_p=%.3f",
+                    home,
+                    away,
+                    home_ml,
+                    away_ml,
+                    mkt_home_p,
+                )
+            if home_ml >= 250 and mkt_home_p > 0.50:
+                logging.warning(
+                    "[nba model] ML/prob mismatch (home dog flipped): %s vs %s | MLs %s/%s | mkt_home_p=%.3f",
+                    home,
+                    away,
+                    home_ml,
+                    away_ml,
+                    mkt_home_p,
+                )
 
         # injuries -> elo shift
         inj_list_home = build_injury_list_for_team_nba(home, injury_data)
@@ -635,7 +664,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             except Exception:
                 pass
 
-        edge_home = float(p_home - mkt_home_p) if not np.isnan(mkt_home_p) else float("nan")
+        edge_home = float(p_home - mkt_home_p) if not (np.isnan(p_home) or np.isnan(mkt_home_p)) else float("nan")
         edge_away = float(-edge_home) if not np.isnan(edge_home) else float("nan")
         ml_reco = _ml_recommendation(p_home, mkt_home_p, min_edge=MIN_ML_EDGE)
 
@@ -751,13 +780,21 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) and not np.isnan(model_spread_home) else float("nan")
         p_home_cover = float(_clamp(_phi((spread_edge_home / ATS_SD_PTS)), 0.001, 0.999)) if not np.isnan(spread_edge_home) else float("nan")
 
+        market_home_delta = (
+            float(mkt_home_p - p_home_imp)
+            if not (np.isnan(mkt_home_p) or np.isnan(p_home_imp))
+            else np.nan
+        )
+
         rows.append(
             {
                 "date": game_date_str,
                 "home": home,
                 "away": away,
                 "model_home_prob": float(p_home),
+                "market_home_imp": float(p_home_imp) if not np.isnan(p_home_imp) else np.nan,
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
+                "market_home_delta": float(market_home_delta) if not np.isnan(market_home_delta) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
                 "edge_away": float(edge_away) if not np.isnan(edge_away) else np.nan,
                 "ml_recommendation": str(ml_reco),
