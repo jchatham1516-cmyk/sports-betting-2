@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from sports.common.util import american_to_implied_prob
+from sports.common.util import implied_prob_from_american, remove_vig_two_way
 
 
 SPORT_TO_ODDS_KEY: Dict[str, str] = {
@@ -161,17 +161,18 @@ def _extract_moneyline_pairs(
         if home_price is None or away_price is None:
             continue
 
-        p_home = american_to_implied_prob(home_price)
-        p_away = american_to_implied_prob(away_price)
-        denom = p_home + p_away
-        if denom <= 0:
+        p_home = implied_prob_from_american(home_price)
+        p_away = implied_prob_from_american(away_price)
+        vig_removed = remove_vig_two_way(p_home, p_away)
+        if vig_removed is None:
             continue
+        nv_home, nv_away = vig_removed
 
         pairs.append(
             {
                 "home_ml": home_price,
                 "away_ml": away_price,
-                "no_vig_home": p_home / denom,
+                "no_vig_home": nv_home,
                 "bm_key": bm_key,
                 "bm_title": bm_title,
             }
