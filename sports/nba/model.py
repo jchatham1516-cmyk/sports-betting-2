@@ -22,6 +22,7 @@ from sports.nba.injuries import (
     _fetch_from_official_nba,
 )
 
+from sports.common.eval import build_game_key
 from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
 from sports.common.margin_calibration import save as save_margin_cal, fit as fit_margin
 from sports.common.calibration import load_nba_calibrator, update_and_save_nba_calibration
@@ -630,22 +631,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         if not home or not away:
             continue
 
-        teams_seen.update([home, away])
-
-        if home and home not in st:
-            missing_elo_home += 1
-            missing_elo_teams.add(home)
-            if home not in elo_warned:
-                print(f"[warn] Elo missing for: {home_raw or home} (canon={home})")
-                elo_warned.add(home)
-        if away and away not in st:
-            missing_elo_away += 1
-            missing_elo_teams.add(away)
-            if away not in elo_warned:
-                print(f"[warn] Elo missing for: {away_raw or away} (canon={away})")
-                elo_warned.add(away)
-
-        total_games_processed += 1
+        event_id = (oi or {}).get("event_id")
+        game_key = build_game_key(event_id, game_date_str, home, away)
 
         # market ML -> no-vig
         home_ml = _safe_float((oi or {}).get("home_ml"))
@@ -840,6 +827,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         rows.append(
             {
+                "game_key": game_key,
+                "event_id": event_id or "",
                 "date": game_date_str,
                 "home": home,
                 "away": away,
