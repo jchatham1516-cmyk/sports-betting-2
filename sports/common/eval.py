@@ -383,7 +383,7 @@ def update_eval_history_with_scores(
     sport: str,
     preds_dir: str,
     out_path: str,
-    days_back: int = 14,
+    days_back: int = 30,
 ) -> pd.DataFrame:
     today = datetime.utcnow().date()
     preds = _load_recent_predictions(sport, preds_dir=preds_dir, today=today, days_back=days_back)
