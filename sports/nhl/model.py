@@ -3,10 +3,9 @@ from sports.common.prob_calibration import ProbabilityCalibrator
 
 # In predict() function, after computing win_prob:
 def predict(game_date, home_team, away_team, odds_data=None):
-    # ... existing Elo calculation ...
     
-# Calculate win probability from Elo
-raw_win_prob = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
+    # Calculate win probability from Elo
+    raw_win_prob = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
 
 # 🆕 APPLY CALIBRATION
 from sports.common.prob_calibration import ProbabilityCalibrator
