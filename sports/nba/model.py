@@ -1,19 +1,4 @@
 # sports/nba/model.py
-from sports.common.prob_calibration import ProbabilityCalibrator
-
-# In predict() function, after computing win_prob:
-def predict(game_date, home_team, away_team, odds_data=None):
-    
-   # Calculate win probability from Elo
-   raw_win_prob = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
-
-# 🆕 APPLY CALIBRATION
-from sports.common.prob_calibration import ProbabilityCalibrator
-calibrator = ProbabilityCalibrator('nba')
-win_prob = calibrator.calibrate(raw_win_prob, 'moneyline')
-
-print(f"[CALIBRATION] {home_team}: Raw={raw_win_prob:.3f} → Calibrated={win_prob:.3f}")
-    
 from __future__ import annotations
 
 import json
@@ -152,7 +137,6 @@ def _normal_ci(mu: float, sd: float, z: float = 1.96) -> Tuple[float, float]:
 
 def american_to_implied_prob(ml: float) -> float:
     """Convert American moneyline to implied probability (vig still baked in)."""
-
     try:
         price = float(ml)
     except Exception:
@@ -167,7 +151,6 @@ def american_to_implied_prob(ml: float) -> float:
 
 def no_vig_pair(p_home: float, p_away: float) -> Tuple[float, float]:
     """Normalize two implied probabilities into a no-vig pair."""
-
     try:
         hp = float(p_home)
         ap = float(p_away)
@@ -185,13 +168,7 @@ def no_vig_pair(p_home: float, p_away: float) -> Tuple[float, float]:
 
 
 def _build_form_adjustments(stats_df: Optional[pd.DataFrame]) -> Dict[str, float]:
-    """Return Elo-like adjustments from recent team net ratings.
-
-    Each team receives an additive Elo bump equal to (net - league_avg_net)
-    scaled by FORM_ELO_PER_NET. Adjustments are clamped to avoid runaway
-    shifts when the stats payload is sparse or noisy.
-    """
-
+    """Return Elo-like adjustments from recent team net ratings."""
     if stats_df is None:
         return {}
 
@@ -269,21 +246,11 @@ def _pace_proxy_from_total(exp_total: float, league_total: float) -> float:
         return 1.0
 
 
-def _team_game_total_mean(team: str, team_tbl: pd.DataFrame) -> float:
-    if team_tbl is None or team_tbl.empty:
-        return float("nan")
-    sub = team_tbl[team_tbl["team"] == team]
-    if sub.empty:
-        return float("nan")
-    return float((sub["pts_for"] + sub["pts_against"]).mean())
-
-
 def _exp_weighted_team_stats(team: str, team_tbl: pd.DataFrame, as_of: date) -> tuple[float, float, float, float, int]:
     """
     Return (off_rating, def_rating, pace_home, pace_away, n) using exponential
     recency weights and caps to prevent any single noisy game from dominating.
     """
-
     if team_tbl is None or team_tbl.empty:
         return (float("nan"), float("nan"), float("nan"), float("nan"), 0)
 
@@ -363,10 +330,6 @@ def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
     """
     Columns: team, pts_for, pts_against, date, is_home, pace_proxy.
     Two rows per game (one for each team).
-
-    Added date + pace_proxy so we can apply recency weighting and separate
-    home/away pace when rebuilding totals. This keeps the totals model reactive
-    to opponent interaction and tempo without introducing new data sources.
     """
     try:
         api_key = get_bdl_api_key()
@@ -450,56 +413,8 @@ def _build_team_scoring_table(days_back: int, as_of_date: date) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["team", "pts_for", "pts_against", "date", "is_home", "pace_proxy"])
 
 
-def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd.DataFrame) -> Tuple[float, float, float]:
-    """
-    Objective expected points using recent scoring table.
-    Returns (exp_home_pts, exp_away_pts, exp_total).
-    """
-    if team_tbl is None or team_tbl.empty or np.isnan(league_pts) or league_pts <= 1e-6:
-        return (league_pts, league_pts, 2.0 * league_pts)
-
-    def _team_means(team: str) -> Tuple[Optional[float], Optional[float], int]:
-        sub = team_tbl[team_tbl["team"] == team]
-        if sub.empty:
-            return (None, None, 0)
-        pf = float(sub["pts_for"].mean())
-        pa = float(sub["pts_against"].mean())
-        n = int(len(sub))
-        return (pf, pa, n)
-
-    h_pf, h_pa, _ = _team_means(home)
-    a_pf, a_pa, _ = _team_means(away)
-
-    def _rel(v: Optional[float]) -> float:
-        if v is None or np.isnan(v):
-            return 1.0
-        raw = float(v) / float(league_pts)
-        return float((1.0 - PTS_REGRESS) * raw + PTS_REGRESS * 1.0)
-
-    home_off = _rel(h_pf)
-    home_def = _rel(h_pa)   # higher allowed => weaker defense
-    away_off = _rel(a_pf)
-    away_def = _rel(a_pa)
-
-    exp_home = float(league_pts) * home_off * away_def
-    exp_away = float(league_pts) * away_off * home_def
-
-    exp_home = _clamp(exp_home, PTS_LEAGUE_CLAMP_MIN, PTS_LEAGUE_CLAMP_MAX)
-    exp_away = _clamp(exp_away, PTS_LEAGUE_CLAMP_MIN, PTS_LEAGUE_CLAMP_MAX)
-
-    return (float(exp_home), float(exp_away), float(exp_home + exp_away))
-
-
-# ----------------------------
-# Elo + calibration
-# ----------------------------
 def backfill_nba_elo_state(*, default_elo: float = 1500.0) -> EloState:
-    """Gracefully load persisted Elo state when live updates fail.
-
-    Keeps the helper small so tests can monkeypatch it easily and callers can
-    supply a different default baseline if desired.
-    """
-
+    """Gracefully load persisted Elo state when live updates fail."""
     try:
         st = EloState.load(ELO_PATH)
     except Exception:
@@ -551,7 +466,6 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
             eh = st.get(home)
             ea = st.get(away)
 
-            # keep consistent with main path: use home_adv argument
             p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
             p_comp = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
 
@@ -581,7 +495,6 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
             ps_arr = np.array(train_ps, dtype=float)
             ys_arr = np.array(train_ys, dtype=float)
             cal, label = calibrate_prob(ps_arr, ys_arr)
-            # Persist the chosen calibrator type so downstream loads gracefully
             save_platt(PLATT_PATH, cal)
 
             resid = ys_arr - ps_arr
@@ -635,15 +548,9 @@ def _save_total_calibration(a: float, b: float, n: int) -> None:
         pass
 
 
-# ----------------------------
-# Main runner
-# ----------------------------
 def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """
-    Objective-only predictions:
-      - win prob + precise edge vs no-vig market
-      - expected margin + CI + blowout tail probs
-      - totals model + CI (uses per-team scoring table + historical totals blend)
+    Objective-only predictions.
     """
     game_date = datetime.strptime(game_date_str, "%m/%d/%Y").date()
 
@@ -676,8 +583,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             minutes_before_commence=10,
         )
         print(f"[hist_lines] n_teams={len(hist_lines or {})}")
-        # Fallback: if historical totals API yields nothing, derive totals stats from BDL scoring table
-        # This prevents totals from collapsing toward the same league anchor.
         if (not hist_lines) and (team_tbl is not None) and (not team_tbl.empty):
             try:
                 g = team_tbl.copy()
@@ -699,7 +604,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         print(f"[nba totals] WARNING: failed to build historical totals lines: {e}")
         hist_lines = {}
 
-    # Blend league anchors with historical totals so totals do not collapse when scoring table is sparse
     hist_avgs: list[float] = []
     hist_sds: list[float] = []
     for v in (hist_lines or {}).values():
@@ -729,7 +633,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         else:
             league_sd_total = float(0.5 * league_sd_total + 0.5 * hist_league_sd)
 
-    # injuries
     injury_source = "OFFICIAL"
     try:
         injury_data = _fetch_from_official_nba()
@@ -744,20 +647,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             injury_source = "NONE"
 
     rows = []
-    missing_elo_home = 0
-    missing_elo_away = 0
-    missing_hist_totals_home = 0
-    missing_hist_totals_away = 0
-    missing_ml_games = 0
-    total_games_processed = 0
-    teams_seen: set[str] = set()
-    missing_elo_teams: set[str] = set()
-    missing_hist_total_teams: set[str] = set()
-    elo_warned: set[str] = set()
 
     # IMPORTANT: odds_dict may store teams in the KEY (tuple), not in oi
     for matchup, oi in (odds_dict or {}).items():
-        # recover home/away from value dict or fallback to tuple key
         home_raw = (oi or {}).get("home")
         away_raw = (oi or {}).get("away")
         if (home_raw is None or away_raw is None) and isinstance(matchup, (tuple, list)) and len(matchup) == 2:
@@ -771,36 +663,12 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         event_id = (oi or {}).get("event_id")
         game_key = build_game_key(event_id, game_date_str, home, away)
 
-        # market ML -> no-vig
         home_ml = _safe_float((oi or {}).get("home_ml"))
         away_ml = _safe_float((oi or {}).get("away_ml"))
-        if np.isnan(home_ml) or np.isnan(away_ml):
-            missing_ml_games += 1
         p_home_imp = american_to_implied_prob(home_ml)
         p_away_imp = american_to_implied_prob(away_ml)
         mkt_home_p, _ = no_vig_pair(p_home_imp, p_away_imp)
 
-        if not np.isnan(home_ml) and not np.isnan(mkt_home_p):
-            if home_ml <= -250 and mkt_home_p < 0.50:
-                logging.warning(
-                    "[nba model] ML/prob mismatch (home favorite flipped): %s vs %s | MLs %s/%s | mkt_home_p=%.3f",
-                    home,
-                    away,
-                    home_ml,
-                    away_ml,
-                    mkt_home_p,
-                )
-            if home_ml >= 250 and mkt_home_p > 0.50:
-                logging.warning(
-                    "[nba model] ML/prob mismatch (home dog flipped): %s vs %s | MLs %s/%s | mkt_home_p=%.3f",
-                    home,
-                    away,
-                    home_ml,
-                    away_ml,
-                    mkt_home_p,
-                )
-
-        # injuries -> elo shift
         inj_list_home = build_injury_list_for_team_nba(home, injury_data)
         inj_list_away = build_injury_list_for_team_nba(away, injury_data)
         inj_pts_home = _clamp(injury_adjustment_points(inj_list_home), -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS) * INJ_DAMP
@@ -814,11 +682,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         eh = float(st.get(home)) + inj_elo_home + form_home
         ea = float(st.get(away)) + inj_elo_away + form_away
 
-        # base win prob from Elo
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_home = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
 
-        # platt/isotonic calibration if available
         if platt is not None:
             try:
                 p_home = float(platt.predict(p_home))
@@ -826,7 +692,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             except Exception:
                 pass
 
-        # uncertainty shrink: pull toward 0.5 when residual variance is high
         resid_sd = float(math.sqrt(resid_var)) if resid_var is not None and not math.isnan(resid_var) else 0.06
         shrink = 1.0 + float(UNCERTAINTY_SHRINK) * float(_clamp(resid_sd, 0.0, 0.50))
         p_home = 0.5 + (p_home - 0.5) / shrink
@@ -842,7 +707,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         edge_away = float(-edge_home) if not np.isnan(edge_home) else float("nan")
         ml_reco = _ml_recommendation(p_home_blend, mkt_home_p, min_edge=MIN_ML_EDGE)
 
-        # -------- spread / margin (clean, single path) --------
         elo_diff = (eh + HOME_ADV) - ea
         model_spread_home = float(-float(elo_diff) / 16.0)
         if margin_cal is not None:
@@ -855,7 +719,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             model_spread_home = float(_clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
         mu_margin_home = float(-model_spread_home)
 
-        # -------- expected scoring + pace adjustment (apply BEFORE totals) --------
         h_off, h_def, h_pace_home, h_pace_away, h_n_w = _exp_weighted_team_stats(home, team_tbl, as_of)
         a_off, a_def, a_pace_home, a_pace_away, a_n_w = _exp_weighted_team_stats(away, team_tbl, as_of)
 
@@ -864,7 +727,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         weighted_team_offense = np.nanmean([h_off, a_off])
         weighted_opponent_defense = np.nanmean([h_def, a_def])
 
-        # Separate home/away pace; fall back to league anchor pace proxy
         pace_home = h_pace_home if not np.isnan(h_pace_home) else 1.0
         pace_away = a_pace_away if not np.isnan(a_pace_away) else 1.0
         pace_adjustment = league_anchor * (TOTAL_PACE_HOME_W * (pace_home - 1.0) + TOTAL_PACE_AWAY_W * (pace_away - 1.0))
@@ -874,7 +736,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         base_total = weighted_team_offense + weighted_opponent_defense
         model_total = base_total + pace_adjustment + inj_total_adj
 
-        # margin variance scaled by pace proxy from adjusted total
         pace_proxy = _pace_proxy_from_total(model_total, league_anchor) if not np.isnan(league_anchor) else 1.0
         margin_sd = float(MARGIN_SD_BASE) * float(_clamp(0.92 + 0.20 * pace_proxy, 0.85, 1.15))
 
@@ -885,20 +746,12 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         margin_ci95_low, margin_ci95_high = _normal_ci(mu_margin_home, margin_sd, z=1.96)
         margin_ci80_low, margin_ci80_high = _normal_ci(mu_margin_home, margin_sd, z=1.2816)
 
-        # -------- totals --------
         total_points = _safe_float((oi or {}).get("total_points"))
         total_over_price = _safe_float((oi or {}).get("over_price"), default=TOTAL_DEFAULT_PRICE)
         total_under_price = _safe_float((oi or {}).get("under_price"), default=TOTAL_DEFAULT_PRICE)
 
         h_avg, h_sd, h_n = _team_hist_total_stats(home, hist_lines)
         a_avg, a_sd, a_n = _team_hist_total_stats(away, hist_lines)
-
-        if home and (h_n <= 0 or np.isnan(h_avg)):
-            missing_hist_totals_home += 1
-            missing_hist_total_teams.add(home)
-        if away and (a_n <= 0 or np.isnan(a_avg)):
-            missing_hist_totals_away += 1
-            missing_hist_total_teams.add(away)
 
         hist_base = float("nan")
         if not np.isnan(h_avg) and not np.isnan(a_avg):
@@ -923,7 +776,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         if not np.isnan(model_total) and not np.isnan(total_points):
             total_calibration_samples.append((model_total, total_points))
 
-        # total sd: prefer hist sd, else league sd
         sd = float("nan")
         if not np.isnan(h_sd) and not np.isnan(a_sd):
             sd = 0.5 * (h_sd + a_sd)
@@ -945,7 +797,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         total_reco = "No total bet (missing total/model)"
 
         if not np.isnan(model_total) and not np.isnan(total_points) and sd > 0:
-            # P(over) from Normal(model_total, sd)
             z = (model_total - total_points) / sd
             p_over = float(_clamp(_phi(z), 0.001, 0.999))
             p_under = 1.0 - p_over
@@ -974,7 +825,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             else:
                 total_reco = "No total bet (edge too small)"
 
-        # -------- ATS fields if present in odds --------
         home_spread = _safe_float((oi or {}).get("home_spread"))
         spread_price = _safe_float((oi or {}).get("spread_price"), default=ATS_DEFAULT_PRICE)
         spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) and not np.isnan(model_spread_home) else float("nan")
@@ -1041,59 +891,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             }
         )
 
-    total_teams_seen = len([t for t in teams_seen if t])
-    total_games = total_games_processed
-    missing_elo_total = len(missing_elo_teams)
-    missing_hist_total = len(missing_hist_total_teams)
-
-    try:
-        print(
-            "[nba diag]"
-            f" missing_elo={missing_elo_total}/{total_teams_seen} teams,"
-            f" missing_hist_totals={missing_hist_total}/{total_teams_seen},"
-            f" missing_ml={missing_ml_games}/{total_games} games,"
-            f" injury_source={injury_source}."
-        )
-    except Exception:
-        pass
-
     df = pd.DataFrame(rows)
-
-    try:
-        spreads = pd.to_numeric(df.get("model_spread_home"), errors="coerce") if not df.empty else pd.Series(dtype=float)
-        totals = pd.to_numeric(df.get("model_total"), errors="coerce") if not df.empty else pd.Series(dtype=float)
-        win_probs = pd.to_numeric(df.get("model_home_prob"), errors="coerce") if not df.empty else pd.Series(dtype=float)
-
-        def _stat(series: pd.Series, fn) -> float:
-            if series is None or series.empty:
-                return float("nan")
-            clean = series.dropna()
-            if clean.empty:
-                return float("nan")
-            return float(fn(clean))
-
-        num_games = len(df)
-        near_zero_spreads = int((spreads.abs() < 0.25).sum()) if not df.empty else 0
-        spread_min = _stat(spreads, np.min)
-        spread_med = _stat(spreads, np.median)
-        spread_max = _stat(spreads, np.max)
-        total_min = _stat(totals, np.min)
-        total_med = _stat(totals, np.median)
-        total_max = _stat(totals, np.max)
-        prob_min = _stat(win_probs, np.min)
-        prob_med = _stat(win_probs, np.median)
-        prob_max = _stat(win_probs, np.max)
-
-        print(
-            "[nba diagnostics]"
-            f" games={num_games}"
-            f" spreads≈0={near_zero_spreads}"
-            f" spread_min={spread_min:.2f} med={spread_med:.2f} max={spread_max:.2f}"
-            f" total_min={total_min:.1f} med={total_med:.1f} max={total_max:.1f}"
-            f" win_p_min={prob_min:.3f} med={prob_med:.3f} max={prob_max:.3f}"
-        )
-    except Exception:
-        pass
 
     # Update totals calibration vs. observed market totals when enough samples exist
     if len(total_calibration_samples) >= 5:
