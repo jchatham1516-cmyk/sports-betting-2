@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import math
 import os
@@ -23,6 +24,29 @@ from sports.common.util import american_to_decimal, safe_float
 
 DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y", "%m-%d-%y")
 
+BET_LOG_COLUMNS = [
+    "bet_id",
+    "date",
+    "sport",
+    "home",
+    "away",
+    "market_type",
+    "side",
+    "line_at_bet",
+    "price_at_bet",
+    "model_prob",
+    "market_prob",
+    "edge",
+    "confidence",
+    "value_tier",
+    "units",
+    "result",
+    "closing_line",
+    "closing_price",
+    "clv",
+    "notes",
+]
+
 
 def _parse_date(value) -> Optional[date]:
     if value is None:
@@ -39,6 +63,13 @@ def parse_tracking_date(value) -> Optional[date]:
     """Public wrapper for date parsing used by CLI layers."""
 
     return _parse_date(value)
+
+
+def _normalize_date_str(value) -> str:
+    parsed = _parse_date(value)
+    if parsed:
+        return parsed.isoformat()
+    return str(value)
 
 
 def _find_recs_csv(results_dir: str, target_date: date) -> Optional[str]:
@@ -118,6 +149,11 @@ def _safe_number(x) -> float:
         return float("nan")
 
 
+def _hash_bet_id(*parts: object) -> str:
+    joined = "|".join(str(p) for p in parts)
+    return hashlib.md5(joined.encode("utf-8")).hexdigest()
+
+
 # ---------------------------
 # Grading logic
 # ---------------------------
@@ -183,6 +219,104 @@ def _is_playable_reco(text: str) -> bool:
     if u.startswith("PASS"):
         return False
     return True
+
+
+def _bet_edge_for_market(row: pd.Series, market_type: str) -> object:
+    market = str(market_type).lower()
+    if market == "moneyline":
+        return row.get("primary_ev", row.get("ml_ev_best"))
+    if market == "spread":
+        return row.get("primary_ev", row.get("ats_ev_best"))
+    if market == "total":
+        return row.get("primary_ev", row.get("total_ev_best"))
+    return None
+
+
+def _build_bet_from_primary(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
+    play = str(row.get("play_pass", "")).upper()
+    if play != "PLAY":
+        return None
+
+    units = _safe_number(row.get("units"))
+    if math.isnan(units) or units <= 0:
+        return None
+
+    primary_market = str(row.get("primary_market", "")).upper()
+    primary_side = str(row.get("primary_side", "")).upper()
+    if not primary_market or not primary_side:
+        return None
+
+    market_type = None
+    line_at_bet: object = ""
+    price_at_bet: object = np.nan
+    model_prob = np.nan
+    market_prob = np.nan
+    side = primary_side
+
+    if "ML" in primary_market:
+        market_type = "moneyline"
+        price_at_bet = row.get("home_ml") if primary_side == "HOME" else row.get("away_ml")
+        model_prob = _safe_number(row.get("model_home_prob"))
+        market_prob = _safe_number(row.get("market_home_prob"))
+        if primary_side == "AWAY":
+            model_prob = 1.0 - model_prob if np.isfinite(model_prob) else model_prob
+            market_prob = 1.0 - market_prob if np.isfinite(market_prob) else market_prob
+    elif "ATS" in primary_market or "SPREAD" in primary_market:
+        market_type = "spread"
+        line_at_bet = row.get("home_spread")
+        price_at_bet = row.get("spread_price")
+    elif "TOTAL" in primary_market:
+        market_type = "total"
+        line_at_bet = row.get("total_points")
+        if primary_side == "OVER":
+            price_at_bet = row.get("total_over_price")
+        elif primary_side == "UNDER":
+            price_at_bet = row.get("total_under_price")
+
+    if market_type is None:
+        return None
+
+    unit_dollars = _safe_number(row.get("unit_dollars"))
+    if math.isnan(unit_dollars):
+        unit_dollars = 10.0
+    stake = units * unit_dollars
+
+    price_decimal = _american_to_decimal(price_at_bet)
+    date_str = _normalize_date_str(row.get("date"))
+
+    bet_id = _hash_bet_id(
+        date_str,
+        sport,
+        canon_team(row.get("home")),
+        canon_team(row.get("away")),
+        market_type,
+        side,
+        line_at_bet,
+        price_at_bet,
+    )
+
+    return {
+        "bet_id": bet_id,
+        "date": date_str,
+        "sport": sport,
+        "home": row.get("home"),
+        "away": row.get("away"),
+        "market_type": market_type,
+        "side": side,
+        "line_at_bet": line_at_bet if not pd.isna(line_at_bet) else "",
+        "price_at_bet": price_at_bet,
+        "price_decimal": price_decimal,
+        "model_prob": model_prob,
+        "market_prob": market_prob,
+        "edge": _bet_edge_for_market(row, market_type),
+        "confidence": row.get("confidence"),
+        "value_tier": row.get("value_tier"),
+        "units": units,
+        "unit_dollars": unit_dollars,
+        "stake_dollars": stake,
+        "result": "",
+        "notes": row.get("primary_recommendation", ""),
+    }
 
 
 def _preferred_units(row: pd.Series, default_unit: float) -> Tuple[float, float]:
@@ -296,6 +430,44 @@ def _normalize_bets(df: pd.DataFrame, sport: str, unit_dollars_default: float) -
         axis=1,
     )
     return out
+
+
+def append_bets_from_predictions(preds_df: pd.DataFrame, sport: str, bet_log_path: str = "results/bet_log.csv") -> int:
+    """Append PLAY rows from today's predictions into the long-term bet_log.
+
+    Returns the number of new bets written (deduped by bet_id).
+    """
+
+    if preds_df is None or preds_df.empty:
+        return 0
+
+    bets: List[Dict[str, object]] = []
+    for _, row in preds_df.iterrows():
+        bet = _build_bet_from_primary(row, sport)
+        if bet:
+            bets.append(bet)
+
+    if not bets:
+        return 0
+
+    os.makedirs(os.path.dirname(bet_log_path) or ".", exist_ok=True)
+
+    new_df = pd.DataFrame(bets)
+    if os.path.exists(bet_log_path):
+        existing = pd.read_csv(bet_log_path)
+    else:
+        existing = pd.DataFrame(columns=BET_LOG_COLUMNS)
+
+    combined = pd.concat([existing, new_df], ignore_index=True)
+
+    for col in set(BET_LOG_COLUMNS + list(new_df.columns) + list(existing.columns)):
+        if col not in combined.columns:
+            combined[col] = np.nan
+
+    combined = combined.drop_duplicates(subset=["bet_id"], keep="first")
+    combined.to_csv(bet_log_path, index=False)
+
+    return max(0, len(combined) - len(existing))
 
 
 def _events_to_scores_df(events: List[Dict[str, object]], target_date: date) -> pd.DataFrame:
@@ -464,6 +636,62 @@ def _write_outputs(
     return daily_path, combined, summary
 
 
+def _grade_bet_log_rows(bets: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
+    if bets.empty:
+        return bets
+
+    working = bets.copy()
+    working["home_canon"] = working["home"].apply(canon_team)
+    working["away_canon"] = working["away"].apply(canon_team)
+    merged = working.merge(scores, on=["home_canon", "away_canon"], how="left")
+
+    results: List[str] = []
+    profits: List[float] = []
+    price_decimals: List[float] = []
+    stakes: List[float] = []
+
+    for _, row in merged.iterrows():
+        market = str(row.get("market_type", "")).lower()
+        side = str(row.get("side", ""))
+        hs = row.get("home_score")
+        aws = row.get("away_score")
+        line = row.get("line_at_bet")
+
+        price_decimal = row.get("price_decimal")
+        if pd.isna(price_decimal) or price_decimal == "":
+            price_decimal = _american_to_decimal(row.get("price_at_bet"))
+
+        stake = row.get("stake_dollars")
+        if pd.isna(stake) or stake == "":
+            units = _safe_number(row.get("units"))
+            unit_dollars = _safe_number(row.get("unit_dollars"))
+            if math.isnan(unit_dollars):
+                unit_dollars = 10.0
+            stake = 0.0 if math.isnan(units) else units * unit_dollars
+
+        if market == "moneyline":
+            result = grade_moneyline(side, hs, aws)
+        elif market == "spread":
+            result = grade_spread(side, line, hs, aws) if not pd.isna(line) else "MISSING_SCORE"
+        elif market == "total":
+            result = grade_total(side, line, hs, aws) if not pd.isna(line) else "MISSING_SCORE"
+        else:
+            result = "MISSING_SCORE"
+
+        profit, _ = _calc_profit_and_payout(stake, price_decimal, result)
+
+        results.append(result)
+        profits.append(profit)
+        price_decimals.append(price_decimal)
+        stakes.append(stake)
+
+    merged["result"] = results
+    merged["profit_dollars"] = profits
+    merged["price_decimal"] = price_decimals
+    merged["stake_dollars"] = stakes
+    return merged
+
+
 # ---------------------------
 # Public API
 # ---------------------------
@@ -475,6 +703,15 @@ class TrackingResult:
     summary: Dict[str, object]
     bets_df: pd.DataFrame
     history_df: pd.DataFrame
+    ok: bool
+    reason: str = ""
+
+
+@dataclass
+class BetLogTrackingResult:
+    updated_log: pd.DataFrame
+    graded_bets: pd.DataFrame
+    summary: Dict[str, object]
     ok: bool
     reason: str = ""
 
@@ -539,3 +776,67 @@ def track_yesterday(
         tracking_dir=tracking_dir,
         unit_dollars_default=unit_dollars_default,
     )
+
+
+def track_bets_for_date(
+    sport: str,
+    target_date: date,
+    *,
+    bet_log_path: str = "results/bet_log.csv",
+    unit_dollars_default: float = 10.0,
+) -> BetLogTrackingResult:
+    if not os.path.exists(bet_log_path):
+        return BetLogTrackingResult(pd.DataFrame(), pd.DataFrame(), {}, ok=False, reason="bet_log.csv not found")
+
+    log_df = pd.read_csv(bet_log_path)
+    if log_df.empty:
+        return BetLogTrackingResult(log_df, pd.DataFrame(), {}, ok=False, reason="bet_log.csv is empty")
+
+    working = log_df.copy()
+    working["date_parsed"] = working["date"].apply(lambda d: _parse_date(d) or d)
+    working["sport_lower"] = working.get("sport", "").astype(str).str.lower()
+
+    mask_date = working["date_parsed"] == target_date
+    mask_sport = working["sport_lower"] == str(sport).lower()
+    mask_ungraded = working["result"].isna() | (working["result"].astype(str) == "")
+
+    pending = working[mask_date & mask_sport & mask_ungraded]
+    if pending.empty:
+        return BetLogTrackingResult(log_df, pd.DataFrame(), {}, ok=False, reason="No open bets to grade")
+
+    pending = pending.copy()
+    pending["unit_dollars"] = pending.get("unit_dollars", unit_dollars_default).fillna(unit_dollars_default)
+    pending["units"] = pending.get("units", 0.0).fillna(0.0)
+
+    scores_df = _fetch_scores_df(sport, target_date)
+    graded = _grade_bet_log_rows(pending, scores_df)
+
+    log_indexed = log_df.set_index("bet_id")
+    for _, row in graded.iterrows():
+        bid = row.get("bet_id")
+        if bid not in log_indexed.index:
+            continue
+        for col in ["result", "home_score", "away_score", "price_decimal", "stake_dollars", "profit_dollars"]:
+            log_indexed.loc[bid, col] = row.get(col)
+
+    log_df_updated = log_indexed.reset_index()
+    log_df_updated.to_csv(bet_log_path, index=False)
+
+    played = graded[graded["result"].isin(["WIN", "LOSS", "PUSH"])]
+    wins = int((played["result"] == "WIN").sum())
+    losses = int((played["result"] == "LOSS").sum())
+    pushes = int((played["result"] == "PUSH").sum())
+    total_stake = float(played.get("stake_dollars", pd.Series(dtype=float)).sum())
+    profit = float(played.get("profit_dollars", pd.Series(dtype=float)).sum())
+    roi = float(profit / total_stake) if total_stake else 0.0
+
+    summary = {
+        "graded": int(len(graded)),
+        "wins": wins,
+        "losses": losses,
+        "pushes": pushes,
+        "profit": profit,
+        "roi": roi,
+    }
+
+    return BetLogTrackingResult(log_df_updated, graded, summary, ok=True)
