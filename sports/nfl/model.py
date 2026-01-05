@@ -1,13 +1,19 @@
 # sports/nfl/model.py
-# Add at top of file
 from sports.common.prob_calibration import ProbabilityCalibrator
 
 # In predict() function, after computing win_prob:
 def predict(game_date, home_team, away_team, odds_data=None):
     # ... existing Elo calculation ...
     
-    # Raw probability
-    raw_win_prob = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
+# Calculate win probability from Elo
+raw_win_prob = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
+
+# 🆕 APPLY CALIBRATION
+from sports.common.prob_calibration import ProbabilityCalibrator
+calibrator = ProbabilityCalibrator('nfl')
+win_prob = calibrator.calibrate(raw_win_prob, 'moneyline')
+
+print(f"[CALIBRATION] {home_team}: Raw={raw_win_prob:.3f} → Calibrated={win_prob:.3f}")
     
     # 🆕 CALIBRATE
     calibrator = ProbabilityCalibrator('nfl')
