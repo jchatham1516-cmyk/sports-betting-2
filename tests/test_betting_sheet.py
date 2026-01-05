@@ -32,7 +32,20 @@ def test_convert_to_betting_sheet_creates_output(tmp_path):
     output_path = tmp_path / "raw_betting_sheet.csv"
     assert output_path.exists()
 
-    expected_cols = {"primary_recommendation", "play_pass", "bet_size", "unit_dollars", "units"}
+    expected_cols = {
+        "primary_recommendation",
+        "play_pass",
+        "bet_size",
+        "unit_dollars",
+        "units",
+        "decision_flags",
+        "decision_reason",
+        "raw_units",
+        "final_units",
+        "p_model_used",
+        "p_market_used",
+        "abs_edge_used",
+    }
     assert expected_cols.issubset(result_df.columns)
     assert result_df.loc[0, "unit_dollars"] == 20.0
     assert result_df.loc[0, "play_pass"] in {"PLAY", "PASS"}
