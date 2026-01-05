@@ -237,6 +237,14 @@ def main(argv=None):
     print(f"\nSaved predictions to {out_name}")
     print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
 
+    if "date" not in results_df.columns:
+        results_df["date"] = game_date
+    results_df["date"] = results_df["date"].fillna(game_date)
+
+    bet_log_path = "results/bet_log.csv"
+    new_bets = tracker.append_bets_from_predictions(results_df, args.sport, bet_log_path=bet_log_path)
+    print(f"[bet_log] Added {new_bets} new bets to {bet_log_path}")
+
     # Evaluation/sanity checks
     eval_date = None
     try:
@@ -279,21 +287,15 @@ def main(argv=None):
 
     if track_target:
         print(f"[tracking] Grading bets for {track_target.isoformat()}...")
-        track_result = tracker.track_date(sport=args.sport, target_date=track_target)
+        track_result = tracker.track_bets_for_date(sport=args.sport, target_date=track_target, bet_log_path=bet_log_path)
         if not track_result.ok:
             print(f"[tracking] WARNING: tracking failed: {track_result.reason}")
         else:
-            graded = track_result.bets_df
-            played = graded[graded["result"].isin(["WIN", "LOSS", "PUSH"])]
-            wins = int((played["result"] == "WIN").sum())
-            losses = int((played["result"] == "LOSS").sum())
-            pushes = int((played["result"] == "PUSH").sum())
-            profit = float(played.get("profit_dollars", pd.Series(dtype=float)).sum())
-            stake = float(played.get("stake_dollars", pd.Series(dtype=float)).sum())
-            roi = profit / stake if stake else 0.0
+            summary = track_result.summary
             print(
-                f"[tracking] Tracked {len(played)} bets: {wins}-{losses}-{pushes} | "
-                f"Profit=${profit:.2f} | ROI={roi*100:.2f}%"
+                f"[tracking] Tracked {summary.get('graded', 0)} bets: "
+                f"{summary.get('wins', 0)}-{summary.get('losses', 0)}-{summary.get('pushes', 0)} | "
+                f"Profit=${summary.get('profit', 0.0):.2f} | ROI={summary.get('roi', 0.0)*100:.2f}%"
             )
     return 0
 
