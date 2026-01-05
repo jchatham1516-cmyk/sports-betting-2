@@ -19,9 +19,9 @@ TIER_MED = 0.04
 TIER_LOW = 0.02
 
 # If you want to be stricter/looser globally, change these:
-MIN_EV_TO_PLAY = 0.02       # minimum EV per $1 to consider a "PLAY"
+MIN_EV_TO_PLAY = 0.015       # minimum EV per $1 to consider a "PLAY"
 MIN_PLAY_EDGE_ABS = MIN_EV_TO_PLAY
-MIN_PRIMARY_EDGE_ABS = 0.04   # not enforced here, but useful if you want later
+MIN_PRIMARY_EDGE_ABS = 0.03   # not enforced here, but useful if you want later
 
 
 def _to_float(x):
