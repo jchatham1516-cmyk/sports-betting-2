@@ -782,7 +782,7 @@ def track_bets_for_date(
     sport: str,
     target_date: date,
     *,
-    bet_log_path: str = "results/bet_log.csv",
+    bet_log_path: str = "results/tracking/bet_log.csv",
     unit_dollars_default: float = 10.0,
 ) -> BetLogTrackingResult:
     if not os.path.exists(bet_log_path):
@@ -811,6 +811,13 @@ def track_bets_for_date(
     scores_df = _fetch_scores_df(sport, target_date)
     graded = _grade_bet_log_rows(pending, scores_df)
 
+    os.makedirs(os.path.dirname(bet_log_path) or ".", exist_ok=True)
+    graded_out_path = os.path.join(
+        os.path.dirname(bet_log_path) or ".",
+        f"graded_{sport}_{target_date.isoformat()}.csv",
+    )
+    graded.to_csv(graded_out_path, index=False)
+
     log_indexed = log_df.set_index("bet_id")
     for _, row in graded.iterrows():
         bid = row.get("bet_id")
@@ -837,6 +844,7 @@ def track_bets_for_date(
         "pushes": pushes,
         "profit": profit,
         "roi": roi,
+        "graded_path": graded_out_path,
     }
 
     return BetLogTrackingResult(log_df_updated, graded, summary, ok=True)

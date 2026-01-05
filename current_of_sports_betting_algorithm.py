@@ -16,6 +16,7 @@ from sports.common.odds_sources import (
     SPORT_TO_ODDS_KEY,
 )
 from sports.common import tracker
+from sports.common.bet_logger import append_plays_to_bet_log
 
 from sports.common.bankroll import (
     DEFAULT_BANKROLL,
@@ -241,8 +242,8 @@ def main(argv=None):
         results_df["date"] = game_date
     results_df["date"] = results_df["date"].fillna(game_date)
 
-    bet_log_path = "results/bet_log.csv"
-    new_bets = tracker.append_bets_from_predictions(results_df, args.sport, bet_log_path=bet_log_path)
+    bet_log_path = "results/tracking/bet_log.csv"
+    new_bets = append_plays_to_bet_log(results_df, args.sport, bet_log_path=bet_log_path)
     print(f"[bet_log] Added {new_bets} new bets to {bet_log_path}")
 
     # Evaluation/sanity checks
@@ -293,10 +294,14 @@ def main(argv=None):
         else:
             summary = track_result.summary
             print(
-                f"[tracking] Tracked {summary.get('graded', 0)} bets: "
-                f"{summary.get('wins', 0)}-{summary.get('losses', 0)}-{summary.get('pushes', 0)} | "
-                f"Profit=${summary.get('profit', 0.0):.2f} | ROI={summary.get('roi', 0.0)*100:.2f}%"
+                "Graded "
+                f"{summary.get('graded', 0)} bets: "
+                f"{summary.get('wins', 0)}-{summary.get('losses', 0)}-{summary.get('pushes', 0)}"
+                f", Profit ${summary.get('profit', 0.0):.2f}, ROI {summary.get('roi', 0.0)*100:.2f}%"
             )
+            graded_path = summary.get("graded_path")
+            if graded_path:
+                print(f"[tracking] Wrote graded results to {graded_path}")
     return 0
 
 
