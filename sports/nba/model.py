@@ -14,7 +14,6 @@ win_prob = calibrator.calibrate(raw_win_prob, 'moneyline')
 
 print(f"[CALIBRATION] {home_team}: Raw={raw_win_prob:.3f} → Calibrated={win_prob:.3f}")
     
-    # ... rest of function ...
 from __future__ import annotations
 
 import json
