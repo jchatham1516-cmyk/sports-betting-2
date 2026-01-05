@@ -21,8 +21,11 @@ from sports.common.bet_logger import append_plays_to_bet_log
 from sports.common.bankroll import (
     DEFAULT_BANKROLL,
     UNIT_PCT,
-    play_pass_rule,
-    compute_bet_size,
+)
+from sports.common.bet_rules import (
+    DecisionSettings,
+    decide_bet_from_row,
+    format_decision_trace,
 )
 
 from sports.nba.bdl_client import (
@@ -65,8 +68,17 @@ def _cap_to_top_plays(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
                 df.loc[i, "bet_size"] = 0.0
             if "units" in df.columns:
                 df.loc[i, "units"] = 0.0
+            if "raw_units" in df.columns:
+                df.loc[i, "raw_units"] = 0.0
+            if "final_units" in df.columns:
+                df.loc[i, "final_units"] = 0.0
             if "why_bet" in df.columns:
                 df.loc[i, "why_bet"] = str(df.loc[i, "why_bet"]) + " | filtered: top-N plays"
+            if "decision_flags" in df.columns:
+                suffix = ",TOP_N_FILTER" if str(df.loc[i, "decision_flags"]).strip() else "TOP_N_FILTER"
+                df.loc[i, "decision_flags"] = f"{df.loc[i, 'decision_flags']}{suffix}" if str(df.loc[i, "decision_flags"]).strip() else "TOP_N_FILTER"
+            if "decision_reason" in df.columns:
+                df.loc[i, "decision_reason"] = str(df.loc[i, "decision_reason"]) + " | filtered: top-N plays"
     return df
 
 
@@ -109,6 +121,8 @@ def main(argv=None):
 
     parser.add_argument("--track_yesterday", action="store_true", help="Grade and track yesterday's bets after running.")
     parser.add_argument("--track_date", type=str, default=None, help="Explicit date (YYYY-MM-DD or MM/DD/YYYY) to grade.")
+
+    parser.add_argument("--debug_decisions", action="store_true", help="Print decision traces for each game.")
 
     parser.add_argument("--max_plays", type=int, default=int(os.getenv("MAX_PLAYS_PER_SPORT_PER_DAY", "3")))
     parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
@@ -194,32 +208,56 @@ def main(argv=None):
     play_max_abs_ml = None if int(args.play_max_abs_ml) == 0 else int(args.play_max_abs_ml)
     unit_dollars = float(args.bankroll) * UNIT_PCT
 
+    decision_settings = DecisionSettings(
+        min_play_edge_abs=float(os.getenv("MIN_PLAY_EDGE_ABS", DecisionSettings().min_play_edge_abs)),
+        min_primary_edge_abs=DecisionSettings().min_primary_edge_abs,
+        longshot_cutoff=float(os.getenv("LONGSHOT_ODDS_CAP", 500)),
+        favorite_extreme_cutoff=float(os.getenv("FAVORITE_EXTREME_CAP", -800)),
+        max_disagreement=float(os.getenv("MAX_MODEL_MARKET_DISAGREE", 0.20)),
+        max_units=float(os.getenv("MAX_UNITS", 1.0)),
+        max_units_sanity=float(os.getenv("MAX_UNITS_SANITY", 0.25)),
+        min_play_units=float(os.getenv("MIN_PLAY_UNITS", 0.25)),
+        flat_pct=float(args.flat_pct),
+        sizing_mode=str(args.sizing),
+        kelly_mult=float(args.kelly_mult),
+        kelly_max_pct=float(args.kelly_max_pct),
+    )
+
     if not results_df.empty:
-        results_df["play_pass"] = results_df.apply(
-            lambda r: play_pass_rule(
+        decisions = [
+            decide_bet_from_row(
                 r,
+                unit_dollars=unit_dollars,
+                settings=decision_settings,
                 require_pick=args.play_require_pick,
                 require_value_tier=args.play_value_tier,
                 min_confidence=args.play_min_conf,
                 max_abs_moneyline=play_max_abs_ml,
-            ),
-            axis=1,
-        )
+            )
+            for _, r in results_df.iterrows()
+        ]
 
-        results_df["bet_size"] = results_df.apply(
-            lambda r: compute_bet_size(
-                r,
-                args.bankroll,
-                sizing_mode=args.sizing,
-                flat_pct=args.flat_pct,
-                kelly_mult=args.kelly_mult,
-                kelly_max_pct=args.kelly_max_pct,
-            ),
-            axis=1,
-        )
+        results_df["play_pass"] = [d.play_pass for d in decisions]
+        results_df["bet_size"] = [d.bet_size for d in decisions]
+        results_df["unit_dollars"] = [d.unit_dollars for d in decisions]
+        results_df["units"] = [d.units for d in decisions]
+        results_df["why_bet"] = [d.reason for d in decisions]
+        results_df["decision_flags"] = [d.decision_flags for d in decisions]
+        results_df["decision_reason"] = [d.decision_reason for d in decisions]
+        results_df["raw_units"] = [d.raw_units for d in decisions]
+        results_df["final_units"] = [d.final_units for d in decisions]
+        results_df["p_model_used"] = [d.p_model_used for d in decisions]
+        results_df["p_market_used"] = [d.p_market_used for d in decisions]
+        results_df["abs_edge_used"] = [d.abs_edge_used for d in decisions]
 
-        results_df["unit_dollars"] = unit_dollars
-        results_df["units"] = results_df["bet_size"].apply(lambda x: 0.0 if not x else float(x) / unit_dollars)
+        if args.debug_decisions:
+            print("\n[debug] Decision traces:")
+            for (idx, r), d in zip(results_df.iterrows(), decisions):
+                conf = str(r.get("confidence", "")).upper()
+                if d.play_pass == "PASS" and conf in {"HIGH", "MEDIUM"}:
+                    print(format_decision_trace(r, d))
+                elif d.decision_flags:
+                    print(format_decision_trace(r, d))
 
         results_df = _cap_to_top_plays(results_df, int(args.max_plays))
 

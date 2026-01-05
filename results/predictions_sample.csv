@@ -1,0 +1,4 @@
+date,home,away,primary_recommendation,value_tier,confidence,home_ml,away_ml,model_home_prob,market_home_prob
+01/01/2024,TeamA,TeamB,Model PICK: HOME ML (strong),HIGH VALUE,HIGH,550,-800,0.35,0.2
+01/01/2024,TeamC,TeamD,Model PICK: AWAY ML (strong),HIGH VALUE,MEDIUM,-850,650,0.25,0.1
+01/01/2024,TeamE,TeamF,Model PICK: HOME ML (strong),HIGH VALUE,HIGH,480,-600,0.4,0.18

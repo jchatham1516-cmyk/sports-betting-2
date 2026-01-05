@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+from sports.common.bankroll import (
+    bet_size_flat,
+    bet_size_kelly_ml,
+)
+from sports.common.util import safe_float
 
 # -------------------------------------------------------------------
 # Betting / sizing rules shared across sports
@@ -22,6 +28,7 @@ TIER_LOW = 0.02
 MIN_EV_TO_PLAY = 0.015       # minimum EV per $1 to consider a "PLAY"
 MIN_PLAY_EDGE_ABS = MIN_EV_TO_PLAY
 MIN_PRIMARY_EDGE_ABS = 0.03   # not enforced here, but useful if you want later
+MIN_SANITY_EDGE_ABS = 0.03
 
 
 def _to_float(x):
@@ -90,6 +97,39 @@ class BetDecision:
     reason: str
 
 
+@dataclass
+class DecisionSettings:
+    min_play_edge_abs: float = MIN_PLAY_EDGE_ABS
+    min_primary_edge_abs: float = MIN_PRIMARY_EDGE_ABS
+    min_sanity_edge_abs: float = MIN_SANITY_EDGE_ABS
+    longshot_cutoff: float = 500.0
+    favorite_extreme_cutoff: float = -800.0
+    max_disagreement: float = 0.20
+    max_units: float = 1.0
+    max_units_sanity: float = 0.25
+    min_play_units: float = 0.25
+    flat_pct: float = 0.04
+    sizing_mode: str = "flat"  # "flat" or "kelly"
+    kelly_mult: float = 0.5
+    kelly_max_pct: float = 0.03
+
+
+@dataclass
+class DecisionOutcome:
+    play_pass: str
+    bet_size: float
+    unit_dollars: float
+    units: float
+    reason: str
+    decision_flags: str
+    decision_reason: str
+    raw_units: float
+    final_units: float
+    p_model_used: float
+    p_market_used: float
+    abs_edge_used: float
+
+
 def value_tier_from_edge(abs_edge: float) -> str:
     if abs_edge is None or (isinstance(abs_edge, float) and np.isnan(abs_edge)):
         return "UNKNOWN"
@@ -137,6 +177,288 @@ def decide_play_pass(
 
     bet_size = float(units * float(unit_dollars))
     return BetDecision("PLAY", bet_size, float(unit_dollars), units, f"{reason_prefix}edge={abs_edge:.3f} tier={tier}")
+
+
+def _probabilities_for_primary(row: pd.Series, primary: str) -> Tuple[float, float]:
+    primary_upper = (primary or "").upper()
+    model_home = safe_float(row.get("model_home_prob"))
+    market_home = safe_float(row.get("market_home_prob"))
+
+    if "AWAY ML" in primary_upper:
+        model = None if model_home is None else 1.0 - float(model_home)
+        market = None if market_home is None else 1.0 - float(market_home)
+        return model, market
+
+    return model_home, market_home
+
+
+def _abs_edge_from_row(row: pd.Series, primary: str, p_model: float, p_market: float) -> float:
+    try:
+        if p_model is not None and p_market is not None:
+            return abs(float(p_model) - float(p_market))
+        if "abs_edge_home" in row:
+            v = safe_float(row.get("abs_edge_home"))
+            if v is not None and not np.isnan(v):
+                return abs(float(v))
+    except Exception:
+        pass
+    return float("nan")
+
+
+def _ml_price_for_primary(row: pd.Series, primary: str) -> Tuple[float, float]:
+    primary_upper = (primary or "").upper()
+    home_ml = safe_float(row.get("home_ml"))
+    away_ml = safe_float(row.get("away_ml"))
+
+    if "HOME ML" in primary_upper:
+        return home_ml, away_ml
+    if "AWAY ML" in primary_upper:
+        return away_ml, home_ml
+    return None, None
+
+
+def decide_bet_from_row(
+    row: pd.Series,
+    *,
+    unit_dollars: float,
+    settings: DecisionSettings = DecisionSettings(),
+    require_pick: bool = True,
+    require_value_tier: str = "HIGH VALUE",
+    min_confidence: str = "MEDIUM",
+    max_abs_moneyline: Optional[float] = None,
+) -> DecisionOutcome:
+    primary = str(row.get("primary_recommendation", ""))
+    value_tier = str(row.get("value_tier", ""))
+    conf = str(row.get("confidence", ""))
+
+    flags: List[str] = []
+    reason_parts: List[str] = []
+
+    if require_pick and ("PICK" not in primary):
+        return DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            "missing primary pick",
+            "NO_PICK",
+            "missing primary pick",
+            0.0,
+            0.0,
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        )
+
+    if require_value_tier and (value_tier != require_value_tier):
+        return DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            f"value_tier {value_tier} != {require_value_tier}",
+            "TIER_FILTER",
+            f"value_tier {value_tier} != {require_value_tier}",
+            0.0,
+            0.0,
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        )
+
+    conf_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+    if conf_rank.get(conf, 0) < conf_rank.get(min_confidence, 1):
+        return DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            f"confidence {conf} < {min_confidence}",
+            "CONF_FILTER",
+            f"confidence {conf} < {min_confidence}",
+            0.0,
+            0.0,
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        )
+
+    ml_price, opp_price = _ml_price_for_primary(row, primary)
+
+    if "ML" in primary.upper() and ml_price is None:
+        return DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            "missing moneyline odds",
+            "MISSING_ODDS",
+            "missing moneyline odds",
+            0.0,
+            0.0,
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        )
+
+    p_model, p_market = _probabilities_for_primary(row, primary)
+    abs_edge = _abs_edge_from_row(row, primary, p_model, p_market)
+
+    if abs_edge is None or np.isnan(abs_edge):
+        return DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            "missing edge",
+            "MISSING_EDGE",
+            "missing edge",
+            0.0,
+            0.0,
+            p_model if p_model is not None else float("nan"),
+            p_market if p_market is not None else float("nan"),
+            float("nan"),
+        )
+
+    if abs_edge < float(settings.min_play_edge_abs):
+        return DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            f"edge<{settings.min_play_edge_abs:.3f}",
+            "EDGE_FILTER",
+            f"edge<{settings.min_play_edge_abs:.3f}",
+            0.0,
+            0.0,
+            p_model if p_model is not None else float("nan"),
+            p_market if p_market is not None else float("nan"),
+            abs_edge,
+        )
+
+    tier = value_tier_from_edge(abs_edge)
+    raw_units = default_bet_units_from_tier(tier)
+
+    # Base bet sizing (flat pct or Kelly for ML)
+    bet_size = float(raw_units * float(unit_dollars))
+    primary_upper = primary.upper()
+    if settings.sizing_mode == "kelly" and "ML" in primary_upper:
+        ml_price, _ = _ml_price_for_primary(row, primary)
+        if ml_price is None or np.isnan(ml_price) or p_model is None or np.isnan(p_model):
+            bet_size = 0.0
+        else:
+            bet_size = bet_size_kelly_ml(
+                float(unit_dollars) / settings.flat_pct,
+                float(p_model),
+                float(ml_price),
+                kelly_mult=settings.kelly_mult,
+                max_pct=settings.kelly_max_pct,
+            )
+    elif settings.sizing_mode == "flat":
+        bet_size = bet_size_flat(float(unit_dollars) / settings.flat_pct, settings.flat_pct)
+
+    raw_units = bet_size / float(unit_dollars) if unit_dollars > 0 else 0.0
+    final_units = min(raw_units, float(settings.max_units))
+
+    if max_abs_moneyline is not None and ml_price is not None and not np.isnan(ml_price):
+        if abs(float(ml_price)) > float(max_abs_moneyline):
+            if "LONGSHOT_CAP" not in flags:
+                flags.append("LONGSHOT_CAP")
+            reason_parts.append(f"moneyline {ml_price} over max_abs {max_abs_moneyline}")
+            if abs_edge < float(settings.min_sanity_edge_abs):
+                return DecisionOutcome(
+                    "PASS",
+                    0.0,
+                    float(unit_dollars),
+                    0.0,
+                    "longshot edge too small",
+                    ",".join(flags),
+                    "longshot edge too small",
+                    raw_units,
+                    0.0,
+                    p_model if p_model is not None else float("nan"),
+                    p_market if p_market is not None else float("nan"),
+                    abs_edge,
+                )
+            final_units = min(final_units, float(settings.max_units_sanity))
+
+    # Additional longshot sanity for extreme favorite or underdog
+    if ml_price is not None and not np.isnan(ml_price):
+        longshot = False
+        if ml_price >= float(settings.longshot_cutoff):
+            longshot = True
+            reason_parts.append(f"underdog {ml_price}>=+{settings.longshot_cutoff:.0f}")
+        if opp_price is not None and not np.isnan(opp_price) and opp_price <= float(settings.favorite_extreme_cutoff):
+            longshot = True
+            reason_parts.append(f"favorite opp {opp_price}<={settings.favorite_extreme_cutoff:.0f}")
+        if longshot:
+            if "LONGSHOT_CAP" not in flags:
+                flags.append("LONGSHOT_CAP")
+            if abs_edge < float(settings.min_sanity_edge_abs):
+                return DecisionOutcome(
+                    "PASS",
+                    0.0,
+                    float(unit_dollars),
+                    0.0,
+                    "longshot edge too small",
+                    ",".join(flags),
+                    "longshot edge too small",
+                    raw_units,
+                    0.0,
+                    p_model if p_model is not None else float("nan"),
+                    p_market if p_market is not None else float("nan"),
+                    abs_edge,
+                )
+            final_units = min(final_units, float(settings.max_units_sanity))
+
+    if p_model is not None and p_market is not None and not np.isnan(p_model) and not np.isnan(p_market):
+        disagreement = abs(float(p_model) - float(p_market))
+        if disagreement > float(settings.max_disagreement):
+            flags.append("DISAGREE_CAP")
+            reason_parts.append(
+                f"|model-market|={disagreement:.3f}>{float(settings.max_disagreement):.3f}"
+            )
+            if abs_edge < float(settings.min_sanity_edge_abs):
+                return DecisionOutcome(
+                    "PASS",
+                    0.0,
+                    float(unit_dollars),
+                    0.0,
+                    "market disagreement edge too small",
+                    ",".join(flags),
+                    "market disagreement edge too small",
+                    raw_units,
+                    0.0,
+                    p_model,
+                    p_market,
+                    abs_edge,
+                )
+            final_units = min(final_units, float(settings.max_units_sanity))
+
+    if final_units > 0 and final_units < float(settings.min_play_units):
+        flags.append("MIN_UNIT_FLOOR")
+        final_units = float(settings.min_play_units)
+
+    bet_size = float(final_units * float(unit_dollars))
+    play_pass = "PLAY" if final_units > 0 else "PASS"
+    decision_reason = ", ".join(reason_parts) if reason_parts else ""
+    if flags and not decision_reason:
+        decision_reason = ",".join(flags)
+
+    return DecisionOutcome(
+        play_pass,
+        bet_size,
+        float(unit_dollars),
+        final_units,
+        f"edge={abs_edge:.3f} tier={tier}",
+        ",".join(flags),
+        decision_reason,
+        raw_units,
+        final_units,
+        p_model if p_model is not None else float("nan"),
+        p_market if p_market is not None else float("nan"),
+        abs_edge,
+    )
 
 
 def choose_primary_recommendation(
@@ -266,14 +588,15 @@ def add_betting_outputs(
     tiers = [value_tier_from_edge(x) for x in abs_edges]
 
     decisions = [
-        decide_play_pass(
-            x,
-            min_edge=min_play_edge_abs,
+        decide_bet_from_row(
+            r,
             unit_dollars=unit_dollars,
-            tier=t,
-            max_units=1.0,
+            settings=DecisionSettings(min_play_edge_abs=min_play_edge_abs),
+            require_pick=True,
+            require_value_tier="",  # respect whatever tier the sheet already uses
+            min_confidence="LOW",
         )
-        for x, t in zip(abs_edges, tiers)
+        for _, r in out.iterrows()
     ]
 
     # Prefer the model's tier if it exists, but fill missing with our computed one
@@ -287,6 +610,32 @@ def add_betting_outputs(
     out["unit_dollars"] = [d.unit_dollars for d in decisions]
     out["units"] = [d.units for d in decisions]
     out["why_bet"] = [d.reason for d in decisions]
+    out["decision_flags"] = [d.decision_flags for d in decisions]
+    out["decision_reason"] = [d.decision_reason for d in decisions]
+    out["raw_units"] = [d.raw_units for d in decisions]
+    out["final_units"] = [d.final_units for d in decisions]
+    out["p_model_used"] = [d.p_model_used for d in decisions]
+    out["p_market_used"] = [d.p_market_used for d in decisions]
+    out["abs_edge_used"] = [d.abs_edge_used for d in decisions]
 
     return out
+
+
+def format_decision_trace(row: pd.Series, decision: DecisionOutcome) -> str:
+    """Human-readable trace for debugging play/pass decisions."""
+
+    def _fmt(x):
+        return "nan" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{float(x):.3f}"
+
+    parts = [
+        f"{row.get('home', '')} vs {row.get('away', '')}",
+        f"primary={row.get('primary_recommendation', '')}",
+        f"model_p={_fmt(decision.p_model_used)} market_p={_fmt(decision.p_market_used)}",
+        f"abs_edge={_fmt(decision.abs_edge_used)}",
+        f"raw_units={decision.raw_units:.2f} -> final_units={decision.final_units:.2f}",
+        f"flags={decision.decision_flags or 'NONE'}",
+        f"reason={decision.decision_reason or decision.reason}",
+        f"play_pass={decision.play_pass}",
+    ]
+    return " | ".join(parts)
 
