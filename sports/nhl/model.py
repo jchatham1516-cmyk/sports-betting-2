@@ -10,7 +10,7 @@ raw_win_prob = 1 / (1 + 10 ** ((away_elo - home_elo) / 400))
 
 # 🆕 APPLY CALIBRATION
 from sports.common.prob_calibration import ProbabilityCalibrator
-calibrator = ProbabilityCalibrator('nfl')
+calibrator = ProbabilityCalibrator('nhl')
 win_prob = calibrator.calibrate(raw_win_prob, 'moneyline')
 
 print(f"[CALIBRATION] {home_team}: Raw={raw_win_prob:.3f} → Calibrated={win_prob:.3f}")
