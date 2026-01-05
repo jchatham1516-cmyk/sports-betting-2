@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -15,6 +15,7 @@ from sports.common.odds_sources import (
     fetch_odds_for_date_from_csv,
     SPORT_TO_ODDS_KEY,
 )
+from sports.common import tracker
 
 from sports.common.bankroll import (
     DEFAULT_BANKROLL,
@@ -104,6 +105,9 @@ def main(argv=None):
     parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
+
+    parser.add_argument("--track_yesterday", action="store_true", help="Grade and track yesterday's bets after running.")
+    parser.add_argument("--track_date", type=str, default=None, help="Explicit date (YYYY-MM-DD or MM/DD/YYYY) to grade.")
 
     parser.add_argument("--max_plays", type=int, default=int(os.getenv("MAX_PLAYS_PER_SPORT_PER_DAY", "3")))
     parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
@@ -264,6 +268,33 @@ def main(argv=None):
         )
     except Exception as e:
         print(f"[eval history] WARNING: rolling evaluation update failed: {e}")
+
+    track_target = None
+    if args.track_date:
+        track_target = tracker.parse_tracking_date(args.track_date)
+        if track_target is None:
+            print(f"[tracking] WARNING: could not parse --track_date={args.track_date}; skipping tracking.")
+    elif args.track_yesterday:
+        track_target = datetime.utcnow().date() - timedelta(days=1)
+
+    if track_target:
+        print(f"[tracking] Grading bets for {track_target.isoformat()}...")
+        track_result = tracker.track_date(sport=args.sport, target_date=track_target)
+        if not track_result.ok:
+            print(f"[tracking] WARNING: tracking failed: {track_result.reason}")
+        else:
+            graded = track_result.bets_df
+            played = graded[graded["result"].isin(["WIN", "LOSS", "PUSH"])]
+            wins = int((played["result"] == "WIN").sum())
+            losses = int((played["result"] == "LOSS").sum())
+            pushes = int((played["result"] == "PUSH").sum())
+            profit = float(played.get("profit_dollars", pd.Series(dtype=float)).sum())
+            stake = float(played.get("stake_dollars", pd.Series(dtype=float)).sum())
+            roi = profit / stake if stake else 0.0
+            print(
+                f"[tracking] Tracked {len(played)} bets: {wins}-{losses}-{pushes} | "
+                f"Profit=${profit:.2f} | ROI={roi*100:.2f}%"
+            )
     return 0
 
 
