@@ -77,7 +77,7 @@ def _value_tier(abs_edge: float) -> str:
     if abs_edge >= 0.08:
         return "HIGH VALUE"
     if abs_edge >= 0.04:
-        return "MED VALUE"
+        return "MEDIUM VALUE"
     if abs_edge >= 0.02:
         return "LOW VALUE"
     return "NO EDGE"
@@ -285,9 +285,25 @@ def add_recommendations_to_df(
     out["confidence"] = out.get("confidence", "UNKNOWN")
     out["value_tier"] = out.get("value_tier", "UNKNOWN")
     for i in out.index:
-        ae = float(out.loc[i, "abs_edge_home"]) if not pd.isna(out.loc[i, "abs_edge_home"]) else float("nan")
-        out.loc[i, "confidence"] = _confidence_from_abs_edge(ae, thresholds)
-        out.loc[i, "value_tier"] = _value_tier(ae)
+        row = out.loc[i]
+        abs_edge_home = float(row.get("abs_edge_home")) if not pd.isna(row.get("abs_edge_home")) else float("nan")
+        total_edge_vs_be = _to_float(row.get("total_edge_vs_be", np.nan))
+        total_edge_goals = _to_float(row.get("total_edge_goals", np.nan))
+        spread_edge_home = _to_float(row.get("spread_edge_home", np.nan))
+        total_reco = str(row.get("total_recommendation", ""))
+        spread_reco = str(row.get("spread_recommendation", ""))
+
+        if total_reco.startswith("Model PICK TOTAL") and np.isfinite(total_edge_vs_be):
+            conf_edge = abs(float(total_edge_vs_be))
+        elif total_reco.startswith("Model PICK TOTAL") and np.isfinite(total_edge_goals):
+            conf_edge = abs(float(total_edge_goals))
+        elif spread_reco.startswith("Model PICK ATS") and np.isfinite(spread_edge_home):
+            conf_edge = abs(float(spread_edge_home))
+        else:
+            conf_edge = abs_edge_home
+
+        out.loc[i, "confidence"] = _confidence_from_abs_edge(conf_edge, thresholds)
+        out.loc[i, "value_tier"] = _value_tier(conf_edge)
 
     # --------
     # pick_score + EV scoring: unified numeric scoring used for top-1..3 filtering & primary

@@ -115,7 +115,7 @@ def main(argv=None):
     parser.add_argument("--kelly_max_pct", type=float, default=0.03)
 
     parser.add_argument("--play_require_pick", action="store_true")
-    parser.add_argument("--play_value_tier", type=str, default="HIGH VALUE")
+    parser.add_argument("--play_value_tier", type=str, default="MEDIUM VALUE")
     parser.add_argument("--play_min_conf", type=str, default="MEDIUM", choices=["LOW", "MEDIUM", "HIGH"])
     parser.add_argument("--play_max_abs_ml", type=int, default=400)
 
@@ -191,6 +191,11 @@ def main(argv=None):
 
     debug_df = pd.DataFrame()
     if not results_df.empty:
+        conf_high = 0.18
+        conf_med = 0.10
+        if args.sport == "nhl":
+            conf_high = 0.12
+            conf_med = 0.06
         results_df, debug_df = add_recommendations_to_df(
             results_df,
             thresholds=Thresholds(
@@ -198,8 +203,8 @@ def main(argv=None):
                 ml_edge_lean=0.035,
                 ats_edge_strong_pts=3.0,
                 ats_edge_lean_pts=1.5,
-                conf_high=0.18,
-                conf_med=0.10,
+                conf_high=conf_high,
+                conf_med=conf_med,
             ),
             model_spread_home_col="model_spread_home" if "model_spread_home" in results_df.columns else None,
             model_margin_home_col=None,
@@ -211,6 +216,8 @@ def main(argv=None):
     decision_settings = DecisionSettings(
         min_play_edge_abs=float(os.getenv("MIN_PLAY_EDGE_ABS", DecisionSettings().min_play_edge_abs)),
         min_primary_edge_abs=DecisionSettings().min_primary_edge_abs,
+        min_ev_override=float(os.getenv("MIN_EV_OVERRIDE", DecisionSettings().min_ev_override)),
+        min_ev_override_edge=float(os.getenv("MIN_EV_OVERRIDE_EDGE", DecisionSettings().min_ev_override_edge)),
         longshot_cutoff=float(os.getenv("LONGSHOT_ODDS_CAP", 500)),
         favorite_extreme_cutoff=float(os.getenv("FAVORITE_EXTREME_CAP", -800)),
         max_disagreement=float(os.getenv("MAX_MODEL_MARKET_DISAGREE", 0.20)),
@@ -249,6 +256,16 @@ def main(argv=None):
         results_df["p_model_used"] = [d.p_model_used for d in decisions]
         results_df["p_market_used"] = [d.p_market_used for d in decisions]
         results_df["abs_edge_used"] = [d.abs_edge_used for d in decisions]
+
+        for (idx, r), d in zip(results_df.iterrows(), decisions):
+            print(
+                "[decision] "
+                f"{r.get('away', '')} @ {r.get('home', '')} "
+                f"abs_edge_home={r.get('abs_edge_home')} value_tier={r.get('value_tier')} "
+                f"confidence={r.get('confidence')} primary_ev={r.get('primary_ev')} "
+                f"play_pass={d.play_pass} decision_flags={d.decision_flags or 'NONE'} "
+                f"decision_reason={d.decision_reason or d.reason}"
+            )
 
         if args.debug_decisions:
             print("\n[debug] Decision traces:")

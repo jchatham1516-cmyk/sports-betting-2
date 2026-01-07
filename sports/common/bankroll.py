@@ -12,7 +12,7 @@ def play_pass_rule(
     row,
     *,
     require_pick: bool = True,
-    require_value_tier: str = "HIGH VALUE",
+    require_value_tier: str = "MEDIUM VALUE",
     min_confidence: str = "MEDIUM",  # LOW/MEDIUM/HIGH
     max_abs_moneyline: Optional[int] = 400,
 ) -> str:
@@ -99,4 +99,3 @@ def compute_bet_size(
 
     # ATS: fallback to flat
     return bet_size_flat(bankroll, flat_pct)
-
