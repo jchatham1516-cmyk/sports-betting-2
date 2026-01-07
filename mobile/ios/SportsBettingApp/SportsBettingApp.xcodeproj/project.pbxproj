@@ -10,7 +10,7 @@
 		A1A1A1A10000000100000001 /* SportsBettingAppApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A00000000100000001 /* SportsBettingAppApp.swift */; };
 		A1A1A1A10000000100000002 /* RootTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A00000000100000002 /* RootTabView.swift */; };
 		A1A1A1A10000000100000003 /* RunView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A00000000100000003 /* RunView.swift */; };
-		A1A1A1A10000000100000004 /* RunDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A00000000100000004 /* RunDetailView.swift */; };
+		A1A1A1A10000000100000004 /* PredictionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A00000000100000004 /* PredictionsView.swift */; };
 		A1A1A1A10000000100000005 /* BetsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A00000000100000005 /* BetsView.swift */; };
 		A1A1A1A10000000100000006 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A00000000100000006 /* SettingsView.swift */; };
 		A1A1A1A10000000100000007 /* DisclaimerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A00000000100000007 /* DisclaimerView.swift */; };
@@ -18,7 +18,7 @@
 		A1A1A1A10000000100000009 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A00000000100000009 /* APIClient.swift */; };
 		A1A1A1A1000000010000000A /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A0000000010000000A /* Models.swift */; };
 		A1A1A1A1000000010000000B /* RunViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A0000000010000000B /* RunViewModel.swift */; };
-		A1A1A1A1000000010000000C /* RunDetailViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A0000000010000000C /* RunDetailViewModel.swift */; };
+		A1A1A1A1000000010000000C /* PredictionsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A0000000010000000C /* PredictionsViewModel.swift */; };
 		A1A1A1A1000000010000000D /* BetsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A1A1A0000000010000000D /* BetsViewModel.swift */; };
 		A1A1A1A1000000010000000E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1A1A1A0000000010000000E /* Assets.xcassets */; };
 /* End PBXBuildFile section */
@@ -27,7 +27,7 @@
 		A1A1A1A00000000100000001 /* SportsBettingAppApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SportsBettingAppApp.swift; sourceTree = "<group>"; };
 		A1A1A1A00000000100000002 /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		A1A1A1A00000000100000003 /* RunView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunView.swift; sourceTree = "<group>"; };
-		A1A1A1A00000000100000004 /* RunDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunDetailView.swift; sourceTree = "<group>"; };
+		A1A1A1A00000000100000004 /* PredictionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictionsView.swift; sourceTree = "<group>"; };
 		A1A1A1A00000000100000005 /* BetsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BetsView.swift; sourceTree = "<group>"; };
 		A1A1A1A00000000100000006 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A1A1A1A00000000100000007 /* DisclaimerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisclaimerView.swift; sourceTree = "<group>"; };
@@ -35,7 +35,7 @@
 		A1A1A1A00000000100000009 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		A1A1A1A0000000010000000A /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		A1A1A1A0000000010000000B /* RunViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunViewModel.swift; sourceTree = "<group>"; };
-		A1A1A1A0000000010000000C /* RunDetailViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunDetailViewModel.swift; sourceTree = "<group>"; };
+		A1A1A1A0000000010000000C /* PredictionsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PredictionsViewModel.swift; sourceTree = "<group>"; };
 		A1A1A1A0000000010000000D /* BetsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BetsViewModel.swift; sourceTree = "<group>"; };
 		A1A1A1A0000000010000000E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1A1A1A0000000010000000F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -86,7 +86,7 @@
 			isa = PBXGroup;
 			children = (
 				A1A1A1A0000000010000000B /* RunViewModel.swift */,
-				A1A1A1A0000000010000000C /* RunDetailViewModel.swift */,
+				A1A1A1A0000000010000000C /* PredictionsViewModel.swift */,
 				A1A1A1A0000000010000000D /* BetsViewModel.swift */,
 			);
 			path = ViewModels;
@@ -97,7 +97,7 @@
 			children = (
 				A1A1A1A00000000100000002 /* RootTabView.swift */,
 				A1A1A1A00000000100000003 /* RunView.swift */,
-				A1A1A1A00000000100000004 /* RunDetailView.swift */,
+				A1A1A1A00000000100000004 /* PredictionsView.swift */,
 				A1A1A1A00000000100000005 /* BetsView.swift */,
 				A1A1A1A00000000100000006 /* SettingsView.swift */,
 				A1A1A1A00000000100000007 /* DisclaimerView.swift */,
@@ -184,7 +184,7 @@
 				A1A1A1A10000000100000001 /* SportsBettingAppApp.swift in Sources */,
 				A1A1A1A10000000100000002 /* RootTabView.swift in Sources */,
 				A1A1A1A10000000100000003 /* RunView.swift in Sources */,
-				A1A1A1A10000000100000004 /* RunDetailView.swift in Sources */,
+				A1A1A1A10000000100000004 /* PredictionsView.swift in Sources */,
 				A1A1A1A10000000100000005 /* BetsView.swift in Sources */,
 				A1A1A1A10000000100000006 /* SettingsView.swift in Sources */,
 				A1A1A1A10000000100000007 /* DisclaimerView.swift in Sources */,
@@ -192,7 +192,7 @@
 				A1A1A1A10000000100000009 /* APIClient.swift in Sources */,
 				A1A1A1A1000000010000000A /* Models.swift in Sources */,
 				A1A1A1A1000000010000000B /* RunViewModel.swift in Sources */,
-				A1A1A1A1000000010000000C /* RunDetailViewModel.swift in Sources */,
+				A1A1A1A1000000010000000C /* PredictionsViewModel.swift in Sources */,
 				A1A1A1A1000000010000000D /* BetsViewModel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
