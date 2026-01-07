@@ -50,6 +50,9 @@ PTS_MIN_GAMES = int(os.getenv("NHL_PTS_MIN_GAMES", "2"))
 PTS_REGRESS = float(os.getenv("NHL_PTS_REGRESS", "0.35"))
 PTS_LEAGUE_CLAMP_MIN = float(os.getenv("NHL_PTS_LEAGUE_CLAMP_MIN", "2.4"))
 PTS_LEAGUE_CLAMP_MAX = float(os.getenv("NHL_PTS_LEAGUE_CLAMP_MAX", "3.6"))
+TOTAL_RECENT_GAMES = int(os.getenv("NHL_TOTAL_RECENT_GAMES", "10"))
+TOTAL_MODEL_MIN = float(os.getenv("NHL_TOTAL_MODEL_MIN", "4.0"))
+TOTAL_MODEL_MAX = float(os.getenv("NHL_TOTAL_MODEL_MAX", "8.5"))
 
 STRICT_SANITY = os.getenv("NHL_STRICT_SANITY", "0") == "1"
 
@@ -250,6 +253,7 @@ def _build_team_scoring_table(days_back: int) -> pd.DataFrame:
         if not home or not away:
             continue
 
+        game_date = _parse_iso_date(ev.get("commence_time") or ev.get("completed_at") or ev.get("date"))
         score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
         try:
             hs = float(score_map.get(home_raw) or score_map.get(home))
@@ -257,10 +261,32 @@ def _build_team_scoring_table(days_back: int) -> pd.DataFrame:
         except Exception:
             continue
 
-        rows.append({"team": home, "opp": away, "pts_for": hs, "pts_against": aw})
-        rows.append({"team": away, "opp": home, "pts_for": aw, "pts_against": hs})
+        rows.append({"team": home, "opp": away, "pts_for": hs, "pts_against": aw, "date": game_date})
+        rows.append({"team": away, "opp": home, "pts_for": aw, "pts_against": hs, "date": game_date})
 
     return pd.DataFrame(rows)
+
+
+def _team_recent_avgs(
+    team: str,
+    team_tbl: pd.DataFrame,
+    n_games: int,
+) -> Tuple[Optional[float], Optional[float], int]:
+    if team_tbl is None or team_tbl.empty:
+        return (None, None, 0)
+    sub = team_tbl[team_tbl["team"] == team].copy()
+    if sub.empty:
+        return (None, None, 0)
+    if "date" in sub.columns:
+        sub = sub.sort_values("date", ascending=False)
+    recent = sub.head(int(n_games)) if n_games > 0 else sub
+    if recent.empty:
+        return (None, None, 0)
+    return (
+        float(recent["pts_for"].mean()),
+        float(recent["pts_against"].mean()),
+        int(len(recent)),
+    )
 
 
 def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd.DataFrame) -> Tuple[float, float, float]:
@@ -337,6 +363,13 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     except Exception:
         league_pts = 3.0
 
+    league_avg_ga = float("nan")
+    if team_tbl is not None and not team_tbl.empty:
+        try:
+            league_avg_ga = float(team_tbl["pts_against"].mean())
+        except Exception:
+            league_avg_ga = float("nan")
+
     # If historical lines were empty, anchor league totals to the scoring table so totals model still runs
     if np.isnan(league_avg_total) and not np.isnan(league_pts):
         try:
@@ -400,27 +433,43 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         home_avg, home_sd = _team_line_avg_sd(home, home_in)
         away_avg, away_sd = _team_line_avg_sd(away, away_in)
 
-        exp_home, exp_away, exp_total = _expected_points_total(home, away, league_pts, team_tbl)
+        home_gf_avg, home_ga_avg, home_games = _team_recent_avgs(home, team_tbl, TOTAL_RECENT_GAMES)
+        away_gf_avg, away_ga_avg, away_games = _team_recent_avgs(away, team_tbl, TOTAL_RECENT_GAMES)
 
-        hist_base = float("nan")
-        if not np.isnan(home_avg) and not np.isnan(away_avg):
-            hist_base = 0.5 * (home_avg + away_avg)
-        elif not np.isnan(league_avg_total):
-            hist_base = float(league_avg_total)
+        model_total = float("nan")
+        home_exp = float("nan")
+        away_exp = float("nan")
+        missing_totals = (
+            home_gf_avg is None
+            or home_ga_avg is None
+            or away_gf_avg is None
+            or away_ga_avg is None
+            or np.isnan(league_avg_ga)
+            or league_avg_ga <= 0
+        )
 
-        base_total = float(exp_total)
-        if not np.isnan(hist_base):
-            w = _clamp(TOTAL_LINE_BLEND, 0.0, 1.0)
-            base_total = float((1.0 - w) * base_total + w * hist_base)
-
-        league_anchor_total = league_avg_total
-        if np.isnan(league_anchor_total):
-            league_anchor_total = float(2.0 * league_pts) if league_pts > 0 else float("nan")
-
-        if not np.isnan(base_total) and not np.isnan(league_anchor_total):
-            model_total = float((1.0 - TOTAL_REGRESS_WEIGHT) * base_total + TOTAL_REGRESS_WEIGHT * league_anchor_total)
+        if missing_totals:
+            if np.isnan(league_avg_total):
+                league_avg_total = float(2.0 * league_pts) if league_pts > 0 else float("nan")
+            model_total = float(league_avg_total)
+            print(f"[NHL TOTALS] FALLBACK used for {away} @ {home} (missing stats)")
         else:
-            model_total = float(base_total)
+            home_exp = float(home_gf_avg) * (float(away_ga_avg) / float(league_avg_ga))
+            away_exp = float(away_gf_avg) * (float(home_ga_avg) / float(league_avg_ga))
+            model_total = float(home_exp + away_exp)
+            model_total = _clamp(model_total, TOTAL_MODEL_MIN, TOTAL_MODEL_MAX)
+        def _fmt_total(v: Optional[float]) -> str:
+            try:
+                return f"{float(v):.2f}"
+            except Exception:
+                return "nan"
+
+        print(
+            "[NHL TOTALS] "
+            f"{away} @ {home} home_gf_avg={_fmt_total(home_gf_avg)} home_ga_avg={_fmt_total(home_ga_avg)} "
+            f"away_gf_avg={_fmt_total(away_gf_avg)} away_ga_avg={_fmt_total(away_ga_avg)} "
+            f"model_total={_fmt_total(model_total)}"
+        )
 
         sd = float("nan")
         if not np.isnan(home_sd) and not np.isnan(away_sd):

@@ -29,6 +29,8 @@ MIN_EV_TO_PLAY = 0.015       # minimum EV per $1 to consider a "PLAY"
 MIN_PLAY_EDGE_ABS = MIN_EV_TO_PLAY
 MIN_PRIMARY_EDGE_ABS = 0.03   # not enforced here, but useful if you want later
 MIN_SANITY_EDGE_ABS = 0.03
+MIN_EV_OVERRIDE = 0.02
+MIN_EV_OVERRIDE_EDGE = 0.02
 
 
 def _to_float(x):
@@ -102,6 +104,8 @@ class DecisionSettings:
     min_play_edge_abs: float = MIN_PLAY_EDGE_ABS
     min_primary_edge_abs: float = MIN_PRIMARY_EDGE_ABS
     min_sanity_edge_abs: float = MIN_SANITY_EDGE_ABS
+    min_ev_override: float = MIN_EV_OVERRIDE
+    min_ev_override_edge: float = MIN_EV_OVERRIDE_EDGE
     longshot_cutoff: float = 500.0
     favorite_extreme_cutoff: float = -800.0
     max_disagreement: float = 0.20
@@ -194,6 +198,18 @@ def _probabilities_for_primary(row: pd.Series, primary: str) -> Tuple[float, flo
 
 def _abs_edge_from_row(row: pd.Series, primary: str, p_model: float, p_market: float) -> float:
     try:
+        primary_upper = (primary or "").upper()
+        if "TOTAL" in primary_upper:
+            total_edge_vs_be = safe_float(row.get("total_edge_vs_be"))
+            if total_edge_vs_be is not None and not np.isnan(total_edge_vs_be):
+                return abs(float(total_edge_vs_be))
+            total_edge_goals = safe_float(row.get("total_edge_goals"))
+            if total_edge_goals is not None and not np.isnan(total_edge_goals):
+                return abs(float(total_edge_goals))
+        if "ATS" in primary_upper:
+            spread_edge_home = safe_float(row.get("spread_edge_home"))
+            if spread_edge_home is not None and not np.isnan(spread_edge_home):
+                return abs(float(spread_edge_home))
         if p_model is not None and p_market is not None:
             return abs(float(p_model) - float(p_market))
         if "abs_edge_home" in row:
@@ -215,6 +231,19 @@ def _ml_price_for_primary(row: pd.Series, primary: str) -> Tuple[float, float]:
     if "AWAY ML" in primary_upper:
         return away_ml, home_ml
     return None, None
+
+
+def _tier_rank(tier: str) -> int:
+    t = (tier or "").upper().replace("MED VALUE", "MEDIUM VALUE")
+    if "HIGH" in t:
+        return 3
+    if "MEDIUM" in t:
+        return 2
+    if "LOW" in t:
+        return 1
+    if "NO EDGE" in t:
+        return 0
+    return -1
 
 
 def decide_bet_from_row(
@@ -250,22 +279,6 @@ def decide_bet_from_row(
             float("nan"),
         )
 
-    if require_value_tier and (value_tier != require_value_tier):
-        return DecisionOutcome(
-            "PASS",
-            0.0,
-            float(unit_dollars),
-            0.0,
-            f"value_tier {value_tier} != {require_value_tier}",
-            "TIER_FILTER",
-            f"value_tier {value_tier} != {require_value_tier}",
-            0.0,
-            0.0,
-            float("nan"),
-            float("nan"),
-            float("nan"),
-        )
-
     conf_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
     if conf_rank.get(conf, 0) < conf_rank.get(min_confidence, 1):
         return DecisionOutcome(
@@ -273,7 +286,7 @@ def decide_bet_from_row(
             0.0,
             float(unit_dollars),
             0.0,
-            f"confidence {conf} < {min_confidence}",
+            f"PASS: confidence {conf} < {min_confidence}",
             "CONF_FILTER",
             f"confidence {conf} < {min_confidence}",
             0.0,
@@ -310,7 +323,7 @@ def decide_bet_from_row(
             0.0,
             float(unit_dollars),
             0.0,
-            "missing edge",
+            "PASS: missing edge",
             "MISSING_EDGE",
             "missing edge",
             0.0,
@@ -326,7 +339,7 @@ def decide_bet_from_row(
             0.0,
             float(unit_dollars),
             0.0,
-            f"edge<{settings.min_play_edge_abs:.3f}",
+            f"PASS: abs_edge<{settings.min_play_edge_abs:.3f}",
             "EDGE_FILTER",
             f"edge<{settings.min_play_edge_abs:.3f}",
             0.0,
@@ -338,6 +351,42 @@ def decide_bet_from_row(
 
     tier = value_tier_from_edge(abs_edge)
     raw_units = default_bet_units_from_tier(tier)
+    primary_ev = safe_float(row.get("primary_ev"))
+    ev_override = (
+        primary_ev is not None
+        and np.isfinite(primary_ev)
+        and abs_edge is not None
+        and np.isfinite(abs_edge)
+        and float(primary_ev) >= float(settings.min_ev_override)
+        and float(abs_edge) >= float(settings.min_ev_override_edge)
+    )
+
+    if require_value_tier:
+        current_rank = _tier_rank(value_tier)
+        required_rank = _tier_rank(require_value_tier)
+        if current_rank < required_rank and not ev_override:
+            return DecisionOutcome(
+                "PASS",
+                0.0,
+                float(unit_dollars),
+                0.0,
+                f"value_tier {value_tier} below {require_value_tier}",
+                "TIER_FILTER",
+                f"PASS: value_tier {value_tier} below {require_value_tier}",
+                0.0,
+                0.0,
+                p_model if p_model is not None else float("nan"),
+                p_market if p_market is not None else float("nan"),
+                abs_edge,
+            )
+    if ev_override:
+        if "EV_OVERRIDE" not in flags:
+            flags.append("EV_OVERRIDE")
+        reason_parts.append(
+            f"PLAY: EV override primary_ev={float(primary_ev):.3f} abs_edge={abs_edge:.3f}"
+        )
+        if raw_units <= 0:
+            raw_units = default_bet_units_from_tier("LOW VALUE")
 
     # Base bet sizing (flat pct or Kelly for ML)
     bet_size = float(raw_units * float(unit_dollars))
@@ -638,4 +687,3 @@ def format_decision_trace(row: pd.Series, decision: DecisionOutcome) -> str:
         f"play_pass={decision.play_pass}",
     ]
     return " | ".join(parts)
-
