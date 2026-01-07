@@ -21,8 +21,8 @@ struct RunCreateRequest: Codable {
 }
 
 struct RunCreateResponse: Codable, Identifiable {
-    let runId: Int
-    var id: Int { runId }
+    let runId: String
+    var id: String { runId }
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -31,12 +31,16 @@ struct RunCreateResponse: Codable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        if let id = try container.decodeIfPresent(Int.self, forKey: .id) {
+        if let id = try container.decodeIfPresent(String.self, forKey: .id) {
             runId = id
-        } else if let runId = try container.decodeIfPresent(Int.self, forKey: .runId) {
+        } else if let runId = try container.decodeIfPresent(String.self, forKey: .runId) {
             self.runId = runId
+        } else if let idValue = try container.decodeIfPresent(Int.self, forKey: .id) {
+            runId = String(idValue)
+        } else if let runValue = try container.decodeIfPresent(Int.self, forKey: .runId) {
+            runId = String(runValue)
         } else {
-            runId = 0
+            runId = ""
         }
     }
 }
@@ -46,6 +50,7 @@ struct PredictionRow: Codable, Identifiable {
     let homeTeam: String?
     let awayTeam: String?
     let primaryRecommendation: String?
+    let confidence: String?
     let confidenceTier: String?
     let valueTier: String?
     let price: String?
@@ -54,6 +59,7 @@ struct PredictionRow: Codable, Identifiable {
         case homeTeam = "home"
         case awayTeam = "away"
         case primaryRecommendation = "primary_recommendation"
+        case confidence
         case confidenceTier = "confidence_tier"
         case valueTier = "value_tier"
         case price

@@ -26,13 +26,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.sportsbettingapp.BuildConfig
 import com.sportsbettingapp.data.model.Prediction
-import com.sportsbettingapp.ui.RunDetailViewModel
+import com.sportsbettingapp.ui.PredictionsViewModel
 import com.sportsbettingapp.ui.UiState
 
 @Composable
-fun RunDetailScreen(
+fun PredictionsScreen(
     runId: String,
-    viewModel: RunDetailViewModel,
+    viewModel: PredictionsViewModel,
     contentPadding: PaddingValues
 ) {
     val predictionsState by viewModel.predictionsState.collectAsState()
@@ -48,7 +48,7 @@ fun RunDetailScreen(
             .padding(contentPadding)
             .padding(16.dp)
     ) {
-        Text(text = "Run Detail", style = MaterialTheme.typography.headlineSmall)
+        Text(text = "Predictions", style = MaterialTheme.typography.headlineSmall)
         Spacer(modifier = Modifier.height(8.dp))
         Text(text = "Run ID: $runId")
         Spacer(modifier = Modifier.height(16.dp))
@@ -60,7 +60,7 @@ fun RunDetailScreen(
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Download CSV")
+            Text("Open CSV")
         }
         Spacer(modifier = Modifier.height(16.dp))
 

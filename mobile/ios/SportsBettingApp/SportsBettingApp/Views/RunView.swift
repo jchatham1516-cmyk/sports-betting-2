@@ -50,7 +50,7 @@ struct RunView: View {
                 Text(viewModel.errorMessage ?? "Please try again.")
             }
             .navigationDestination(item: $viewModel.runResponse) { response in
-                RunDetailView(viewModel: RunDetailViewModel(runId: response.runId))
+                PredictionsView(viewModel: PredictionsViewModel(runId: response.runId))
             }
         }
     }

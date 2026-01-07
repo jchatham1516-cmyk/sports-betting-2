@@ -36,11 +36,16 @@ fun SettingsScreen(
         Text(text = "Base URL: ${BuildConfig.BASE_URL}")
         Text(text = "App version: $versionName")
         Spacer(modifier = Modifier.height(24.dp))
+        Text(
+            text = "Disclaimer: This app provides sports betting insights for informational purposes only and does not place wagers or guarantee outcomes.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        Spacer(modifier = Modifier.height(12.dp))
         Button(
             onClick = onDisclaimerClick,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("View Disclaimer")
+            Text("View Full Disclaimer")
         }
     }
 }

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>BASE_URL</key>
-    <string>http://localhost:8000</string>
+    <string>http://127.0.0.1:8000</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
@@ -26,6 +26,8 @@
     <true/>
     <key>NSAppTransportSecurity</key>
     <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
         <key>NSExceptionDomains</key>
         <dict>
             <key>localhost</key>

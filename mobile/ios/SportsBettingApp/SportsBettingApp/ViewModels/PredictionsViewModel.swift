@@ -1,14 +1,14 @@
 import Foundation
 
 @MainActor
-final class RunDetailViewModel: ObservableObject {
+final class PredictionsViewModel: ObservableObject {
     @Published var predictions: [PredictionRow] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    let runId: Int
+    let runId: String
 
-    init(runId: Int) {
+    init(runId: String) {
         self.runId = runId
     }
 

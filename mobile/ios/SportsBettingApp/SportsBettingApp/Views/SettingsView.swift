@@ -18,8 +18,11 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("Legal") {
-                    NavigationLink("Disclaimer") {
+                Section("Disclaimer") {
+                    Text("This app provides sports betting insights for informational purposes only and does not place wagers or guarantee outcomes.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                    NavigationLink("Read full disclaimer") {
                         DisclaimerView()
                     }
                 }

@@ -7,7 +7,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
@@ -16,11 +15,11 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.sportsbettingapp.ui.BetsViewModel
-import com.sportsbettingapp.ui.RunDetailViewModel
+import com.sportsbettingapp.ui.PredictionsViewModel
 import com.sportsbettingapp.ui.RunViewModel
 import com.sportsbettingapp.ui.screens.BetsScreen
 import com.sportsbettingapp.ui.screens.DisclaimerScreen
-import com.sportsbettingapp.ui.screens.RunDetailScreen
+import com.sportsbettingapp.ui.screens.PredictionsScreen
 import com.sportsbettingapp.ui.screens.RunScreen
 import com.sportsbettingapp.ui.screens.SettingsScreen
 import com.sportsbettingapp.ui.theme.SportsBettingTheme
@@ -40,7 +39,7 @@ private sealed class Screen(val route: String, val label: String) {
     data object Run : Screen("run", "Run")
     data object Bets : Screen("bets", "Bets")
     data object Settings : Screen("settings", "Settings")
-    data object RunDetail : Screen("run_detail", "Run Detail")
+    data object Predictions : Screen("predictions", "Predictions")
     data object Disclaimer : Screen("disclaimer", "Disclaimer")
 }
 
@@ -67,7 +66,7 @@ private fun SportsBettingApp() {
                 RunScreen(
                     viewModel = viewModel,
                     onRunSuccess = { runId ->
-                        navController.navigate("${Screen.RunDetail.route}/$runId")
+                        navController.navigate("${Screen.Predictions.route}/$runId")
                     },
                     contentPadding = padding
                 )
@@ -82,10 +81,10 @@ private fun SportsBettingApp() {
                     contentPadding = padding
                 )
             }
-            composable("${Screen.RunDetail.route}/{runId}") { backStackEntry ->
+            composable("${Screen.Predictions.route}/{runId}") { backStackEntry ->
                 val runId = backStackEntry.arguments?.getString("runId") ?: ""
-                val viewModel: RunDetailViewModel = viewModel()
-                RunDetailScreen(runId = runId, viewModel = viewModel, contentPadding = padding)
+                val viewModel: PredictionsViewModel = viewModel()
+                PredictionsScreen(runId = runId, viewModel = viewModel, contentPadding = padding)
             }
             composable(Screen.Disclaimer.route) {
                 DisclaimerScreen(contentPadding = padding)

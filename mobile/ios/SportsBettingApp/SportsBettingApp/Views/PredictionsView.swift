@@ -1,7 +1,7 @@
 import SwiftUI
 
-struct RunDetailView: View {
-    @StateObject var viewModel: RunDetailViewModel
+struct PredictionsView: View {
+    @StateObject var viewModel: PredictionsViewModel
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -18,11 +18,17 @@ struct RunDetailView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("\(prediction.awayTeam ?? "Away") @ \(prediction.homeTeam ?? "Home")")
                         .font(.headline)
-                    HStack {
-                        Text(prediction.primaryRecommendation ?? "No recommendation")
-                        Spacer()
-                        Text(prediction.confidenceTier ?? prediction.valueTier ?? "")
-                            .foregroundColor(.secondary)
+                    if let recommendation = prediction.primaryRecommendation, !recommendation.isEmpty {
+                        Text("Recommendation: \(recommendation)")
+                    }
+                    if let confidence = prediction.confidence, !confidence.isEmpty {
+                        Text("Confidence: \(confidence)")
+                    }
+                    if let confidenceTier = prediction.confidenceTier, !confidenceTier.isEmpty {
+                        Text("Confidence Tier: \(confidenceTier)")
+                    }
+                    if let valueTier = prediction.valueTier, !valueTier.isEmpty {
+                        Text("Value Tier: \(valueTier)")
                     }
                     if let price = prediction.price, !price.isEmpty {
                         Text("Price: \(price)")
@@ -34,10 +40,10 @@ struct RunDetailView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .navigationTitle("Run Details")
+        .navigationTitle("Predictions")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("Download CSV") {
+                Button("Open CSV") {
                     openURL(viewModel.downloadURL)
                 }
             }
@@ -58,6 +64,6 @@ struct RunDetailView: View {
 
 #Preview {
     NavigationStack {
-        RunDetailView(viewModel: RunDetailViewModel(runId: 1))
+        PredictionsView(viewModel: PredictionsViewModel(runId: "1"))
     }
 }
