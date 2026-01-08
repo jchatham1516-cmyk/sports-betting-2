@@ -25,7 +25,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.sportsbettingapp.BuildConfig
-import com.sportsbettingapp.data.model.Prediction
+import com.sportsbettingapp.data.model.PredictionItemDto
+import com.sportsbettingapp.data.model.PredictionsResponseDto
 import com.sportsbettingapp.ui.PredictionsViewModel
 import com.sportsbettingapp.ui.UiState
 
@@ -71,6 +72,8 @@ fun PredictionsScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     CircularProgressIndicator()
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Loading predictions...")
                 }
             }
             is UiState.Error -> {
@@ -85,33 +88,40 @@ fun PredictionsScreen(
 }
 
 @Composable
-private fun PredictionsList(predictions: List<Prediction>) {
-    if (predictions.isEmpty()) {
+private fun PredictionsList(predictions: PredictionsResponseDto) {
+    if (predictions.items.isEmpty()) {
         Text("No predictions found.")
         return
     }
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        items(predictions) { prediction ->
+        items(predictions.items) { prediction ->
             PredictionRow(prediction = prediction)
         }
     }
 }
 
 @Composable
-private fun PredictionRow(prediction: Prediction) {
+private fun PredictionRow(prediction: PredictionItemDto) {
+    val pickText = prediction.pick ?: prediction.primaryRecommendation ?: "-"
+    val matchup = when {
+        !prediction.away.isNullOrBlank() || !prediction.home.isNullOrBlank() ->
+            "${prediction.away ?: ""} @ ${prediction.home ?: ""}".trim()
+        else -> "Matchup unavailable"
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(12.dp)
     ) {
-        Text(text = "${prediction.away} @ ${prediction.home}", style = MaterialTheme.typography.titleMedium)
-        Text(text = "Recommendation: ${prediction.primaryRecommendation ?: "-"}")
-        Text(text = "Confidence: ${prediction.confidence ?: "-"}")
-        Text(text = "Value tier: ${prediction.valueTier ?: "-"}")
-        prediction.edges?.let { edges ->
-            val formatted = edges.entries.joinToString { "${it.key}: ${it.value}" }
-            Text(text = "Edges: $formatted")
-        }
+        Text(text = matchup, style = MaterialTheme.typography.titleMedium)
+        prediction.date?.let { Text(text = "Date: $it") }
+        Text(text = "Pick: $pickText")
+        prediction.confidence?.let { Text(text = "Confidence: $it") }
+        prediction.odds?.let { Text(text = "Odds: $it") }
+        prediction.edge?.let { Text(text = "Edge: $it") }
+        prediction.price?.let { Text(text = "Price: $it") }
+        prediction.units?.let { Text(text = "Units: $it") }
     }
 }

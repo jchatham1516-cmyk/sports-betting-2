@@ -158,6 +158,8 @@ fun RunScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     CircularProgressIndicator()
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Running model...")
                 }
             }
             is UiState.Error -> {
