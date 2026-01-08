@@ -1,7 +1,11 @@
 """Run endpoints."""
 from __future__ import annotations
 
-from datetime import datetime, date
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,15 +13,205 @@ from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
 from app.core import runner
+from app.core.run_store import store
 from app.db.models import Prediction, Run, TrackedBet
-from app.db.session import get_session
-from app.schemas.runs import RunCreate, RunRead, RunResponse
+from app.db.session import get_engine, get_session
+from app.schemas.runs import RunCreate, RunRead, RunResponse, RunStatusResponse
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
 
 def _parse_date(date_str: str) -> date:
     return datetime.strptime(date_str, "%Y-%m-%d").date()
+
+
+def _validate_game_date(date_str: str) -> date:
+    try:
+        return _parse_date(date_str)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "game_date must be YYYY-MM-DD"},
+        ) from exc
+
+
+def _run_key(sport: str, game_date: str, settings: dict[str, Any] | None) -> str:
+    environment = os.getenv("APP_ENV", "default")
+    flavor = (settings or {}).get("flavor") or environment
+    return f"{sport}:{game_date}:{flavor}"
+
+
+def _persist_run_results(
+    run_id: str,
+    payload: RunCreate,
+    result: dict[str, Any],
+) -> tuple[int, int]:
+    engine = get_engine()
+    prediction_models = []
+    tracked_models = []
+    with Session(engine) as session:
+        run = session.get(Run, run_id)
+        if not run:
+            raise RuntimeError("Run not found in database")
+
+        run.artifacts_json = {
+            "predictions_path": result.get("predictions_path"),
+            "tracked_bets_path": result.get("tracked_bets_path"),
+        }
+        run.log = result.get("log")
+        run.status = "done"
+        session.add(run)
+        session.commit()
+
+        predictions_rows = result.get("predictions_rows", [])
+        for row in predictions_rows:
+            game_date = row.get("date") or payload.game_date
+            if "/" in str(game_date):
+                game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
+            else:
+                game_date_obj = _parse_date(str(game_date))
+            home = _row_value(row, ["home", "home_team", "homeTeam"], default="")
+            away = _row_value(row, ["away", "away_team", "awayTeam"], default="")
+            pick = _row_value(row, ["pick", "primary_recommendation"], default="")
+            price = row.get("price")
+            if price is None:
+                if "HOME" in str(pick).upper():
+                    price = row.get("home_ml")
+                elif "AWAY" in str(pick).upper():
+                    price = row.get("away_ml")
+            units = row.get("units") or row.get("bet_size")
+            prediction_models.append(
+                Prediction(
+                    run_id=run_id,
+                    game_date=game_date_obj,
+                    home=str(home),
+                    away=str(away),
+                    market=_infer_market(row),
+                    pick=str(pick),
+                    price=float(price) if price is not None else None,
+                    units=float(units) if units is not None else None,
+                    raw_row=row,
+                )
+            )
+        if prediction_models:
+            session.add_all(prediction_models)
+            session.commit()
+
+        tracked_rows = result.get("tracked_bets_rows", [])
+        for row in tracked_rows:
+            bet_date = row.get("bet_date") or payload.game_date
+            if "/" in str(bet_date):
+                bet_date_obj = datetime.strptime(str(bet_date), "%m/%d/%Y").date()
+            else:
+                bet_date_obj = _parse_date(str(bet_date))
+            tracked_models.append(
+                TrackedBet(
+                    run_id=run_id,
+                    bet_date=bet_date_obj,
+                    sport=row.get("sport", payload.sport),
+                    market=row.get("market", "ml"),
+                    home=str(row.get("home", "")),
+                    away=str(row.get("away", "")),
+                    pick=str(row.get("pick", "")),
+                    price=float(row.get("price")) if row.get("price") is not None else None,
+                    units=float(row.get("units")) if row.get("units") is not None else None,
+                    result=str(row.get("result", "PENDING")),
+                )
+            )
+        if tracked_models:
+            session.add_all(tracked_models)
+            session.commit()
+
+    return (len(prediction_models), len(tracked_models))
+
+
+def _run_worker(run_id: str, payload: RunCreate) -> None:
+    store.update_run(run_id, status="running", progress=5, message="Starting model run...")
+    if not os.getenv("BALLDONTLIE_API_KEY"):
+        store.update_run(
+            run_id,
+            status="failed",
+            progress=5,
+            message="Run failed",
+            error="Missing BALLDONTLIE_API_KEY",
+        )
+        with Session(get_engine()) as session:
+            run = session.get(Run, run_id)
+            if run:
+                run.status = "error"
+                run.log = "Missing BALLDONTLIE_API_KEY"
+                session.add(run)
+                session.commit()
+        return
+    if not os.getenv("ODDS_API_KEY"):
+        store.update_run(
+            run_id,
+            status="failed",
+            progress=5,
+            message="Run failed",
+            error="Missing ODDS_API_KEY",
+        )
+        with Session(get_engine()) as session:
+            run = session.get(Run, run_id)
+            if run:
+                run.status = "error"
+                run.log = "Missing ODDS_API_KEY"
+                session.add(run)
+                session.commit()
+        return
+
+    start_time = time.monotonic()
+    milestones = [
+        (10, "Loading odds..."),
+        (35, "Fetching team ratings..."),
+        (60, "Computing predictions..."),
+        (85, "Finalizing outputs..."),
+    ]
+    next_milestone = 0
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(runner.run_model, payload.sport, payload.game_date, payload.settings)
+            while not future.done():
+                elapsed = time.monotonic() - start_time
+                estimated = min(90, int((elapsed / 330) * 90))
+                target_progress, message = milestones[next_milestone]
+                if estimated >= target_progress and next_milestone < len(milestones):
+                    store.update_run(run_id, progress=target_progress, message=message)
+                    next_milestone = min(next_milestone + 1, len(milestones) - 1)
+                else:
+                    store.update_run(run_id, progress=max(5, estimated), message="Running model...")
+                time.sleep(5)
+            result = future.result()
+        _persist_run_results(run_id, payload, result)
+    except Exception as exc:  # noqa: BLE001
+        store.update_run(
+            run_id,
+            status="failed",
+            progress=90,
+            message="Run failed",
+            error=str(exc),
+        )
+        with Session(get_engine()) as session:
+            run = session.get(Run, run_id)
+            if run:
+                run.status = "error"
+                run.log = str(exc)
+                session.add(run)
+                session.commit()
+        return
+
+    store.update_run(
+        run_id,
+        status="succeeded",
+        progress=100,
+        message="Run complete",
+    )
+    with Session(get_engine()) as session:
+        run = session.get(Run, run_id)
+        if run:
+            run.status = "done"
+            session.add(run)
+            session.commit()
 
 
 def _row_value(row: dict[str, Any], keys: list[str], default: Any = "") -> Any:
@@ -38,103 +232,47 @@ def _infer_market(row: dict[str, Any]) -> str:
 
 @router.post("", response_model=RunResponse)
 def create_run(payload: RunCreate, session: Session = Depends(get_session)) -> RunResponse:
+    _validate_game_date(payload.game_date)
+    run_key = _run_key(payload.sport, payload.game_date, payload.settings)
+    existing = store.find_active_by_key(run_key)
+    if existing:
+        return RunResponse(
+            id=existing.id,
+            status=existing.status,
+            predictions_count=0,
+            tracked_bets_count=0,
+        )
+
+    run_status = store.create_run(
+        status="queued",
+        progress=0,
+        message="Queued",
+        key=run_key,
+    )
     run = Run(
+        id=run_status.id,
         sport=payload.sport,
         game_date=_parse_date(payload.game_date),
-        status="running",
+        status="queued",
         settings_json=payload.settings or {},
     )
     session.add(run)
     session.commit()
     session.refresh(run)
 
-    try:
-        result = runner.run_model(payload.sport, payload.game_date, payload.settings)
-        run.artifacts_json = {
-            "predictions_path": result.get("predictions_path"),
-            "tracked_bets_path": result.get("tracked_bets_path"),
-        }
-        run.log = result.get("log")
-        run.status = "done"
-        session.add(run)
-        session.commit()
+    thread = threading.Thread(
+        target=_run_worker,
+        args=(run.id, payload),
+        daemon=True,
+    )
+    thread.start()
 
-        predictions_rows = result.get("predictions_rows", [])
-        prediction_models = []
-        for row in predictions_rows:
-            game_date = row.get("date") or payload.game_date
-            if "/" in str(game_date):
-                game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
-            else:
-                game_date_obj = _parse_date(str(game_date))
-            home = _row_value(row, ["home", "home_team", "homeTeam"], default="")
-            away = _row_value(row, ["away", "away_team", "awayTeam"], default="")
-            pick = _row_value(row, ["pick", "primary_recommendation"], default="")
-            price = row.get("price")
-            if price is None:
-                if "HOME" in str(pick).upper():
-                    price = row.get("home_ml")
-                elif "AWAY" in str(pick).upper():
-                    price = row.get("away_ml")
-            units = row.get("units") or row.get("bet_size")
-            prediction_models.append(
-                Prediction(
-                    run_id=run.id,
-                    game_date=game_date_obj,
-                    home=str(home),
-                    away=str(away),
-                    market=_infer_market(row),
-                    pick=str(pick),
-                    price=float(price) if price is not None else None,
-                    units=float(units) if units is not None else None,
-                    raw_row=row,
-                )
-            )
-        if prediction_models:
-            session.add_all(prediction_models)
-            session.commit()
-
-        tracked_rows = result.get("tracked_bets_rows", [])
-        tracked_models = []
-        for row in tracked_rows:
-            bet_date = row.get("bet_date") or payload.game_date
-            if "/" in str(bet_date):
-                bet_date_obj = datetime.strptime(str(bet_date), "%m/%d/%Y").date()
-            else:
-                bet_date_obj = _parse_date(str(bet_date))
-            tracked_models.append(
-                TrackedBet(
-                    run_id=run.id,
-                    bet_date=bet_date_obj,
-                    sport=row.get("sport", payload.sport),
-                    market=row.get("market", "ml"),
-                    home=str(row.get("home", "")),
-                    away=str(row.get("away", "")),
-                    pick=str(row.get("pick", "")),
-                    price=float(row.get("price")) if row.get("price") is not None else None,
-                    units=float(row.get("units")) if row.get("units") is not None else None,
-                    result=str(row.get("result", "PENDING")),
-                )
-            )
-        if tracked_models:
-            session.add_all(tracked_models)
-            session.commit()
-
-        return RunResponse(
-            id=run.id,
-            status=run.status,
-            predictions_count=len(prediction_models),
-            tracked_bets_count=len(tracked_models),
-        )
-    except Exception as exc:  # noqa: BLE001
-        run.status = "error"
-        run.log = str(exc)
-        session.add(run)
-        session.commit()
-        raise HTTPException(
-            status_code=500,
-            detail={"message": "Run failed", "run_id": run.id, "error": str(exc)},
-        ) from exc
+    return RunResponse(
+        id=run.id,
+        status="queued",
+        predictions_count=0,
+        tracked_bets_count=0,
+    )
 
 
 @router.get("/{run_id}", response_model=RunRead)
@@ -151,6 +289,21 @@ def get_run(run_id: str, session: Session = Depends(get_session)) -> RunRead:
         settings_json=run.settings_json,
         log=run.log,
         artifacts_json=run.artifacts_json,
+    )
+
+
+@router.get("/{run_id}/status", response_model=RunStatusResponse)
+def get_run_status(run_id: str) -> RunStatusResponse:
+    run = store.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return RunStatusResponse(
+        id=run.id,
+        status=run.status,
+        progress=run.progress,
+        message=run.message,
+        error=run.error,
+        updated_at=run.updated_at.isoformat(),
     )
 
 
