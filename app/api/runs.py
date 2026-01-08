@@ -9,6 +9,7 @@ from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
@@ -16,7 +17,7 @@ from app.core import runner
 from app.core.run_store import store
 from app.db.models import Prediction, Run, TrackedBet
 from app.db.session import get_engine, get_session
-from app.schemas.runs import RunCreate, RunRead, RunResponse, RunStatusResponse
+from app.schemas.runs import RunCreate, RunResponse, RunStatusResponse
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -36,9 +37,7 @@ def _validate_game_date(date_str: str) -> date:
 
 
 def _run_key(sport: str, game_date: str, settings: dict[str, Any] | None) -> str:
-    environment = os.getenv("APP_ENV", "default")
-    flavor = (settings or {}).get("flavor") or environment
-    return f"{sport}:{game_date}:{flavor}"
+    return f"{sport}:{game_date}"
 
 
 def _persist_run_results(
@@ -126,19 +125,25 @@ def _persist_run_results(
 
 
 def _run_worker(run_id: str, payload: RunCreate) -> None:
-    store.update_run(run_id, status="running", progress=5, message="Starting model run...")
+    store.update_run(run_id, status="running", progress=10, message="Starting model run...")
+    with Session(get_engine()) as session:
+        run = session.get(Run, run_id)
+        if run:
+            run.status = "running"
+            session.add(run)
+            session.commit()
     if not os.getenv("BALLDONTLIE_API_KEY"):
         store.update_run(
             run_id,
             status="failed",
-            progress=5,
+            progress=10,
             message="Run failed",
             error="Missing BALLDONTLIE_API_KEY",
         )
         with Session(get_engine()) as session:
             run = session.get(Run, run_id)
             if run:
-                run.status = "error"
+                run.status = "failed"
                 run.log = "Missing BALLDONTLIE_API_KEY"
                 session.add(run)
                 session.commit()
@@ -147,14 +152,14 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
         store.update_run(
             run_id,
             status="failed",
-            progress=5,
+            progress=10,
             message="Run failed",
             error="Missing ODDS_API_KEY",
         )
         with Session(get_engine()) as session:
             run = session.get(Run, run_id)
             if run:
-                run.status = "error"
+                run.status = "failed"
                 run.log = "Missing ODDS_API_KEY"
                 session.add(run)
                 session.commit()
@@ -162,10 +167,9 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
 
     start_time = time.monotonic()
     milestones = [
-        (10, "Loading odds..."),
-        (35, "Fetching team ratings..."),
+        (30, "Loading data..."),
         (60, "Computing predictions..."),
-        (85, "Finalizing outputs..."),
+        (85, "Writing outputs..."),
     ]
     next_milestone = 0
     try:
@@ -173,13 +177,16 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
             future = executor.submit(runner.run_model, payload.sport, payload.game_date, payload.settings)
             while not future.done():
                 elapsed = time.monotonic() - start_time
-                estimated = min(90, int((elapsed / 330) * 90))
-                target_progress, message = milestones[next_milestone]
-                if estimated >= target_progress and next_milestone < len(milestones):
-                    store.update_run(run_id, progress=target_progress, message=message)
-                    next_milestone = min(next_milestone + 1, len(milestones) - 1)
+                estimated = min(85, int((elapsed / 330) * 85))
+                if next_milestone < len(milestones):
+                    target_progress, message = milestones[next_milestone]
+                    if estimated >= target_progress:
+                        store.update_run(run_id, progress=target_progress, message=message)
+                        next_milestone += 1
+                    else:
+                        store.update_run(run_id, progress=max(10, estimated), message="Running model...")
                 else:
-                    store.update_run(run_id, progress=max(5, estimated), message="Running model...")
+                    store.update_run(run_id, progress=max(10, estimated), message="Running model...")
                 time.sleep(5)
             result = future.result()
         _persist_run_results(run_id, payload, result)
@@ -194,7 +201,7 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
         with Session(get_engine()) as session:
             run = session.get(Run, run_id)
             if run:
-                run.status = "error"
+                run.status = "failed"
                 run.log = str(exc)
                 session.add(run)
                 session.commit()
@@ -202,7 +209,7 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
 
     store.update_run(
         run_id,
-        status="succeeded",
+        status="done",
         progress=100,
         message="Run complete",
     )
@@ -242,6 +249,20 @@ def create_run(payload: RunCreate, session: Session = Depends(get_session)) -> R
             predictions_count=0,
             tracked_bets_count=0,
         )
+    existing_db = session.exec(
+        select(Run).where(
+            Run.sport == payload.sport,
+            Run.game_date == _parse_date(payload.game_date),
+            Run.status.in_(["queued", "running"]),
+        )
+    ).first()
+    if existing_db:
+        return RunResponse(
+            id=existing_db.id,
+            status=existing_db.status,
+            predictions_count=0,
+            tracked_bets_count=0,
+        )
 
     run_status = store.create_run(
         status="queued",
@@ -275,40 +296,88 @@ def create_run(payload: RunCreate, session: Session = Depends(get_session)) -> R
     )
 
 
-@router.get("/{run_id}", response_model=RunRead)
-def get_run(run_id: str, session: Session = Depends(get_session)) -> RunRead:
+def _normalize_status(raw_status: str) -> str:
+    if raw_status == "error":
+        return "failed"
+    if raw_status in {"queued", "running", "done", "failed"}:
+        return raw_status
+    return raw_status
+
+
+def _count_run_items(session: Session, run_id: str) -> tuple[int, int]:
+    predictions = session.exec(select(Prediction).where(Prediction.run_id == run_id)).all()
+    tracked = session.exec(select(TrackedBet).where(TrackedBet.run_id == run_id)).all()
+    return (len(predictions), len(tracked))
+
+
+def _build_run_status_response(run: Run, session: Session) -> RunStatusResponse:
+    store_run = store.get_run(run.id)
+    status = _normalize_status(store_run.status) if store_run else _normalize_status(run.status)
+    if store_run:
+        progress = store_run.progress
+        message = store_run.message
+        error = store_run.error
+    else:
+        progress = 100 if status == "done" else 0
+        if status == "done":
+            message = "Run complete"
+        elif status == "failed":
+            message = "Run failed"
+        elif status == "queued":
+            message = "Queued"
+        else:
+            message = "Running"
+        error = run.log if status == "failed" else None
+
+    predictions_count = 0
+    tracked_bets_count = 0
+    if status == "done":
+        predictions_count, tracked_bets_count = _count_run_items(session, run.id)
+
+    return RunStatusResponse(
+        id=run.id,
+        status=status,
+        progress_percent=progress,
+        message=message,
+        predictions_count=predictions_count,
+        tracked_bets_count=tracked_bets_count,
+        error=error,
+    )
+
+
+@router.get("/{run_id}", response_model=RunStatusResponse)
+def get_run(run_id: str, session: Session = Depends(get_session)) -> RunStatusResponse:
     run = session.get(Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return RunRead(
-        id=run.id,
-        sport=run.sport,
-        game_date=run.game_date.isoformat(),
-        status=run.status,
-        created_at=run.created_at.isoformat(),
-        settings_json=run.settings_json,
-        log=run.log,
-        artifacts_json=run.artifacts_json,
-    )
+    return _build_run_status_response(run, session)
 
 
 @router.get("/{run_id}/status", response_model=RunStatusResponse)
-def get_run_status(run_id: str) -> RunStatusResponse:
-    run = store.get_run(run_id)
+def get_run_status(run_id: str, session: Session = Depends(get_session)) -> RunStatusResponse:
+    run = session.get(Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return RunStatusResponse(
-        id=run.id,
-        status=run.status,
-        progress=run.progress,
-        message=run.message,
-        error=run.error,
-        updated_at=run.updated_at.isoformat(),
-    )
+    return _build_run_status_response(run, session)
 
 
 @router.get("/{run_id}/predictions")
 def get_predictions(run_id: str, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    run = session.get(Run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    store_run = store.get_run(run_id)
+    status = _normalize_status(store_run.status) if store_run else _normalize_status(run.status)
+    progress = store_run.progress if store_run else (100 if status == "done" else 0)
+    if status != "done":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Run not finished",
+                "status": status,
+                "progress_percent": progress,
+            },
+        )
     statement = select(Prediction).where(Prediction.run_id == run_id)
     predictions = session.exec(statement).all()
     return [prediction.raw_row for prediction in predictions]
