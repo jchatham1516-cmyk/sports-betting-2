@@ -29,6 +29,10 @@ class RunViewModel(
 
     private var pollingJob: Job? = null
 
+    init {
+        restoreStatusFromSavedState()
+    }
+
     fun runModel(sport: String, gameDate: String) {
         _runState.value = UiState.Loading
         viewModelScope.launch {
@@ -67,15 +71,16 @@ class RunViewModel(
                     val status = withContext(Dispatchers.IO) {
                         repository.getRunStatus(runId)
                     }
+                    saveStatus(status)
                     _statusState.value = UiState.Success(status)
-                    if (status.status == "succeeded" || status.status == "failed") {
+                    if (status.status == "done" || status.status == "failed") {
                         break
                     }
                 } catch (exception: Exception) {
                     _statusState.value = UiState.Error(exception.localizedMessage ?: "Failed to load status")
                     break
                 }
-                delay(1_500L)
+                delay(2_500L)
             }
         }
     }
@@ -84,7 +89,42 @@ class RunViewModel(
         _runState.value = UiState.Idle
     }
 
+    private fun saveStatus(status: RunStatusResponseDto) {
+        savedStateHandle[STATUS_KEY] = status.status
+        savedStateHandle[PROGRESS_KEY] = status.progressPercent
+        savedStateHandle[MESSAGE_KEY] = status.message
+        savedStateHandle[ERROR_KEY] = status.error
+        savedStateHandle[PREDICTIONS_COUNT_KEY] = status.predictionsCount
+        savedStateHandle[TRACKED_BETS_COUNT_KEY] = status.trackedBetsCount
+    }
+
+    private fun restoreStatusFromSavedState() {
+        val status = savedStateHandle.get<String>(STATUS_KEY) ?: return
+        val progress = savedStateHandle.get<Int>(PROGRESS_KEY) ?: 0
+        val predictionsCount = savedStateHandle.get<Int>(PREDICTIONS_COUNT_KEY) ?: 0
+        val trackedBetsCount = savedStateHandle.get<Int>(TRACKED_BETS_COUNT_KEY) ?: 0
+        val message = savedStateHandle.get<String>(MESSAGE_KEY)
+        val error = savedStateHandle.get<String>(ERROR_KEY)
+        _statusState.value = UiState.Success(
+            RunStatusResponseDto(
+                id = savedStateHandle.get<String>(RUN_ID_KEY) ?: "",
+                status = status,
+                progressPercent = progress,
+                message = message,
+                predictionsCount = predictionsCount,
+                trackedBetsCount = trackedBetsCount,
+                error = error
+            )
+        )
+    }
+
     companion object {
         private const val RUN_ID_KEY = "run_id"
+        private const val STATUS_KEY = "run_status"
+        private const val PROGRESS_KEY = "run_progress"
+        private const val MESSAGE_KEY = "run_message"
+        private const val ERROR_KEY = "run_error"
+        private const val PREDICTIONS_COUNT_KEY = "run_predictions_count"
+        private const val TRACKED_BETS_COUNT_KEY = "run_tracked_bets_count"
     }
 }

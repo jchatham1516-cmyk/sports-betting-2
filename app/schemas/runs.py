@@ -33,7 +33,8 @@ class RunRead(BaseModel):
 class RunStatusResponse(BaseModel):
     id: str
     status: str
-    progress: int
-    message: str
+    progress_percent: int = Field(..., alias="progress_percent")
+    message: Optional[str] = None
+    predictions_count: int
+    tracked_bets_count: int
     error: Optional[str] = None
-    updated_at: str

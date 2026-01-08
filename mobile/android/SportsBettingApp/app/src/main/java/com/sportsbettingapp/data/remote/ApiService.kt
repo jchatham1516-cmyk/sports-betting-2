@@ -18,7 +18,7 @@ interface ApiService {
     @GET("api/runs/{runId}/predictions")
     suspend fun getPredictions(@Path("runId") runId: String): List<PredictionItemDto>
 
-    @GET("api/runs/{runId}/status")
+    @GET("api/runs/{runId}")
     suspend fun getRunStatus(@Path("runId") runId: String): RunStatusResponseDto
 
     @GET("api/bets")

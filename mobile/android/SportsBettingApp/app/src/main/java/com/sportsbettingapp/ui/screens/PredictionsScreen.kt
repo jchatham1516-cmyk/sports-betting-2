@@ -57,7 +57,7 @@ fun PredictionsScreen(
         Spacer(modifier = Modifier.height(16.dp))
         Button(
             onClick = {
-                val url = "${BuildConfig.BASE_URL}/api/runs/$runId/download/predictions.csv"
+                val url = "${BuildConfig.BASE_URL}api/runs/$runId/download/predictions.csv"
                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
                 context.startActivity(intent)
             },
@@ -69,15 +69,15 @@ fun PredictionsScreen(
 
         when (val status = statusState) {
             is UiState.Success -> {
-                val progress = status.data.progress.coerceIn(0, 100)
+                val progress = status.data.progressPercent.coerceIn(0, 100)
                 LinearProgressIndicator(
                     progress = progress / 100f,
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("${progress}%")
+                Text("${progress}% • ${status.data.status}")
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(status.data.message)
+                Text(status.data.message ?: "Working...")
                 status.data.error?.let { error ->
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(text = error, color = MaterialTheme.colorScheme.error)
