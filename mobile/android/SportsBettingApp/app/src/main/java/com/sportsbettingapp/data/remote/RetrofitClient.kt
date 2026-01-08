@@ -7,6 +7,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
+import java.util.concurrent.TimeUnit
 
 object RetrofitClient {
     private val json = Json { ignoreUnknownKeys = true }
@@ -18,6 +19,8 @@ object RetrofitClient {
         }
 
         val clientBuilder = OkHttpClient.Builder()
+            .readTimeout(5, TimeUnit.MINUTES)
+            .connectTimeout(30, TimeUnit.SECONDS)
         if (BuildConfig.FLAVOR == "dev") {
             clientBuilder.addInterceptor(logging)
         }

@@ -28,3 +28,12 @@ class RunRead(BaseModel):
     settings_json: Optional[dict[str, Any]] = None
     log: Optional[str] = None
     artifacts_json: Optional[dict[str, Any]] = None
+
+
+class RunStatusResponse(BaseModel):
+    id: str
+    status: str
+    progress: int
+    message: str
+    error: Optional[str] = None
+    updated_at: str

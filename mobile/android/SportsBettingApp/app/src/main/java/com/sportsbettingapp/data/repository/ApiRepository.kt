@@ -5,6 +5,7 @@ import com.sportsbettingapp.data.model.PredictionItemDto
 import com.sportsbettingapp.data.model.PredictionsResponseDto
 import com.sportsbettingapp.data.model.RunRequestDto
 import com.sportsbettingapp.data.model.RunResponseDto
+import com.sportsbettingapp.data.model.RunStatusResponseDto
 import com.sportsbettingapp.data.remote.ApiService
 import com.sportsbettingapp.data.remote.RetrofitClient
 
@@ -17,6 +18,8 @@ class ApiRepository(private val apiService: ApiService) {
     }
 
     suspend fun getBets(date: String, sport: String): List<Bet> = apiService.getBets(date, sport)
+
+    suspend fun getRunStatus(runId: String): RunStatusResponseDto = apiService.getRunStatus(runId)
 
     companion object {
         fun create(): ApiRepository = ApiRepository(RetrofitClient.createService())

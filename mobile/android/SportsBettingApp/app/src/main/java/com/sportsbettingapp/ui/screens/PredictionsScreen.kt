@@ -14,13 +14,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -30,13 +30,6 @@ import com.sportsbettingapp.data.model.PredictionItemDto
 import com.sportsbettingapp.data.model.PredictionsResponseDto
 import com.sportsbettingapp.ui.PredictionsViewModel
 import com.sportsbettingapp.ui.UiState
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 
 @Composable
 fun PredictionsScreen(
@@ -45,21 +38,11 @@ fun PredictionsScreen(
     contentPadding: PaddingValues
 ) {
     val predictionsState by viewModel.predictionsState.collectAsState()
+    val statusState by viewModel.statusState.collectAsState()
     val context = LocalContext.current
 
     LaunchedEffect(runId) {
-        val pollingJob = launch {
-            while (isActive) {
-                viewModel.loadPredictions(runId)
-                delay(2_000L)
-            }
-        }
-        snapshotFlow { predictionsState }
-            .filterIsInstance<UiState.Success<PredictionsResponseDto>>()
-            .map { it.data.items }
-            .filter { it.isNotEmpty() }
-            .first()
-        pollingJob.cancel()
+        viewModel.startPolling(runId)
     }
 
     Column(
@@ -83,6 +66,31 @@ fun PredictionsScreen(
             Text("Open CSV")
         }
         Spacer(modifier = Modifier.height(16.dp))
+
+        when (val status = statusState) {
+            is UiState.Success -> {
+                val progress = status.data.progress.coerceIn(0, 100)
+                LinearProgressIndicator(
+                    progress = progress / 100f,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("${progress}%")
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(status.data.message)
+                status.data.error?.let { error ->
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(text = error, color = MaterialTheme.colorScheme.error)
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+            is UiState.Error -> {
+                Text(text = status.message, color = MaterialTheme.colorScheme.error)
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+            UiState.Loading -> Unit
+            UiState.Idle -> Unit
+        }
 
         when (val state = predictionsState) {
             UiState.Loading -> {

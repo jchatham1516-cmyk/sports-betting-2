@@ -4,6 +4,7 @@ import com.sportsbettingapp.data.model.Bet
 import com.sportsbettingapp.data.model.PredictionItemDto
 import com.sportsbettingapp.data.model.RunRequestDto
 import com.sportsbettingapp.data.model.RunResponseDto
+import com.sportsbettingapp.data.model.RunStatusResponseDto
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
@@ -16,6 +17,9 @@ interface ApiService {
 
     @GET("api/runs/{runId}/predictions")
     suspend fun getPredictions(@Path("runId") runId: String): List<PredictionItemDto>
+
+    @GET("api/runs/{runId}/status")
+    suspend fun getRunStatus(@Path("runId") runId: String): RunStatusResponseDto
 
     @GET("api/bets")
     suspend fun getBets(

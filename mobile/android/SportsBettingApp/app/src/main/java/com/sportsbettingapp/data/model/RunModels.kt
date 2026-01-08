@@ -17,3 +17,13 @@ data class RunResponseDto(
     @SerialName("predictions_count") val predictionsCount: Int? = null,
     @SerialName("tracked_bets_count") val trackedBetsCount: Int? = null
 )
+
+@Serializable
+data class RunStatusResponseDto(
+    val id: String,
+    val status: String,
+    val progress: Int,
+    val message: String,
+    val error: String? = null,
+    @SerialName("updated_at") val updatedAt: String
+)
