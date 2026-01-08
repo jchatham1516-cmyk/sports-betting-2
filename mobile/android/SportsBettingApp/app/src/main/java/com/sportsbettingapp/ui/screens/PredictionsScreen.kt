@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -29,6 +30,13 @@ import com.sportsbettingapp.data.model.PredictionItemDto
 import com.sportsbettingapp.data.model.PredictionsResponseDto
 import com.sportsbettingapp.ui.PredictionsViewModel
 import com.sportsbettingapp.ui.UiState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 @Composable
 fun PredictionsScreen(
@@ -40,7 +48,18 @@ fun PredictionsScreen(
     val context = LocalContext.current
 
     LaunchedEffect(runId) {
-        viewModel.loadPredictions(runId)
+        val pollingJob = launch {
+            while (isActive) {
+                viewModel.loadPredictions(runId)
+                delay(2_000L)
+            }
+        }
+        snapshotFlow { predictionsState }
+            .filterIsInstance<UiState.Success<PredictionsResponseDto>>()
+            .map { it.data.items }
+            .filter { it.isNotEmpty() }
+            .first()
+        pollingJob.cancel()
     }
 
     Column(
