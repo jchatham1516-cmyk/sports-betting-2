@@ -65,6 +65,18 @@ def breakeven_prob_from_american(odds: float) -> float:
     return 1.0 / dec
 
 
+def implied_prob_american(odds: float) -> float:
+    try:
+        odds = float(odds)
+    except Exception:
+        return float("nan")
+    if np.isnan(odds) or odds == 0:
+        return float("nan")
+    if odds > 0:
+        return 100.0 / (odds + 100.0)
+    return abs(odds) / (abs(odds) + 100.0)
+
+
 def profit_per_dollar_from_american(odds: float) -> float:
     """Return the profit (not total return) for a $1 stake at given odds."""
 
@@ -145,7 +157,7 @@ def confidence_tier_from_edge(abs_edge: float) -> str:
     if abs_edge is None or (isinstance(abs_edge, float) and np.isnan(abs_edge)):
         return "UNKNOWN"
     abs_edge = float(abs_edge)
-    if abs_edge > CONF_HIGH:
+    if abs_edge >= CONF_HIGH:
         return "HIGH"
     if abs_edge >= CONF_MED:
         return "MEDIUM"
@@ -341,12 +353,19 @@ def _primary_probabilities(
         if model_prob is not None and side == "AWAY":
             model_prob = 1.0 - model_prob
 
-        market_home = safe_float(row.get("market_home_prob"))
-        market_prob = None if market_home is None or np.isnan(market_home) else float(market_home)
-        if market_prob is not None and side == "AWAY":
-            market_prob = 1.0 - market_prob
+        market_prob = None
+        if side == "HOME":
+            market_home = safe_float(row.get("market_home_prob"))
+            market_prob = None if market_home is None or np.isnan(market_home) else float(market_home)
+        elif side == "AWAY":
+            market_away = safe_float(row.get("market_away_prob"))
+            if market_away is not None and not np.isnan(market_away):
+                market_prob = float(market_away)
+            else:
+                market_home = safe_float(row.get("market_home_prob"))
+                market_prob = None if market_home is None or np.isnan(market_home) else float(1.0 - market_home)
         if market_prob is None or np.isnan(market_prob):
-            market_prob = breakeven_prob_from_american(ml_price)
+            market_prob = implied_prob_american(ml_price)
 
         return model_prob, market_prob, ml_price, opp_price, None
 
@@ -366,7 +385,19 @@ def _primary_probabilities(
         if model_prob is not None and side == "AWAY":
             model_prob = 1.0 - model_prob
 
-        market_prob = breakeven_prob_from_american(spread_price)
+        market_prob = None
+        if side == "HOME":
+            market_prob = safe_float(row.get("market_home_cover_prob", row.get("market_spread_prob")))
+        elif side == "AWAY":
+            market_away_cover = safe_float(row.get("market_away_cover_prob"))
+            if market_away_cover is not None and not np.isnan(market_away_cover):
+                market_prob = market_away_cover
+            else:
+                market_home_cover = safe_float(row.get("market_home_cover_prob", row.get("market_spread_prob")))
+                if market_home_cover is not None and not np.isnan(market_home_cover):
+                    market_prob = 1.0 - float(market_home_cover)
+        if market_prob is None or np.isnan(market_prob):
+            market_prob = implied_prob_american(spread_price)
         return model_prob, market_prob, spread_price, None, None
 
     if market == "TOTAL":
@@ -383,7 +414,19 @@ def _primary_probabilities(
             return None, None, None, None, "missing total line or price"
 
         model_prob = _model_prob_for_total(row, side)
-        market_prob = breakeven_prob_from_american(total_price)
+        market_prob = None
+        if side == "OVER":
+            market_prob = safe_float(row.get("market_over_prob", row.get("market_total_prob")))
+        elif side == "UNDER":
+            market_under = safe_float(row.get("market_under_prob"))
+            if market_under is not None and not np.isnan(market_under):
+                market_prob = market_under
+            else:
+                market_over = safe_float(row.get("market_over_prob", row.get("market_total_prob")))
+                if market_over is not None and not np.isnan(market_over):
+                    market_prob = 1.0 - float(market_over)
+        if market_prob is None or np.isnan(market_prob):
+            market_prob = implied_prob_american(total_price)
         return model_prob, market_prob, total_price, None, None
 
     return None, None, None, None, "missing primary market"
