@@ -45,6 +45,9 @@ def test_convert_to_betting_sheet_creates_output(tmp_path):
         "p_model_used",
         "p_market_used",
         "abs_edge_used",
+        "abs_edge_prob",
+        "confidence_reason",
+        "stake_dollars",
     }
     assert expected_cols.issubset(result_df.columns)
     assert result_df.loc[0, "unit_dollars"] == 20.0

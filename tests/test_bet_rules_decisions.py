@@ -18,7 +18,7 @@ def _base_row(**kwargs):
 
 
 def test_longshot_allowed_but_capped():
-    settings = DecisionSettings(max_units=1.0, max_units_sanity=0.25)
+    settings = DecisionSettings(max_units=1.0, longshot_max_units=0.25)
     decision = decide_bet_from_row(
         _base_row(),
         unit_dollars=40.0,
@@ -32,8 +32,8 @@ def test_longshot_allowed_but_capped():
 
 
 def test_disagreement_cap():
-    row = _base_row(home_ml=150, away_ml=-170, model_home_prob=0.75, market_home_prob=0.5)
-    settings = DecisionSettings(max_units=1.0, max_units_sanity=0.25)
+    row = _base_row(home_ml=150, away_ml=-170, model_home_prob=0.8, market_home_prob=0.5)
+    settings = DecisionSettings(max_units=1.0, disagreement_max_units=0.25)
 
     decision = decide_bet_from_row(
         row,
@@ -72,4 +72,4 @@ def test_missing_odds_passes():
     )
 
     assert decision.play_pass == "PASS"
-    assert "MISSING_ODDS" in decision.decision_flags or decision.reason.startswith("missing moneyline")
+    assert "MISSING_DATA_PASS" in decision.decision_flags or decision.reason.startswith("missing moneyline")

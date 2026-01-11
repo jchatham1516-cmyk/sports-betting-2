@@ -108,6 +108,13 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
     if market_type is None:
         return None
 
+    p_model_used = _safe_number(row.get("p_model_used"))
+    p_market_used = _safe_number(row.get("p_market_used"))
+    if np.isfinite(p_model_used):
+        model_prob = p_model_used
+    if np.isfinite(p_market_used):
+        market_prob = p_market_used
+
     date_str = row.get("date")
     bet_id = _hash_bet_id(
         date_str,

@@ -596,6 +596,31 @@ def _summaries(history: pd.DataFrame) -> Dict[str, object]:
             "max_drawdown": _max_drawdown(graded.get("profit_dollars", pd.Series(dtype=float))),
         }
 
+    def _group_summary(df: pd.DataFrame, col: str) -> Dict[str, Dict[str, object]]:
+        if df.empty or col not in df.columns:
+            return {}
+        grouped: Dict[str, Dict[str, object]] = {}
+        for key, sub in df.groupby(col):
+            if pd.isna(key) or str(key).strip() == "":
+                continue
+            grouped[str(key)] = {
+                "win_pct": _summary_for(sub).get("win_pct", 0.0),
+                "roi": _summary_for(sub).get("roi", 0.0),
+                "bets": _summary_for(sub).get("bets", 0),
+            }
+        return grouped
+
+    def _longshot_filter(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        if "price_at_bet" in df.columns:
+            price = pd.to_numeric(df["price_at_bet"], errors="coerce")
+            return df[price >= 500]
+        if "price_decimal" in df.columns:
+            price = pd.to_numeric(df["price_decimal"], errors="coerce")
+            return df[price >= 6.0]
+        return df.iloc[0:0]
+
     today = date.today()
     last_30 = today - timedelta(days=30)
 
@@ -603,7 +628,13 @@ def _summaries(history: pd.DataFrame) -> Dict[str, object]:
     hist_with_date["date"] = hist_with_date["date"].apply(lambda d: _parse_date(d) or d)
     recent = hist_with_date[hist_with_date["date"] >= last_30] if not hist_with_date.empty else pd.DataFrame()
 
-    return {"lifetime": _summary_for(hist_with_date), "last_30_days": _summary_for(recent)}
+    return {
+        "lifetime": _summary_for(hist_with_date),
+        "last_30_days": _summary_for(recent),
+        "by_confidence": _group_summary(hist_with_date, "confidence"),
+        "by_value_tier": _group_summary(hist_with_date, "value_tier"),
+        "longshots": _summary_for(_longshot_filter(hist_with_date)),
+    }
 
 
 def _write_outputs(
