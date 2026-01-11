@@ -185,7 +185,7 @@ fun RunScreen(
 
         when (val status = statusState) {
             is UiState.Success -> {
-                val progress = status.data.progress.coerceIn(0, 100)
+                val progress = status.data.progressPercent.coerceIn(0, 100)
                 Spacer(modifier = Modifier.height(16.dp))
                 LinearProgressIndicator(
                     progress = progress / 100f,
@@ -194,7 +194,11 @@ fun RunScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("${progress}%")
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(status.data.message)
+                Text(status.data.message ?: "Working...")
+                status.data.error?.let { error ->
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(text = error, color = MaterialTheme.colorScheme.error)
+                }
             }
             is UiState.Error -> {
                 Spacer(modifier = Modifier.height(16.dp))

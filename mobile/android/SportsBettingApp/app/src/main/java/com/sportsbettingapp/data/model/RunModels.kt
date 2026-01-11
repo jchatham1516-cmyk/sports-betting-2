@@ -22,8 +22,9 @@ data class RunResponseDto(
 data class RunStatusResponseDto(
     val id: String,
     val status: String,
-    val progress: Int,
-    val message: String,
-    val error: String? = null,
-    @SerialName("updated_at") val updatedAt: String
+    @SerialName("progress_percent") val progressPercent: Int,
+    val message: String? = null,
+    @SerialName("predictions_count") val predictionsCount: Int,
+    @SerialName("tracked_bets_count") val trackedBetsCount: Int,
+    val error: String? = null
 )

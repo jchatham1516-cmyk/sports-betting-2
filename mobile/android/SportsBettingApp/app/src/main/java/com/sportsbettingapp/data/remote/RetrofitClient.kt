@@ -26,7 +26,7 @@ object RetrofitClient {
         }
 
         val retrofit = Retrofit.Builder()
-            .baseUrl(BuildConfig.BASE_URL)
+            .baseUrl(BuildConfig.BASE_URL.ensureTrailingSlash())
             .client(clientBuilder.build())
             .addConverterFactory(json.asConverterFactory(contentType))
             .build()
@@ -34,3 +34,5 @@ object RetrofitClient {
         return retrofit.create(ApiService::class.java)
     }
 }
+
+private fun String.ensureTrailingSlash(): String = if (endsWith("/")) this else "$this/"

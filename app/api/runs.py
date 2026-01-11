@@ -10,13 +10,14 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.core import runner
 from app.core.run_store import store
 from app.db.models import Prediction, Run, TrackedBet
 from app.db.session import get_engine, get_session
-from app.schemas.runs import RunCreate, RunRead, RunResponse, RunStatusResponse
+from app.schemas.runs import RunCreate, RunResponse, RunStatusResponse
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -126,19 +127,19 @@ def _persist_run_results(
 
 
 def _run_worker(run_id: str, payload: RunCreate) -> None:
-    store.update_run(run_id, status="running", progress=5, message="Starting model run...")
+    store.update_run(run_id, status="running", progress=10, message="Starting model run...")
     if not os.getenv("BALLDONTLIE_API_KEY"):
         store.update_run(
             run_id,
             status="failed",
-            progress=5,
+            progress=10,
             message="Run failed",
             error="Missing BALLDONTLIE_API_KEY",
         )
         with Session(get_engine()) as session:
             run = session.get(Run, run_id)
             if run:
-                run.status = "error"
+                run.status = "failed"
                 run.log = "Missing BALLDONTLIE_API_KEY"
                 session.add(run)
                 session.commit()
@@ -147,14 +148,14 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
         store.update_run(
             run_id,
             status="failed",
-            progress=5,
+            progress=10,
             message="Run failed",
             error="Missing ODDS_API_KEY",
         )
         with Session(get_engine()) as session:
             run = session.get(Run, run_id)
             if run:
-                run.status = "error"
+                run.status = "failed"
                 run.log = "Missing ODDS_API_KEY"
                 session.add(run)
                 session.commit()
@@ -162,10 +163,9 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
 
     start_time = time.monotonic()
     milestones = [
-        (10, "Loading odds..."),
-        (35, "Fetching team ratings..."),
+        (30, "Loading data..."),
         (60, "Computing predictions..."),
-        (85, "Finalizing outputs..."),
+        (85, "Writing outputs..."),
     ]
     next_milestone = 0
     try:
@@ -179,7 +179,7 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
                     store.update_run(run_id, progress=target_progress, message=message)
                     next_milestone = min(next_milestone + 1, len(milestones) - 1)
                 else:
-                    store.update_run(run_id, progress=max(5, estimated), message="Running model...")
+                    store.update_run(run_id, progress=max(10, estimated), message="Running model...")
                 time.sleep(5)
             result = future.result()
         _persist_run_results(run_id, payload, result)
@@ -194,7 +194,7 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
         with Session(get_engine()) as session:
             run = session.get(Run, run_id)
             if run:
-                run.status = "error"
+                run.status = "failed"
                 run.log = str(exc)
                 session.add(run)
                 session.commit()
@@ -202,16 +202,16 @@ def _run_worker(run_id: str, payload: RunCreate) -> None:
 
     store.update_run(
         run_id,
-        status="succeeded",
+        status="done",
         progress=100,
         message="Run complete",
     )
     with Session(get_engine()) as session:
         run = session.get(Run, run_id)
-        if run:
-            run.status = "done"
-            session.add(run)
-            session.commit()
+    if run:
+        run.status = "done"
+        session.add(run)
+        session.commit()
 
 
 def _row_value(row: dict[str, Any], keys: list[str], default: Any = "") -> Any:
@@ -275,40 +275,77 @@ def create_run(payload: RunCreate, session: Session = Depends(get_session)) -> R
     )
 
 
-@router.get("/{run_id}", response_model=RunRead)
-def get_run(run_id: str, session: Session = Depends(get_session)) -> RunRead:
-    run = session.get(Run, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return RunRead(
-        id=run.id,
-        sport=run.sport,
-        game_date=run.game_date.isoformat(),
-        status=run.status,
-        created_at=run.created_at.isoformat(),
-        settings_json=run.settings_json,
-        log=run.log,
-        artifacts_json=run.artifacts_json,
+def _count_run_rows(session: Session, run_id: str) -> tuple[int, int]:
+    predictions_count = session.exec(
+        select(func.count()).select_from(Prediction).where(Prediction.run_id == run_id)
+    ).one()
+    tracked_bets_count = session.exec(
+        select(func.count()).select_from(TrackedBet).where(TrackedBet.run_id == run_id)
+    ).one()
+    return int(predictions_count or 0), int(tracked_bets_count or 0)
+
+
+@router.get("/{run_id}", response_model=RunStatusResponse)
+def get_run_status(run_id: str, session: Session = Depends(get_session)) -> RunStatusResponse:
+    run_status = store.get_run(run_id)
+    if run_status:
+        status = run_status.status
+        progress = run_status.progress
+        message = run_status.message
+        error = run_status.error
+    else:
+        run_record = session.get(Run, run_id)
+        if not run_record:
+            raise HTTPException(status_code=404, detail="Run not found")
+        status = "failed" if run_record.status == "error" else run_record.status
+        progress = 100 if status == "done" else 0
+        message = "Run complete" if status == "done" else "Run status unavailable"
+        error = run_record.log if status == "failed" else None
+
+    predictions_count, tracked_bets_count = (0, 0)
+    if status == "done":
+        predictions_count, tracked_bets_count = _count_run_rows(session, run_id)
+    return RunStatusResponse(
+        id=run_id,
+        status=status,
+        progress_percent=progress,
+        message=message,
+        predictions_count=predictions_count,
+        tracked_bets_count=tracked_bets_count,
+        error=error,
     )
 
 
 @router.get("/{run_id}/status", response_model=RunStatusResponse)
-def get_run_status(run_id: str) -> RunStatusResponse:
-    run = store.get_run(run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return RunStatusResponse(
-        id=run.id,
-        status=run.status,
-        progress=run.progress,
-        message=run.message,
-        error=run.error,
-        updated_at=run.updated_at.isoformat(),
-    )
+def get_run_status_alias(run_id: str, session: Session = Depends(get_session)) -> RunStatusResponse:
+    return get_run_status(run_id, session)
 
 
 @router.get("/{run_id}/predictions")
 def get_predictions(run_id: str, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    run_status = store.get_run(run_id)
+    if run_status and run_status.status != "done":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": "Run not finished",
+                "status": run_status.status,
+                "progress_percent": run_status.progress,
+            },
+        )
+    if not run_status:
+        run = session.get(Run, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if run.status != "done":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "detail": "Run not finished",
+                    "status": run.status,
+                    "progress_percent": 0,
+                },
+            )
     statement = select(Prediction).where(Prediction.run_id == run_id)
     predictions = session.exec(statement).all()
     return [prediction.raw_row for prediction in predictions]
