@@ -26,6 +26,7 @@ from sports.common.bet_rules import (
     DecisionSettings,
     decide_bet_from_row,
     format_decision_trace,
+    primary_metrics_for_row,
 )
 
 from sports.nba.bdl_client import (
@@ -72,6 +73,8 @@ def _cap_to_top_plays(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
                 df.loc[i, "raw_units"] = 0.0
             if "final_units" in df.columns:
                 df.loc[i, "final_units"] = 0.0
+            if "stake_dollars" in df.columns:
+                df.loc[i, "stake_dollars"] = 0.0
             if "why_bet" in df.columns:
                 df.loc[i, "why_bet"] = str(df.loc[i, "why_bet"]) + " | filtered: top-N plays"
             if "decision_flags" in df.columns:
@@ -231,6 +234,16 @@ def main(argv=None):
     )
 
     if not results_df.empty:
+        metrics = [primary_metrics_for_row(r) for _, r in results_df.iterrows()]
+        results_df["primary_market"] = [m[0] for m in metrics]
+        results_df["primary_side"] = [m[1] for m in metrics]
+        results_df["p_model_used"] = [m[2] for m in metrics]
+        results_df["p_market_used"] = [m[3] for m in metrics]
+        results_df["abs_edge_prob"] = [m[4] for m in metrics]
+        results_df["confidence"] = [m[5] for m in metrics]
+        results_df["confidence_reason"] = [m[6] for m in metrics]
+        results_df["value_tier"] = [m[7] for m in metrics]
+
         decisions = [
             decide_bet_from_row(
                 r,
@@ -253,9 +266,9 @@ def main(argv=None):
         results_df["decision_reason"] = [d.decision_reason for d in decisions]
         results_df["raw_units"] = [d.raw_units for d in decisions]
         results_df["final_units"] = [d.final_units for d in decisions]
-        results_df["p_model_used"] = [d.p_model_used for d in decisions]
-        results_df["p_market_used"] = [d.p_market_used for d in decisions]
         results_df["abs_edge_used"] = [d.abs_edge_used for d in decisions]
+        results_df["abs_edge_prob"] = results_df["abs_edge_used"]
+        results_df["stake_dollars"] = results_df["units"] * results_df["unit_dollars"]
 
         for (idx, r), d in zip(results_df.iterrows(), decisions):
             print(
