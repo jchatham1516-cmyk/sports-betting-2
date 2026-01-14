@@ -126,6 +126,10 @@ class DecisionSettings:
     longshot_extreme_min_edge: float = 0.08
     longshot_max_units: float = 0.25
     longshot_extreme_units: float = 0.10
+    ml_confidence_cap_high: float = 250.0
+    ml_confidence_cap_low: float = 400.0
+    ml_pass_odds: float = 600.0
+    ml_pass_min_edge: float = 0.08
     max_disagreement: float = 0.20
     disagreement_max_units: float = 0.25
     max_units: float = 1.0
@@ -299,6 +303,7 @@ def _apply_confidence_penalties(
     american_odds: Optional[float],
     abs_edge_prob: float,
     injury_low: bool,
+    settings: DecisionSettings,
 ) -> Tuple[str, List[str]]:
     penalties: List[str] = []
     tier_order = ["LOW", "MEDIUM", "HIGH"]
@@ -311,12 +316,15 @@ def _apply_confidence_penalties(
         return tier_order[idx]
 
     if primary_market == "ML" and american_odds is not None and np.isfinite(american_odds):
-        if float(american_odds) >= 500:
-            tier = _downgrade(tier)
-            penalties.append("LONGSHOT_ODDS>=+500")
-    if np.isfinite(abs_edge_prob) and float(abs_edge_prob) > 0.20:
-        tier = _downgrade(tier)
-        penalties.append("DISAGREE_PROB>0.20")
+        if float(american_odds) >= float(settings.ml_confidence_cap_low):
+            tier = "LOW"
+            penalties.append(f"ML_CONFIDENCE_CAP>={settings.ml_confidence_cap_low:.0f}")
+        elif float(american_odds) >= float(settings.ml_confidence_cap_high) and tier == "HIGH":
+            tier = "MEDIUM"
+            penalties.append(f"ML_CONFIDENCE_CAP>={settings.ml_confidence_cap_high:.0f}")
+    if np.isfinite(abs_edge_prob) and float(abs_edge_prob) > float(settings.max_disagreement):
+        tier = "LOW"
+        penalties.append("DISAGREE_CAP")
     if injury_low:
         tier = _downgrade(tier)
         penalties.append("INJURY_CONF_LOW")
@@ -434,6 +442,8 @@ def _primary_probabilities(
 
 def primary_metrics_for_row(
     row: pd.Series,
+    *,
+    settings: DecisionSettings = DecisionSettings(),
 ) -> Tuple[str, str, float, float, float, str, str, str, Optional[float], Optional[str]]:
     primary_market, primary_side = _primary_market_and_side(row)
     p_model, p_market, primary_price, opp_price, data_reason = _primary_probabilities(
@@ -456,6 +466,7 @@ def primary_metrics_for_row(
         american_odds=primary_price,
         abs_edge_prob=abs_edge_prob,
         injury_low=injury_low,
+        settings=settings,
     )
     conf_reason = ", ".join(penalties) if penalties else ""
     value_tier = value_tier_from_edge(abs_edge_prob)
@@ -515,7 +526,7 @@ def decide_bet_from_row(
         value_tier,
         primary_price,
         data_reason,
-    ) = primary_metrics_for_row(row)
+    ) = primary_metrics_for_row(row, settings=settings)
 
     if data_reason or not np.isfinite(p_model_used) or not np.isfinite(p_market_used):
         flags.append("MISSING_DATA_PASS")
@@ -543,6 +554,29 @@ def decide_bet_from_row(
             f"PASS: abs_edge<{settings.min_play_edge_abs:.3f}",
             "EDGE_FILTER",
             f"edge<{settings.min_play_edge_abs:.3f}",
+            0.0,
+            0.0,
+            p_model_used,
+            p_market_used,
+            abs_edge_prob,
+        )
+
+    if (
+        primary_market == "ML"
+        and primary_price is not None
+        and np.isfinite(primary_price)
+        and float(primary_price) >= float(settings.ml_pass_odds)
+        and abs_edge_prob < float(settings.ml_pass_min_edge)
+    ):
+        flags.append("LONGSHOT_PASS")
+        return DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            "longshot edge too small",
+            ",".join(flags),
+            "longshot edge too small",
             0.0,
             0.0,
             p_model_used,

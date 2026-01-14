@@ -15,7 +15,7 @@ import pandas as pd
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.scores_sources import fetch_scores_history_by_day
 from sports.common.teams import canon_team
-from sports.common.util import american_to_decimal, safe_float
+from sports.common.util import american_to_decimal, normalize_result_label, safe_float
 
 
 # ---------------------------
@@ -39,8 +39,15 @@ BET_LOG_COLUMNS = [
     "edge",
     "confidence",
     "value_tier",
+    "p_model_used",
+    "p_market_used",
+    "abs_edge_prob",
     "units",
     "result",
+    "unit_dollars",
+    "stake_dollars",
+    "profit_dollars",
+    "payout_dollars",
     "closing_line",
     "closing_price",
     "clv",
@@ -129,6 +136,8 @@ def _calc_profit_and_payout(stake: float, price_decimal: float, result: str) -> 
         dec = float(price_decimal)
     except Exception:
         dec = float("nan")
+
+    result = normalize_result_label(result)
 
     if result == "WIN":
         if math.isnan(dec) or dec <= 0:
@@ -524,6 +533,7 @@ def _grade_bets(bets: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
     results: List[str] = []
     profits: List[float] = []
     payouts: List[float] = []
+    payouts: List[float] = []
 
     for _, row in merged.iterrows():
         market = str(row.get("market", "")).lower()
@@ -709,15 +719,17 @@ def _grade_bet_log_rows(bets: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFram
         else:
             result = "MISSING_SCORE"
 
-        profit, _ = _calc_profit_and_payout(stake, price_decimal, result)
+        profit, payout = _calc_profit_and_payout(stake, price_decimal, result)
 
         results.append(result)
         profits.append(profit)
+        payouts.append(payout)
         price_decimals.append(price_decimal)
         stakes.append(stake)
 
     merged["result"] = results
     merged["profit_dollars"] = profits
+    merged["payout_dollars"] = payouts
     merged["price_decimal"] = price_decimals
     merged["stake_dollars"] = stakes
     return merged
@@ -854,7 +866,15 @@ def track_bets_for_date(
         bid = row.get("bet_id")
         if bid not in log_indexed.index:
             continue
-        for col in ["result", "home_score", "away_score", "price_decimal", "stake_dollars", "profit_dollars"]:
+        for col in [
+            "result",
+            "home_score",
+            "away_score",
+            "price_decimal",
+            "stake_dollars",
+            "profit_dollars",
+            "payout_dollars",
+        ]:
             log_indexed.loc[bid, col] = row.get(col)
 
     log_df_updated = log_indexed.reset_index()
