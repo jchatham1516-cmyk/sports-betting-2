@@ -33,3 +33,23 @@ def test_profit_from_american_odds():
     profit_push, payout_push = tracker._calc_profit_and_payout(50, tracker._american_to_decimal(-110), "PUSH")
     assert profit_push == 0
     assert payout_push == 50
+
+
+def test_profit_with_partial_units():
+    dec = tracker._american_to_decimal(200)
+    profit_win, payout_win = tracker._calc_profit_and_payout(2.5, dec, "WIN")
+    assert math.isclose(profit_win, 5.0, rel_tol=1e-6)
+    assert math.isclose(payout_win, 7.5, rel_tol=1e-6)
+
+    profit_loss, payout_loss = tracker._calc_profit_and_payout(2.5, dec, "LOSS")
+    assert math.isclose(profit_loss, -2.5, rel_tol=1e-6)
+    assert payout_loss == 0
+
+    profit_push, payout_push = tracker._calc_profit_and_payout(2.5, dec, "PUSH")
+    assert profit_push == 0
+    assert payout_push == 2.5
+
+
+def test_american_to_decimal_conversion():
+    assert math.isclose(tracker._american_to_decimal(150), 2.5, rel_tol=1e-6)
+    assert math.isclose(tracker._american_to_decimal(-200), 1.5, rel_tol=1e-6)

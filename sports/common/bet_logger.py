@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from sports.common.util import safe_float
+from sports.common.util import normalize_result_label, safe_float
 
 
 BET_LOG_COLUMNS = [
@@ -27,10 +27,19 @@ BET_LOG_COLUMNS = [
     "edge",
     "confidence",
     "value_tier",
+    "p_model_used",
+    "p_market_used",
+    "abs_edge_prob",
     "units",
     "result",
     "unit_dollars",
     "stake_dollars",
+    "raw_units",
+    "final_units",
+    "decision_flags",
+    "decision_reason",
+    "profit_dollars",
+    "payout_dollars",
 ]
 
 
@@ -110,6 +119,7 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
 
     p_model_used = _safe_number(row.get("p_model_used"))
     p_market_used = _safe_number(row.get("p_market_used"))
+    abs_edge_prob = _safe_number(row.get("abs_edge_prob"))
     if np.isfinite(p_model_used):
         model_prob = p_model_used
     if np.isfinite(p_market_used):
@@ -126,6 +136,13 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
         line_at_bet,
         price_at_bet,
     )
+
+    raw_units = _safe_number(row.get("raw_units"))
+    final_units = _safe_number(row.get("final_units"))
+    if not np.isfinite(final_units):
+        final_units = units
+    if np.isfinite(final_units):
+        units = float(final_units)
 
     unit_dollars = _safe_number(row.get("unit_dollars"))
     if not np.isfinite(unit_dollars):
@@ -148,10 +165,19 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
         "edge": _edge_for_row(row, market_type),
         "confidence": row.get("confidence"),
         "value_tier": row.get("value_tier"),
+        "p_model_used": p_model_used,
+        "p_market_used": p_market_used,
+        "abs_edge_prob": abs_edge_prob,
         "units": units,
-        "result": row.get("result", ""),
+        "result": normalize_result_label(row.get("result", "")),
         "unit_dollars": unit_dollars,
         "stake_dollars": stake_dollars,
+        "raw_units": raw_units,
+        "final_units": final_units,
+        "decision_flags": row.get("decision_flags", ""),
+        "decision_reason": row.get("decision_reason", ""),
+        "profit_dollars": _safe_number(row.get("profit_dollars")),
+        "payout_dollars": _safe_number(row.get("payout_dollars")),
     }
 
 

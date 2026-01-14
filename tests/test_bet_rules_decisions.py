@@ -1,6 +1,6 @@
 import pandas as pd
 
-from sports.common.bet_rules import DecisionSettings, decide_bet_from_row
+from sports.common.bet_rules import DecisionSettings, decide_bet_from_row, primary_metrics_for_row
 
 
 def _base_row(**kwargs):
@@ -73,3 +73,26 @@ def test_missing_odds_passes():
 
     assert decision.play_pass == "PASS"
     assert "MISSING_DATA_PASS" in decision.decision_flags or decision.reason.startswith("missing moneyline")
+
+
+def test_confidence_caps_for_moneyline_underdogs():
+    row = _base_row(home_ml=300, away_ml=-350, model_home_prob=0.35, market_home_prob=0.2)
+    metrics = primary_metrics_for_row(row)
+    assert metrics[5] != "HIGH"
+
+    row = _base_row(home_ml=450, away_ml=-500, model_home_prob=0.35, market_home_prob=0.2)
+    metrics = primary_metrics_for_row(row)
+    assert metrics[5] == "LOW"
+
+
+def test_longshot_pass_threshold():
+    row = _base_row(home_ml=650, away_ml=-800, model_home_prob=0.35, market_home_prob=0.3)
+    settings = DecisionSettings(ml_pass_odds=600, ml_pass_min_edge=0.08)
+    decision = decide_bet_from_row(
+        row,
+        unit_dollars=40.0,
+        settings=settings,
+        max_abs_moneyline=None,
+    )
+
+    assert decision.play_pass == "PASS"

@@ -87,6 +87,18 @@ def safe_float(x) -> Optional[float]:
         return None
 
 
+def normalize_result_label(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().upper()
+    if text in {"W", "WIN"}:
+        return "WIN"
+    if text in {"L", "LOSS"}:
+        return "LOSS"
+    if text in {"P", "PUSH"}:
+        return "PUSH"
+    return text
+
+
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
-
