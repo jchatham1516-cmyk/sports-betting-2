@@ -22,32 +22,49 @@ def test_grade_total_push_and_under():
 
 
 def test_profit_from_american_odds():
-    profit_win, payout_win = tracker._calc_profit_and_payout(50, tracker._american_to_decimal(120), "WIN")
+    stake_win, profit_win, payout_win = tracker._calc_profit_and_payout(5, 10, 120, "WIN")
+    assert math.isclose(stake_win, 50.0, rel_tol=1e-6)
     assert math.isclose(profit_win, 60.0, rel_tol=1e-6)
     assert math.isclose(payout_win, 110.0, rel_tol=1e-6)
 
-    profit_loss, payout_loss = tracker._calc_profit_and_payout(50, tracker._american_to_decimal(-110), "LOSS")
+    stake_loss, profit_loss, payout_loss = tracker._calc_profit_and_payout(5, 10, -110, "LOSS")
+    assert math.isclose(stake_loss, 50.0, rel_tol=1e-6)
     assert math.isclose(profit_loss, -50.0, rel_tol=1e-6)
     assert payout_loss == 0
 
-    profit_push, payout_push = tracker._calc_profit_and_payout(50, tracker._american_to_decimal(-110), "PUSH")
+    stake_push, profit_push, payout_push = tracker._calc_profit_and_payout(5, 10, -110, "PUSH")
+    assert math.isclose(stake_push, 50.0, rel_tol=1e-6)
     assert profit_push == 0
     assert payout_push == 50
 
 
 def test_profit_with_partial_units():
-    dec = tracker._american_to_decimal(200)
-    profit_win, payout_win = tracker._calc_profit_and_payout(2.5, dec, "WIN")
+    stake_win, profit_win, payout_win = tracker._calc_profit_and_payout(0.25, 10, 200, "WIN")
+    assert math.isclose(stake_win, 2.5, rel_tol=1e-6)
     assert math.isclose(profit_win, 5.0, rel_tol=1e-6)
     assert math.isclose(payout_win, 7.5, rel_tol=1e-6)
 
-    profit_loss, payout_loss = tracker._calc_profit_and_payout(2.5, dec, "LOSS")
+    stake_loss, profit_loss, payout_loss = tracker._calc_profit_and_payout(0.25, 10, 200, "LOSS")
+    assert math.isclose(stake_loss, 2.5, rel_tol=1e-6)
     assert math.isclose(profit_loss, -2.5, rel_tol=1e-6)
     assert payout_loss == 0
 
-    profit_push, payout_push = tracker._calc_profit_and_payout(2.5, dec, "PUSH")
+    stake_push, profit_push, payout_push = tracker._calc_profit_and_payout(0.25, 10, 200, "PUSH")
+    assert math.isclose(stake_push, 2.5, rel_tol=1e-6)
     assert profit_push == 0
     assert payout_push == 2.5
+
+
+def test_profit_from_fractional_units_loss_and_win():
+    stake_loss, profit_loss, payout_loss = tracker._calc_profit_and_payout(0.25, 10, -106, "LOSS")
+    assert math.isclose(stake_loss, 2.5, rel_tol=1e-6)
+    assert math.isclose(profit_loss, -2.5, rel_tol=1e-6)
+    assert payout_loss == 0
+
+    stake_win, profit_win, payout_win = tracker._calc_profit_and_payout(0.25, 10, 200, "WIN")
+    assert math.isclose(stake_win, 2.5, rel_tol=1e-6)
+    assert math.isclose(profit_win, 5.0, rel_tol=1e-6)
+    assert math.isclose(payout_win, 7.5, rel_tol=1e-6)
 
 
 def test_american_to_decimal_conversion():

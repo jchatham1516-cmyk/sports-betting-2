@@ -121,34 +121,44 @@ def _american_to_decimal(american: float) -> float:
         return float("nan")
 
 
-def _calc_profit_and_payout(stake: float, price_decimal: float, result: str) -> Tuple[float, float]:
-    """Returns (profit, payout). Profit excludes stake return."""
+def _calc_profit_and_payout(
+    units: float,
+    unit_dollars: float,
+    odds: float,
+    result: str,
+) -> Tuple[float, float, float]:
+    """Returns (stake, profit, payout). Profit excludes stake return."""
 
-    try:
-        st = float(stake)
-    except Exception:
-        st = 0.0
+    units_val = _safe_number(units)
+    unit_dollars_val = _safe_number(unit_dollars)
+    if math.isnan(units_val):
+        units_val = 0.0
+    if math.isnan(unit_dollars_val):
+        unit_dollars_val = 0.0
 
-    if st <= 0:
-        return 0.0, 0.0
+    stake_dollars = units_val * unit_dollars_val
 
-    try:
-        dec = float(price_decimal)
-    except Exception:
-        dec = float("nan")
+    odds_val = _safe_number(odds)
+    if math.isnan(odds_val):
+        odds_val = 0.0
 
     result = normalize_result_label(result)
 
     if result == "WIN":
-        if math.isnan(dec) or dec <= 0:
-            return 0.0, st
-        profit = st * (dec - 1.0)
-        return profit, st + profit
+        if odds_val > 0:
+            decimal = 1.0 + (odds_val / 100.0)
+        elif odds_val < 0:
+            decimal = 1.0 + (100.0 / abs(odds_val))
+        else:
+            decimal = 1.0
+        profit = stake_dollars * (decimal - 1.0)
+        payout = stake_dollars + profit
+        return stake_dollars, profit, payout
     if result == "LOSS":
-        return -st, 0.0
+        return stake_dollars, -stake_dollars, 0.0
     if result == "PUSH":
-        return 0.0, st
-    return 0.0, 0.0
+        return stake_dollars, 0.0, stake_dollars
+    return stake_dollars, 0.0, 0.0
 
 
 def _safe_number(x) -> float:
@@ -533,7 +543,7 @@ def _grade_bets(bets: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
     results: List[str] = []
     profits: List[float] = []
     payouts: List[float] = []
-    payouts: List[float] = []
+    stakes: List[float] = []
 
     for _, row in merged.iterrows():
         market = str(row.get("market", "")).lower()
@@ -551,14 +561,21 @@ def _grade_bets(bets: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFrame:
         else:
             result = "MISSING_SCORE"
 
-        profit, payout = _calc_profit_and_payout(row.get("stake_dollars", 0.0), row.get("price_decimal", np.nan), result)
+        stake, profit, payout = _calc_profit_and_payout(
+            row.get("units", 0.0),
+            row.get("unit_dollars", 0.0),
+            row.get("price_american", row.get("price_at_bet", np.nan)),
+            result,
+        )
         results.append(result)
         profits.append(profit)
         payouts.append(payout)
+        stakes.append(stake)
 
     merged["result"] = results
     merged["profit_dollars"] = profits
     merged["payout_dollars"] = payouts
+    merged["stake_dollars"] = stakes
     return merged
 
 
@@ -690,6 +707,7 @@ def _grade_bet_log_rows(bets: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFram
     profits: List[float] = []
     price_decimals: List[float] = []
     stakes: List[float] = []
+    payouts: List[float] = []
 
     for _, row in merged.iterrows():
         market = str(row.get("market_type", "")).lower()
@@ -702,13 +720,10 @@ def _grade_bet_log_rows(bets: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFram
         if pd.isna(price_decimal) or price_decimal == "":
             price_decimal = _american_to_decimal(row.get("price_at_bet"))
 
-        stake = row.get("stake_dollars")
-        if pd.isna(stake) or stake == "":
-            units = _safe_number(row.get("units"))
-            unit_dollars = _safe_number(row.get("unit_dollars"))
-            if math.isnan(unit_dollars):
-                unit_dollars = 10.0
-            stake = 0.0 if math.isnan(units) else units * unit_dollars
+        units = _safe_number(row.get("units"))
+        unit_dollars = _safe_number(row.get("unit_dollars"))
+        if math.isnan(unit_dollars):
+            unit_dollars = 10.0
 
         if market == "moneyline":
             result = grade_moneyline(side, hs, aws)
@@ -719,7 +734,12 @@ def _grade_bet_log_rows(bets: pd.DataFrame, scores: pd.DataFrame) -> pd.DataFram
         else:
             result = "MISSING_SCORE"
 
-        profit, payout = _calc_profit_and_payout(stake, price_decimal, result)
+        stake, profit, payout = _calc_profit_and_payout(
+            units,
+            unit_dollars,
+            row.get("price_at_bet"),
+            result,
+        )
 
         results.append(result)
         profits.append(profit)
