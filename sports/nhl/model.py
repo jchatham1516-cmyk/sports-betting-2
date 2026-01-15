@@ -503,13 +503,15 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     except Exception:
         pass
 
+    debug_goalies = os.getenv("NHL_GOALIES_DEBUG") == "1"
     try:
         goalies_map = get_starting_goalies(date_key)
     except Exception as exc:
-        print(f"[nhl goalies] WARNING: unable to load goalies: {exc}")
+        if debug_goalies:
+            print(f"[nhl goalies] WARNING: unable to load goalies: {exc}")
         goalies_map = {}
-    print(f"[nhl goalies] date_key={date_key}")
-    print(f"[nhl goalies] map_size={len(goalies_map)} sample_keys={list(goalies_map.keys())[:5]}")
+    if debug_goalies:
+        print(f"[nhl goalies] date_key={date_key} goalies_map_size={len(goalies_map)}")
 
     rows: list[dict] = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
@@ -542,19 +544,23 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         goalie_away_rating = 0.0
         goalie_adj = 0.0
 
-        if goalie_home_name or goalie_away_name:
-            goalie_status = "PROJECTED"
-            goalie_reason = "goalie_partial"
+        home_known = bool(goalie_home_name) and goalie_home_status != "UNKNOWN"
+        away_known = bool(goalie_away_name) and goalie_away_status != "UNKNOWN"
 
-        if goalie_home_name and goalie_away_name:
+        if home_known:
             goalie_home_rating = float(get_goalie_rating(goalie_home_name, season_label))
+        if away_known:
             goalie_away_rating = float(get_goalie_rating(goalie_away_name, season_label))
+
+        if home_known or away_known:
             goalie_adj = _goalie_adjustment(goalie_home_rating, goalie_away_rating)
-            if goalie_home_status == "UNKNOWN" or goalie_away_status == "UNKNOWN":
+            if not (home_known and away_known):
                 goalie_adj *= 0.5
-            if goalie_home_status == "CONFIRMED" and goalie_away_status == "CONFIRMED":
-                goalie_status = "CONFIRMED"
-            goalie_reason = "goalie_rating_applied"
+                goalie_reason = "goalie_rating_partial"
+                goalie_status = "PROJECTED"
+            else:
+                goalie_reason = "goalie_rating_applied"
+                goalie_status = "CONFIRMED" if goalie_home_status == "CONFIRMED" and goalie_away_status == "CONFIRMED" else "PROJECTED"
 
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_raw = float(_clamp(p_raw + goalie_adj, 0.01, 0.99))
