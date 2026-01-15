@@ -17,6 +17,8 @@ from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.historical_totals import build_team_historical_total_lines
 
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
+from sports.nhl.goalies import GoalieInfo, get_starting_goalies
+from sports.nhl.goalie_ratings import current_season_label, get_goalie_rating
 
 ELO_PATH = "results/elo_state_nhl.json"
 MARGIN_CAL_PATH = "results/margin_cal_nhl.json"
@@ -56,6 +58,7 @@ TOTAL_MODEL_MIN = float(os.getenv("NHL_TOTAL_MODEL_MIN", "4.0"))
 TOTAL_MODEL_MAX = float(os.getenv("NHL_TOTAL_MODEL_MAX", "8.5"))
 
 STRICT_SANITY = os.getenv("NHL_STRICT_SANITY", "0") == "1"
+GOALIE_PROB_PER_RATING = float(os.getenv("NHL_GOALIE_PROB_PER_RATING", "0.0020"))
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -332,6 +335,11 @@ def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd
     return (exp_home, exp_away, float(exp_home + exp_away))
 
 
+def _goalie_adjustment(home_rating: float, away_rating: float) -> float:
+    rating_diff = float(home_rating) - float(away_rating)
+    return float(_clamp(rating_diff * GOALIE_PROB_PER_RATING, -0.06, 0.06))
+
+
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=120)
 
@@ -410,6 +418,21 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     if not ratings_map:
         print("[nhl] WARNING: Elo ratings map is empty after update. Expect constant probs unless fallback enabled.")
 
+    date_key = str(game_date_str).replace("/", "-")
+    season_label = current_season_label()
+    try:
+        season_label = current_season_label()
+        dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
+        season_label = str(dt.year - 1 if dt.month < 7 else dt.year)
+    except Exception:
+        pass
+
+    try:
+        goalies_map = get_starting_goalies(date_key)
+    except Exception as exc:
+        print(f"[nhl goalies] WARNING: unable to load goalies: {exc}")
+        goalies_map = {}
+
     rows: list[dict] = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
@@ -427,7 +450,30 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         # Elo-based prob (if we actually have ratings)
         eh = st.get(home)
         ea = st.get(away)
+        goalie_home_info = goalies_map.get(home, GoalieInfo(team=home, goalie_name=None, status="UNKNOWN", source=""))
+        goalie_away_info = goalies_map.get(away, GoalieInfo(team=away, goalie_name=None, status="UNKNOWN", source=""))
+
+        goalie_home_name = goalie_home_info.goalie_name or ""
+        goalie_away_name = goalie_away_info.goalie_name or ""
+        goalie_home_status = goalie_home_info.status or "UNKNOWN"
+        goalie_away_status = goalie_away_info.status or "UNKNOWN"
+
+        goalie_status = "UNKNOWN"
+        goalie_reason = "goalie_status_unknown"
+        goalie_home_rating = 0.0
+        goalie_away_rating = 0.0
         goalie_adj = 0.0
+
+        if goalie_home_name and goalie_away_name and goalie_home_status != "UNKNOWN" and goalie_away_status != "UNKNOWN":
+            goalie_home_rating = float(get_goalie_rating(goalie_home_name, season_label))
+            goalie_away_rating = float(get_goalie_rating(goalie_away_name, season_label))
+            goalie_adj = _goalie_adjustment(goalie_home_rating, goalie_away_rating)
+            if goalie_home_status == "CONFIRMED" and goalie_away_status == "CONFIRMED":
+                goalie_status = "CONFIRMED"
+            else:
+                goalie_status = "PROJECTED"
+            goalie_reason = "goalie_rating_applied"
+
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_raw = float(_clamp(p_raw + goalie_adj, 0.01, 0.99))
         p_home = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
@@ -564,9 +610,16 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "home": home,
                 "away": away,
                 "model_home_prob": float(p_home),
-                "model_home_prob_raw": float(p_home),
+                "model_home_prob_raw": float(p_raw),
                 "goalie_adj": float(goalie_adj),
-                "goalie_status": "GOALIE_UNKNOWN",
+                "goalie_status": goalie_status,
+                "goalie_home_status": goalie_home_status,
+                "goalie_away_status": goalie_away_status,
+                "goalie_home_name": goalie_home_name,
+                "goalie_away_name": goalie_away_name,
+                "goalie_home_rating": float(goalie_home_rating),
+                "goalie_away_rating": float(goalie_away_rating),
+                "goalie_reason": goalie_reason,
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
                 "edge_away": float(-edge_home) if not np.isnan(edge_home) else np.nan,

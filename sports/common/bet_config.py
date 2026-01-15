@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
@@ -41,12 +42,12 @@ SPORT_BET_CONFIGS = {
         anchor_weight=0.60,
     ),
     "nhl": SportBetConfig(
-        min_edge_cal=0.05,
+        min_edge_cal=float(os.getenv("NHL_MIN_EDGE_CAL", "0.04")),
         longshot_odds=250.0,
         longshot_cap_units=0.25,
         disagree_cap_edge=0.20,
         disagree_cap_units=0.25,
-        max_units=0.5,
+        max_units=float(os.getenv("NHL_MAX_UNITS", "0.5")),
         anchor_weight=0.75,
     ),
 }
