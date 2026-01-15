@@ -68,34 +68,49 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
 
-    for row in soup.select("table tr"):
-        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-        if len(cells) < 2:
-            continue
-        team_raw = cells[0]
-        goalie_raw = cells[1]
-        status_raw = cells[2] if len(cells) > 2 else ""
-
+    def _add_row(team_raw: str, goalie_raw: str, status_raw: str) -> None:
         team = canon_team(team_raw)
         if not team:
-            continue
-        goalie_name = goalie_raw.strip() if goalie_raw.strip() else None
+            return
+        goalie_name = goalie_raw.strip() if goalie_raw and goalie_raw.strip() else None
+        if not goalie_name:
+            return
         status = _normalize_status(status_raw)
         results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="dailyfaceoff")
+
+    tables = soup.select(
+        "table.starting-goalies__table, table.starting-goalies, table#starting-goalies, table[data-testid*='starting-goalies']"
+    )
+    for table in tables:
+        for row in table.select("tr"):
+            cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+            if len(cells) < 2:
+                continue
+            status_raw = cells[2] if len(cells) > 2 else ""
+            _add_row(cells[0], cells[1], status_raw)
 
     if results:
         return results
 
-    for card in soup.select(".starting-goalies__goalie"):
-        team_node = card.select_one(".starting-goalies__team-name")
-        goalie_node = card.select_one(".starting-goalies__goalie-name")
-        status_node = card.select_one(".starting-goalies__status")
-        team = canon_team(team_node.get_text(" ", strip=True) if team_node else "")
-        if not team:
+    for card in soup.select(
+        ".starting-goalies__goalie-card, .starting-goalies__goalie, .starting-goalies__row, .starting-goalies__item"
+    ):
+        team_node = card.select_one(
+            ".starting-goalies__team-name, .starting-goalies__team, .team-name"
+        )
+        goalie_node = card.select_one(
+            ".starting-goalies__goalie-name, .starting-goalies__goalie, .starting-goalies__player-name, .player-name"
+        )
+        status_node = card.select_one(
+            ".starting-goalies__status, .starting-goalies__status-text, .status"
+        )
+        if not team_node or not goalie_node:
             continue
-        goalie_name = goalie_node.get_text(" ", strip=True) if goalie_node else None
-        status = _normalize_status(status_node.get_text(" ", strip=True) if status_node else "")
-        results[team] = GoalieInfo(team=team, goalie_name=goalie_name or None, status=status, source="dailyfaceoff")
+        _add_row(
+            team_node.get_text(" ", strip=True),
+            goalie_node.get_text(" ", strip=True),
+            status_node.get_text(" ", strip=True) if status_node else "",
+        )
 
     return results
 
@@ -169,10 +184,16 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
         ("puckpedia", PUCKPEDIA_URL, _parse_puckpedia),
     ]
 
+    debug = os.getenv("NHL_GOALIES_DEBUG") == "1"
     for _, url, parser in providers:
         try:
             html, status = _get_with_retry(url)
+            if debug:
+                print(f"[nhl goalies] debug url={url} status={status} html_len={len(html or '')}")
             parsed = parser(html)
+            if debug:
+                sample = [(t, g.goalie_name, g.status) for t, g in list(parsed.items())[:10]]
+                print(f"[nhl goalies] debug parsed_rows={len(parsed)} sample={sample}")
             if parsed:
                 _write_cached_goalies(cache_path, parsed)
                 return parsed

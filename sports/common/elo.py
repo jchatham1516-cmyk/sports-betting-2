@@ -51,7 +51,9 @@ class EloState:
         return float((self.ratings or {}).get(str(team), self.default_elo))
 
     def set(self, team: str, elo: float) -> None:
-        (self.ratings or {})[str(team)] = float(elo)
+        if self.ratings is None:
+            self.ratings = {}
+        self.ratings[str(team)] = float(elo)
 
     def is_processed(self, game_key: str) -> bool:
         return str(game_key) in (self.processed or set())

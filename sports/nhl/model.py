@@ -293,19 +293,26 @@ def update_elo_from_recent_scores(days_from: int = 120) -> EloState:
 
     if not processed_any:
         print("[nhl] WARNING: Elo update processed 0 games. Ratings may stay empty/constant.")
+    team_count = len(getattr(st, "ratings", {}) or {})
     print(
         "[nhl elo] summary "
         f"events_fetched={len(events)} fallback_events={fallback_events_count} "
-        f"processed={processed_count} skips={skip_counters} "
-        f"teams={len(getattr(st, 'ratings', {}) or {})}"
+        f"processed={processed_count} skips={skip_counters} team_count={team_count}"
     )
+    print(f"[nhl elo] team_count={team_count}")
+    if team_count == 0:
+        print(f"[nhl elo] ELO EMPTY skips={skip_counters}")
+        if os.getenv("NHL_STRICT_SANITY") == "1" and processed_any:
+            raise RuntimeError(
+                f"EloState persistence bug: processed={processed_count} but ratings empty. skips={skip_counters}"
+            )
     st._nhl_elo_debug = {
         "events_fetched": len(events),
         "fallback_events": fallback_events_count,
         "processed": processed_count,
         "parsed_scores": parsed_scores_count,
         "skip_counters": dict(skip_counters),
-        "teams": len(getattr(st, "ratings", {}) or {}),
+        "teams": team_count,
     }
 
     try:
