@@ -19,6 +19,7 @@ from sports.common.historical_totals import build_team_historical_total_lines
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 from sports.nhl.goalies import GoalieInfo, get_starting_goalies
 from sports.nhl.goalie_ratings import current_season_label, get_goalie_rating
+from sports.nhl.results_source import fetch_nhl_completed_games
 
 ELO_PATH = "results/elo_state_nhl.json"
 MARGIN_CAL_PATH = "results/margin_cal_nhl.json"
@@ -178,16 +179,11 @@ def update_elo_from_recent_scores(days_from: int = 120) -> EloState:
     sport_key = SPORT_TO_ODDS_KEY["nhl"]
 
     train_days = int(max(30, int(days_from or 120)))
-    events = []
+    events: list[dict] = []
     try:
         events = fetch_recent_scores(sport_key=sport_key, days_from=train_days) or []
     except Exception:
         events = []
-
-    # If scores source returns nothing, fallback to Odds API scores endpoint
-    if not events:
-        print("[nhl] WARNING: fetch_recent_scores returned 0 events; using Odds API /scores fallback.")
-        events = _odds_scores_fallback(sport_key=sport_key, days_from=train_days)
 
     train_ps: list[float] = []
     train_ys: list[float] = []
@@ -195,53 +191,122 @@ def update_elo_from_recent_scores(days_from: int = 120) -> EloState:
     train_margins: list[float] = []
 
     processed_any = False
+    processed_count = 0
+    parsed_scores_count = 0
+    skip_counters = {
+        "missing_home_away": 0,
+        "missing_scores": 0,
+        "canon_team_failure": 0,
+        "score_parse_failure": 0,
+        "already_processed": 0,
+    }
 
-    for ev in events:
-        home_raw = ev.get("home_team")
-        away_raw = ev.get("away_team")
-        scores = ev.get("scores")
-        if not home_raw or not away_raw or not scores:
-            continue
+    def _process_events(events_in: list[dict], *, source: str) -> None:
+        nonlocal processed_any, processed_count, parsed_scores_count
+        for ev in events_in:
+            home_raw = ev.get("home_team")
+            away_raw = ev.get("away_team")
+            if not home_raw or not away_raw:
+                skip_counters["missing_home_away"] += 1
+                continue
 
-        home = canon_team(home_raw)
-        away = canon_team(away_raw)
-        if not home or not away:
-            continue
+            home = canon_team(home_raw)
+            away = canon_team(away_raw)
+            if not home or not away:
+                skip_counters["canon_team_failure"] += 1
+                continue
 
-        game_key = f"{ev.get('id','')}|{ev.get('commence_time','')}|{home}|{away}"
-        if st.is_processed(game_key):
-            continue
+            game_date = ev.get("date") or ev.get("commence_time") or ev.get("completed_at")
+            game_key = f"{ev.get('id') or ev.get('game_id') or ''}|{game_date or ''}|{home}|{away}"
+            if st.is_processed(game_key):
+                skip_counters["already_processed"] += 1
+                continue
 
-        score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
-        try:
-            hs = float(score_map.get(home_raw) or score_map.get(home))
-            aw = float(score_map.get(away_raw) or score_map.get(away))
-        except Exception:
-            continue
+            scores = ev.get("scores")
+            hs = None
+            aw = None
+            if scores:
+                score_map = {s.get("name"): s.get("score") for s in scores if s.get("name")}
+                try:
+                    hs = float(score_map.get(home_raw) or score_map.get(home))
+                    aw = float(score_map.get(away_raw) or score_map.get(away))
+                except Exception:
+                    hs = None
+                    aw = None
+            else:
+                try:
+                    hs = float(ev.get("home_score"))
+                    aw = float(ev.get("away_score"))
+                except Exception:
+                    hs = None
+                    aw = None
 
-        eh = st.get(home)
-        ea = st.get(away)
+            if hs is None or aw is None:
+                if scores:
+                    skip_counters["score_parse_failure"] += 1
+                else:
+                    skip_counters["missing_scores"] += 1
+                continue
 
-        p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
-        p_comp = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
-        train_ps.append(p_comp)
-        train_ys.append(1.0 if hs > aw else 0.0)
+            parsed_scores_count += 1
 
-        elo_diff = (float(eh) + float(HOME_ADV)) - float(ea)
-        train_xs.append(float(elo_diff))
-        train_margins.append(float(hs - aw))
+            eh = st.get(home)
+            ea = st.get(away)
 
-        nh, na = elo_update(eh, ea, hs, aw, k=ELO_K, home_adv=HOME_ADV)
-        st.set(home, nh)
-        st.set(away, na)
-        st.mark_processed(game_key)
-        processed_any = True
+            p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
+            p_comp = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
+            train_ps.append(p_comp)
+            train_ys.append(1.0 if hs > aw else 0.0)
+
+            elo_diff = (float(eh) + float(HOME_ADV)) - float(ea)
+            train_xs.append(float(elo_diff))
+            train_margins.append(float(hs - aw))
+
+            nh, na = elo_update(eh, ea, hs, aw, k=ELO_K, home_adv=HOME_ADV)
+            st.set(home, nh)
+            st.set(away, na)
+            st.mark_processed(game_key)
+            processed_any = True
+            processed_count += 1
+
+        print(
+            f"[nhl elo] source={source} events={len(events_in)} processed={processed_count} parsed_scores={parsed_scores_count}"
+        )
+
+    if not events:
+        print("[nhl] WARNING: fetch_recent_scores returned 0 events; using NHL schedule fallback.")
+        events = []
+    _process_events(events, source="odds_recent_scores")
+
+    fallback_events_count = 0
+    if processed_count < 200 or not processed_any:
+        print(
+            "[nhl] WARNING: too few usable scores from fetch_recent_scores; "
+            "falling back to NHL schedule results."
+        )
+        fallback_events = fetch_nhl_completed_games(train_days)
+        fallback_events_count = len(fallback_events)
+        _process_events(fallback_events, source="nhl_schedule_results")
 
     os.makedirs("results", exist_ok=True)
     st.save(ELO_PATH)
 
     if not processed_any:
         print("[nhl] WARNING: Elo update processed 0 games. Ratings may stay empty/constant.")
+    print(
+        "[nhl elo] summary "
+        f"events_fetched={len(events)} fallback_events={fallback_events_count} "
+        f"processed={processed_count} skips={skip_counters} "
+        f"teams={len(getattr(st, 'ratings', {}) or {})}"
+    )
+    st._nhl_elo_debug = {
+        "events_fetched": len(events),
+        "fallback_events": fallback_events_count,
+        "processed": processed_count,
+        "parsed_scores": parsed_scores_count,
+        "skip_counters": dict(skip_counters),
+        "teams": len(getattr(st, "ratings", {}) or {}),
+    }
 
     try:
         if len(train_ps) >= CAL_MIN_GAMES:
@@ -418,7 +483,11 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     if not ratings_map:
         print("[nhl] WARNING: Elo ratings map is empty after update. Expect constant probs unless fallback enabled.")
 
-    date_key = str(game_date_str).replace("/", "-")
+    try:
+        dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
+        date_key = dt.strftime("%Y-%m-%d")
+    except Exception:
+        date_key = str(game_date_str)
     season_label = current_season_label()
     try:
         season_label = current_season_label()
@@ -432,6 +501,8 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     except Exception as exc:
         print(f"[nhl goalies] WARNING: unable to load goalies: {exc}")
         goalies_map = {}
+    print(f"[nhl goalies] date_key={date_key}")
+    print(f"[nhl goalies] map_size={len(goalies_map)} sample_keys={list(goalies_map.keys())[:5]}")
 
     rows: list[dict] = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
@@ -464,14 +535,18 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         goalie_away_rating = 0.0
         goalie_adj = 0.0
 
-        if goalie_home_name and goalie_away_name and goalie_home_status != "UNKNOWN" and goalie_away_status != "UNKNOWN":
+        if goalie_home_name or goalie_away_name:
+            goalie_status = "PROJECTED"
+            goalie_reason = "goalie_partial"
+
+        if goalie_home_name and goalie_away_name:
             goalie_home_rating = float(get_goalie_rating(goalie_home_name, season_label))
             goalie_away_rating = float(get_goalie_rating(goalie_away_name, season_label))
             goalie_adj = _goalie_adjustment(goalie_home_rating, goalie_away_rating)
+            if goalie_home_status == "UNKNOWN" or goalie_away_status == "UNKNOWN":
+                goalie_adj *= 0.5
             if goalie_home_status == "CONFIRMED" and goalie_away_status == "CONFIRMED":
                 goalie_status = "CONFIRMED"
-            else:
-                goalie_status = "PROJECTED"
             goalie_reason = "goalie_rating_applied"
 
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
@@ -646,12 +721,23 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     # Warn if near-constant probs
     if len(rows) >= 5:
-        probs = [round(r["model_home_prob"], 3) for r in rows if not np.isnan(r.get("model_home_prob", np.nan))]
-        if len(set(probs)) <= 2:
-            msg = "Model produced near-constant probabilities — check scores feed / team mapping."
-            if STRICT_SANITY:
-                raise RuntimeError(msg)
-            print(f"[NHL WARNING] {msg}")
+        raw_probs = [
+            float(r["model_home_prob_raw"])
+            for r in rows
+            if not np.isnan(r.get("model_home_prob_raw", np.nan))
+        ]
+        if len(raw_probs) >= 5:
+            std_raw = float(np.std(raw_probs))
+            if std_raw < 0.01:
+                debug = getattr(st, "_nhl_elo_debug", {}) or {}
+                msg = (
+                    "Model produced near-constant raw probabilities — check scores feed / team mapping. "
+                    f"std_raw={std_raw:.4f} teams_in_ratings={len(getattr(st, 'ratings', {}) or {})} "
+                    f"processed_games={debug.get('processed')} skips={debug.get('skip_counters')}"
+                )
+                if STRICT_SANITY:
+                    raise RuntimeError(msg)
+                print(f"[NHL WARNING] {msg}")
 
     return pd.DataFrame(rows)
 

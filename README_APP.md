@@ -24,6 +24,27 @@ The API will be available at `http://localhost:8000`.
 - `RESULTS_DIR`: Override the results directory (defaults to `results`).
 - `ODDS_DIR`: Override the odds directory (defaults to `odds`).
 - `ODDS_API_KEY`: Odds API key used by the model (if required by your odds provider).
+- `NHL_HOME_ADV`: Elo home-ice advantage in points (default `45.0`).
+- `NHL_ELO_K`: Elo K-factor for NHL updates (default `18.0`).
+- `NHL_STRICT_SANITY`: Set to `1` to raise if NHL probabilities look constant.
+
+## NHL Model Notes
+
+### Train/refresh NHL Elo
+
+Run the NHL Elo updater directly to refresh ratings from recent completed games:
+
+```bash
+python -c "from sports.nhl.model import update_elo_from_recent_scores; update_elo_from_recent_scores(120)"
+```
+
+### Goalie cache location
+
+Starting goalie data is cached under:
+
+```
+results/cache/nhl_goalies_YYYY-MM-DD.json
+```
 
 ## Frontend (Vite React)
 
