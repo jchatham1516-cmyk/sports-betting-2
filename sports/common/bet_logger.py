@@ -32,9 +32,11 @@ BET_LOG_COLUMNS = [
     "abs_edge_prob",
     "p_model_raw",
     "p_model_cal",
+    "p_model_final",
     "p_market",
     "edge_prob_raw",
     "edge_prob_cal",
+    "edge_prob_final",
     "units",
     "result",
     "unit_dollars",
@@ -62,7 +64,9 @@ def _safe_number(value: object) -> float:
 
 
 def _extract_probs(row: pd.Series, side: str) -> (float, float):
-    model_prob = _safe_number(row.get("model_home_prob"))
+    model_prob = _safe_number(
+        row.get("model_home_prob_final", row.get("model_home_prob_raw", row.get("model_home_prob")))
+    )
     market_prob = _safe_number(row.get("market_home_prob"))
     if side == "AWAY":
         if np.isfinite(model_prob):
@@ -124,9 +128,11 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
 
     p_model_raw = _safe_number(row.get("p_model_raw"))
     p_model_cal = _safe_number(row.get("p_model_cal"))
+    p_model_final = _safe_number(row.get("p_model_final"))
     p_market = _safe_number(row.get("p_market"))
     edge_prob_raw = _safe_number(row.get("edge_prob_raw"))
     edge_prob_cal = _safe_number(row.get("edge_prob_cal"))
+    edge_prob_final = _safe_number(row.get("edge_prob_final"))
     abs_edge_prob = _safe_number(row.get("abs_edge_prob"))
     p_model_used = _safe_number(row.get("p_model_used"))
     p_market_used = _safe_number(row.get("p_market_used"))
@@ -135,6 +141,8 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
         model_prob = p_model_cal
     elif np.isfinite(p_model_raw):
         model_prob = p_model_raw
+    elif np.isfinite(p_model_final):
+        model_prob = p_model_final
     elif np.isfinite(p_model_used):
         model_prob = p_model_used
 
@@ -145,6 +153,8 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
 
     if not np.isfinite(abs_edge_prob) and np.isfinite(edge_prob_cal):
         abs_edge_prob = abs(float(edge_prob_cal))
+    if not np.isfinite(abs_edge_prob) and np.isfinite(edge_prob_final):
+        abs_edge_prob = abs(float(edge_prob_final))
 
     date_str = row.get("date")
     bet_id = _hash_bet_id(
@@ -191,9 +201,11 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
         "abs_edge_prob": abs_edge_prob,
         "p_model_raw": p_model_raw,
         "p_model_cal": p_model_cal,
+        "p_model_final": p_model_final,
         "p_market": p_market,
         "edge_prob_raw": edge_prob_raw,
         "edge_prob_cal": edge_prob_cal,
+        "edge_prob_final": edge_prob_final,
         "units": units,
         "result": normalize_result_label(row.get("result", "")),
         "unit_dollars": unit_dollars,

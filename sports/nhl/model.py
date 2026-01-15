@@ -16,17 +16,16 @@ from sports.common.scores_sources import fetch_recent_scores
 from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.historical_totals import build_team_historical_total_lines
 
-from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 
 ELO_PATH = "results/elo_state_nhl.json"
-PLATT_PATH = "results/prob_cal_nhl.json"
 MARGIN_CAL_PATH = "results/margin_cal_nhl.json"
 
 HOME_ADV = float(os.getenv("NHL_HOME_ADV", "45.0"))
 ELO_K = float(os.getenv("NHL_ELO_K", "18.0"))
 
 BASE_COMPRESS = float(os.getenv("NHL_BASE_COMPRESS", "0.78"))
+SAFE_SHRINK = float(os.getenv("NHL_SAFE_SHRINK", "0.75"))
 MIN_ML_EDGE = float(os.getenv("NHL_MIN_ML_EDGE", "0.02"))
 
 # If Elo training fails, allow market->elo inference (prevents constant 0.520 outputs)
@@ -64,6 +63,13 @@ def _clamp(x: float, lo: float, hi: float) -> float:
         return float(max(lo, min(hi, float(x))))
     except Exception:
         return float("nan")
+
+
+def _shrink_prob_toward_half(p_raw: float, shrink: float) -> float:
+    if not np.isfinite(p_raw):
+        return float("nan")
+    s = float(max(0.0, min(1.0, shrink)))
+    return float(0.5 + s * (float(p_raw) - 0.5))
 
 
 def _anchor_model_total(model_total_raw: float, market_total: float, anchor_w: float) -> float:
@@ -236,13 +242,10 @@ def update_elo_from_recent_scores(days_from: int = 120) -> EloState:
 
     try:
         if len(train_ps) >= CAL_MIN_GAMES:
-            cal = fit_platt(np.array(train_ps, dtype=float), np.array(train_ys, dtype=float))
-            save_platt(PLATT_PATH, cal)
-
             mcal = fit_margin(np.array(train_xs, dtype=float), np.array(train_margins, dtype=float))
             save_margin_cal(MARGIN_CAL_PATH, mcal)
     except Exception as e:
-        print(f"[nhl calibration] WARNING: calibration fit failed: {e}")
+        print(f"[nhl calibration] WARNING: margin calibration fit failed: {e}")
 
     return st
 
@@ -424,8 +427,11 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         # Elo-based prob (if we actually have ratings)
         eh = st.get(home)
         ea = st.get(away)
+        goalie_adj = 0.0
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
+        p_raw = float(_clamp(p_raw + goalie_adj, 0.01, 0.99))
         p_home = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
+        p_home = float(_clamp(_shrink_prob_toward_half(p_home, SAFE_SHRINK), 0.01, 0.99))
 
         # If ratings empty (or both default), blend toward market but do NOT copy it 1:1
         if FALLBACK_USE_MARKET_IF_EMPTY and (not ratings_map or (eh == st.default_elo and ea == st.default_elo)):
@@ -558,6 +564,9 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "home": home,
                 "away": away,
                 "model_home_prob": float(p_home),
+                "model_home_prob_raw": float(p_home),
+                "goalie_adj": float(goalie_adj),
+                "goalie_status": "GOALIE_UNKNOWN",
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
                 "edge_away": float(-edge_home) if not np.isnan(edge_home) else np.nan,

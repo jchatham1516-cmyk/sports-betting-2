@@ -31,7 +31,7 @@ def test_longshot_allowed_but_capped():
 
 
 def test_disagreement_cap():
-    row = _base_row(home_ml=150, away_ml=-170, model_home_prob=0.8, market_home_prob=0.5)
+    row = _base_row(home_ml=150, away_ml=-170, model_home_prob=0.72, market_home_prob=0.5)
     settings = DecisionSettings()
 
     decision = decide_bet_from_row(
@@ -45,6 +45,14 @@ def test_disagreement_cap():
     assert decision.play_pass == "PLAY"
     assert decision.final_units == 0.25
     assert "DISAGREE_CAP" in decision.decision_flags
+
+
+def test_disagreement_pass():
+    row = _base_row(home_ml=150, away_ml=-170, model_home_prob=0.8, market_home_prob=0.5)
+    decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
+
+    assert decision.play_pass == "PASS"
+    assert "DISAGREE_PASS" in decision.decision_flags
 
 
 def test_low_edge_passes():
@@ -63,7 +71,7 @@ def test_low_edge_passes():
 
 
 def test_min_edge_allows_play_for_nba():
-    row = _base_row(model_home_prob=0.54, market_home_prob=0.5, home_ml=120, away_ml=-140)
+    row = _base_row(model_home_prob=0.62, market_home_prob=0.5, home_ml=120, away_ml=-140)
     decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
     assert decision.play_pass == "PLAY"
 
@@ -86,8 +94,8 @@ def test_missing_odds_passes():
 def test_confidence_caps_for_moneyline_underdogs():
     row = _base_row(home_ml=300, away_ml=-350, model_home_prob=0.35, market_home_prob=0.2)
     metrics = primary_metrics_for_row(row, sport="nba")
-    assert metrics[7] != "HIGH"
+    assert metrics[9] != "HIGH"
 
     row = _base_row(home_ml=450, away_ml=-500, model_home_prob=0.35, market_home_prob=0.2)
     metrics = primary_metrics_for_row(row, sport="nba")
-    assert metrics[7] == "LOW"
+    assert metrics[9] == "LOW"

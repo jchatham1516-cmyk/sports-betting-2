@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -136,9 +136,11 @@ class DecisionOutcome:
     final_units: float
     p_model_raw: float
     p_model_cal: float
+    p_model_final: float
     p_market: float
     edge_prob_raw: float
     edge_prob_cal: float
+    edge_prob_final: float
 
 
 def confidence_tier_from_edge(edge_prob: float, min_edge: float) -> str:
@@ -340,7 +342,7 @@ def _primary_probabilities(
         if ml_price is None or not np.isfinite(ml_price):
             return None, None, ml_price, opp_price, "missing moneyline odds"
 
-        model_home = safe_float(row.get("model_home_prob"))
+        model_home = safe_float(row.get("model_home_prob_raw", row.get("model_home_prob")))
         model_prob = None if model_home is None or np.isnan(model_home) else float(model_home)
         if model_prob is not None and side == "AWAY":
             model_prob = 1.0 - model_prob
@@ -424,6 +426,92 @@ def _primary_probabilities(
     return None, None, None, None, "missing primary market"
 
 
+def _anchor_prob(p_cal: float, p_market: float, config: SportBetConfig) -> float:
+    if not np.isfinite(p_cal):
+        return float("nan")
+    if not np.isfinite(p_market):
+        return float(p_cal)
+    w = float(max(0.0, min(1.0, float(config.anchor_weight))))
+    return float(w * p_market + (1.0 - w) * p_cal)
+
+
+def _apply_underdog_cap(p_final: float, p_market: float, config: SportBetConfig) -> Tuple[float, bool]:
+    if not np.isfinite(p_final) or not np.isfinite(p_market):
+        return p_final, False
+    cap = None
+    if p_market < float(config.underdog_cap_low_prob):
+        cap = p_market + float(config.underdog_cap_low_add)
+    elif p_market < float(config.underdog_cap_med_prob):
+        cap = p_market + float(config.underdog_cap_med_add)
+    if cap is None:
+        return p_final, False
+    capped = min(p_final, cap)
+    return float(capped), capped < p_final - 1e-9
+
+
+def _ml_probabilities_for_side(
+    model_home: float,
+    market_home: float,
+    side: str,
+    *,
+    sport: str,
+    config: SportBetConfig,
+) -> Tuple[float, float, float, float, List[str]]:
+    flags: List[str] = []
+    side = (side or "").upper()
+    p_raw = float(model_home) if np.isfinite(model_home) else float("nan")
+    p_market = float(market_home) if np.isfinite(market_home) else float("nan")
+
+    if side == "AWAY":
+        if np.isfinite(p_raw):
+            p_raw = 1.0 - p_raw
+        if np.isfinite(p_market):
+            p_market = 1.0 - p_market
+
+    p_cal = calibrate_prob(sport, p_raw, market_type="ML")
+    if not np.isfinite(p_cal):
+        p_cal = p_raw
+
+    p_final = _anchor_prob(p_cal, p_market, config)
+    p_final, capped = _apply_underdog_cap(p_final, p_market, config)
+    if capped:
+        flags.append("UNDERDOG_CAP")
+
+    return p_raw, p_cal, p_final, p_market, flags
+
+
+def ml_probabilities_for_row(row: pd.Series, sport: str = "nba") -> Dict[str, float]:
+    model_home = safe_float(row.get("model_home_prob_raw", row.get("model_home_prob")))
+    market_home = safe_float(row.get("market_home_prob"))
+    config = get_sport_bet_config(sport)
+
+    home_raw, home_cal, home_final, home_market, _ = _ml_probabilities_for_side(
+        float(model_home) if model_home is not None else float("nan"),
+        float(market_home) if market_home is not None else float("nan"),
+        "HOME",
+        sport=sport,
+        config=config,
+    )
+    away_raw, away_cal, away_final, away_market, _ = _ml_probabilities_for_side(
+        float(model_home) if model_home is not None else float("nan"),
+        float(market_home) if market_home is not None else float("nan"),
+        "AWAY",
+        sport=sport,
+        config=config,
+    )
+
+    return {
+        "model_home_prob_raw": home_raw,
+        "model_home_prob_cal": home_cal,
+        "model_home_prob_final": home_final,
+        "model_away_prob_raw": away_raw,
+        "model_away_prob_cal": away_cal,
+        "model_away_prob_final": away_final,
+        "market_home_prob": home_market,
+        "market_away_prob": away_market,
+    }
+
+
 def primary_metrics_for_row(
     row: pd.Series,
     *,
@@ -437,11 +525,13 @@ def primary_metrics_for_row(
     float,
     float,
     float,
+    float,
     str,
     str,
     str,
     Optional[float],
     Optional[str],
+    str,
 ]:
     primary_market, primary_side = _primary_market_and_side(row)
     p_model_raw, p_market, primary_price, opp_price, data_reason = _primary_probabilities(
@@ -454,23 +544,37 @@ def primary_metrics_for_row(
     )
     p_market_val = float(p_market) if p_market is not None and np.isfinite(p_market) else float("nan")
 
+    p_model_cal = calibrate_prob(sport, p_model_raw_val, market_type=primary_market)
+    if not np.isfinite(p_model_cal):
+        p_model_cal = p_model_raw_val
+
     edge_prob_raw = (
         float(p_model_raw_val) - float(p_market_val)
         if np.isfinite(p_model_raw_val) and np.isfinite(p_market_val)
         else float("nan")
     )
-
-    p_model_cal = calibrate_prob(sport, p_model_raw_val, market_type=primary_market)
-    if not np.isfinite(p_model_cal):
-        p_model_cal = p_model_raw_val
-
     edge_prob_cal = (
         float(p_model_cal) - float(p_market_val)
         if np.isfinite(p_model_cal) and np.isfinite(p_market_val)
         else float("nan")
     )
 
-    base_conf = confidence_tier_from_edge(edge_prob_cal, config.min_edge_cal)
+    p_model_final = p_model_cal
+    edge_prob_final = edge_prob_cal
+    flags: List[str] = []
+
+    if primary_market == "ML":
+        p_model_final = _anchor_prob(p_model_cal, p_market_val, config)
+        p_model_final, capped = _apply_underdog_cap(p_model_final, p_market_val, config)
+        if capped:
+            flags.append("UNDERDOG_CAP")
+        edge_prob_final = (
+            float(p_model_final) - float(p_market_val)
+            if np.isfinite(p_model_final) and np.isfinite(p_market_val)
+            else float("nan")
+        )
+
+    base_conf = confidence_tier_from_edge(edge_prob_final, config.min_edge_cal)
     injury_low = _injury_confidence_low(row)
     conf, penalties = _apply_confidence_penalties(
         base_conf,
@@ -481,21 +585,24 @@ def primary_metrics_for_row(
         config=config,
     )
     conf_reason = ", ".join(penalties) if penalties else ""
-    value_tier = value_tier_from_edge(edge_prob_cal, config.min_edge_cal)
+    value_tier = value_tier_from_edge(edge_prob_final, config.min_edge_cal)
 
     return (
         primary_market,
         primary_side,
         p_model_raw_val,
         p_model_cal,
+        p_model_final,
         p_market_val,
         edge_prob_raw,
         edge_prob_cal,
+        edge_prob_final,
         conf,
         conf_reason,
         value_tier,
         primary_price,
         data_reason,
+        ",".join(flags),
     )
 
 
@@ -528,6 +635,10 @@ def decide_bet_from_row(
             float("nan"),
             float("nan"),
             float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
         )
 
     (
@@ -535,14 +646,17 @@ def decide_bet_from_row(
         primary_side,
         p_model_raw,
         p_model_cal,
+        p_model_final,
         p_market,
         edge_prob_raw,
         edge_prob_cal,
+        edge_prob_final,
         _conf,
         _conf_reason,
         value_tier,
         primary_price,
         data_reason,
+        metric_flags,
     ) = primary_metrics_for_row(row, sport=sport, settings=settings)
 
     config = get_sport_bet_config(sport)
@@ -561,27 +675,31 @@ def decide_bet_from_row(
             0.0,
             p_model_raw,
             p_model_cal,
+            p_model_final,
             p_market,
             edge_prob_raw,
             edge_prob_cal,
+            edge_prob_final,
         )
 
-    if edge_prob_cal < float(config.min_edge_cal):
+    if edge_prob_final < float(config.min_edge_cal):
         return DecisionOutcome(
             "PASS",
             0.0,
             float(unit_dollars),
             0.0,
-            f"PASS: edge_cal<{config.min_edge_cal:.3f}",
+            f"PASS: edge_final<{config.min_edge_cal:.3f}",
             "LOW_EDGE_PASS",
             f"edge_cal<{config.min_edge_cal:.3f}",
             0.0,
             0.0,
             p_model_raw,
             p_model_cal,
+            p_model_final,
             p_market,
             edge_prob_raw,
             edge_prob_cal,
+            edge_prob_final,
         )
 
     raw_units = default_bet_units_from_tier(value_tier)
@@ -593,7 +711,7 @@ def decide_bet_from_row(
         else:
             bet_size = bet_size_kelly_ml(
                 float(unit_dollars) / settings.flat_pct,
-                float(p_model_cal),
+                float(p_model_final),
                 float(primary_price),
                 kelly_mult=settings.kelly_mult,
                 max_pct=settings.kelly_max_pct,
@@ -608,7 +726,34 @@ def decide_bet_from_row(
             final_units = min(final_units, float(config.longshot_cap_units))
             reason_parts.append(f"longshot {primary_price}>=+{config.longshot_odds:.0f}")
 
-    disagreement = abs(float(edge_prob_cal))
+    if metric_flags:
+        for flag in metric_flags.split(","):
+            if flag:
+                flags.append(flag)
+
+    disagreement = abs(float(p_model_cal - p_market)) if np.isfinite(p_model_cal) and np.isfinite(p_market) else 0.0
+    if disagreement > float(config.disagree_pass_edge):
+        if edge_prob_final < float(config.disagree_pass_min_edge) or raw_units > float(config.disagree_pass_max_units):
+            flags.append("DISAGREE_PASS")
+            return DecisionOutcome(
+                "PASS",
+                0.0,
+                float(unit_dollars),
+                0.0,
+                "DISAGREE_PASS",
+                ",".join(flags),
+                "DISAGREE_PASS",
+                raw_units,
+                0.0,
+                p_model_raw,
+                p_model_cal,
+                p_model_final,
+                p_market,
+                edge_prob_raw,
+                edge_prob_cal,
+                edge_prob_final,
+            )
+
     if disagreement > float(config.disagree_cap_edge):
         flags.append("DISAGREE_CAP")
         reason_parts.append(f"|model-market|={disagreement:.3f}>{float(config.disagree_cap_edge):.3f}")
@@ -630,16 +775,18 @@ def decide_bet_from_row(
         bet_size,
         float(unit_dollars),
         final_units,
-        f"edge_cal={edge_prob_cal:.3f} tier={value_tier}",
+        f"edge_final={edge_prob_final:.3f} tier={value_tier}",
         ",".join(flags),
         decision_reason,
         raw_units,
         final_units,
         p_model_raw,
         p_model_cal,
+        p_model_final,
         p_market,
         edge_prob_raw,
         edge_prob_cal,
+        edge_prob_final,
     )
 
 
@@ -754,16 +901,18 @@ def add_betting_outputs(
     out["primary_side"] = [m[1] for m in metrics]
     out["p_model_raw"] = [m[2] for m in metrics]
     out["p_model_cal"] = [m[3] for m in metrics]
-    out["p_market"] = [m[4] for m in metrics]
-    out["p_model_used"] = out["p_model_cal"]
+    out["p_model_final"] = [m[4] for m in metrics]
+    out["p_market"] = [m[5] for m in metrics]
+    out["p_model_used"] = out["p_model_final"]
     out["p_market_used"] = out["p_market"]
-    out["edge_prob_raw"] = [m[5] for m in metrics]
-    out["edge_prob_cal"] = [m[6] for m in metrics]
-    out["abs_edge_prob"] = out["edge_prob_cal"].abs()
-    out["confidence"] = [m[7] for m in metrics]
-    out["confidence_reason"] = [m[8] for m in metrics]
-    out["value_tier"] = [m[9] for m in metrics]
-    out["primary_price"] = [m[10] for m in metrics]
+    out["edge_prob_raw"] = [m[6] for m in metrics]
+    out["edge_prob_cal"] = [m[7] for m in metrics]
+    out["edge_prob_final"] = [m[8] for m in metrics]
+    out["abs_edge_prob"] = out["edge_prob_final"].abs()
+    out["confidence"] = [m[9] for m in metrics]
+    out["confidence_reason"] = [m[10] for m in metrics]
+    out["value_tier"] = [m[11] for m in metrics]
+    out["primary_price"] = [m[12] for m in metrics]
 
     decisions = [
         decide_bet_from_row(
@@ -808,6 +957,7 @@ def add_betting_outputs(
     out["final_units"] = [d.final_units for d in decisions]
     out["edge_prob_raw"] = [d.edge_prob_raw for d in decisions]
     out["edge_prob_cal"] = [d.edge_prob_cal for d in decisions]
+    out["edge_prob_final"] = [d.edge_prob_final for d in decisions]
     out["stake_dollars"] = out["units"] * out["unit_dollars"]
 
     return out
@@ -823,7 +973,8 @@ def format_decision_trace(row: pd.Series, decision: DecisionOutcome) -> str:
         f"{row.get('home', '')} vs {row.get('away', '')}",
         f"primary={row.get('primary_recommendation', '')}",
         f"model_raw={_fmt(decision.p_model_raw)} model_cal={_fmt(decision.p_model_cal)}",
-        f"market_p={_fmt(decision.p_market)} edge_cal={_fmt(decision.edge_prob_cal)}",
+        f"model_final={_fmt(decision.p_model_final)} market_p={_fmt(decision.p_market)} "
+        f"edge_final={_fmt(decision.edge_prob_final)}",
         f"raw_units={decision.raw_units:.2f} -> final_units={decision.final_units:.2f}",
         f"flags={decision.decision_flags or 'NONE'}",
         f"reason={decision.decision_reason or decision.reason}",

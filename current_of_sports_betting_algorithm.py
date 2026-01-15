@@ -26,9 +26,12 @@ from sports.common.bet_rules import (
     DecisionSettings,
     decide_bet_from_row,
     format_decision_trace,
+    ml_probabilities_for_row,
     primary_metrics_for_row,
 )
-from sports.common.prob_calibration import fit_calibrator, load_calibrator
+from sports.common.prob_calibration import fit_calibrator
+from sports.common.history_builder import build_historical_dataset, season_string_for_date
+from sports.common.reporting import generate_backtest_report
 
 from sports.nba.bdl_client import (
     get_bdl_api_key,
@@ -142,10 +145,37 @@ def main(argv=None):
 
     parser.add_argument("--max_plays", type=int, default=None)
     parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
+    parser.add_argument("--build-history", action="store_true", help="Build full-season historical dataset.")
+    parser.add_argument("--fit-calibration", action="store_true", help="Fit Platt calibration from historical data.")
+    parser.add_argument("--season", type=str, default=None, help="Season string like 2025-2026.")
 
     args = parser.parse_args(argv)
 
     game_date = datetime.utcnow().strftime("%m/%d/%Y") if args.date is None else args.date
+    season = args.season
+    if season is None:
+        try:
+            season = season_string_for_date(args.sport, datetime.strptime(game_date, "%m/%d/%Y").date())
+        except Exception:
+            season = season_string_for_date(args.sport, datetime.utcnow().date())
+
+    if args.build_history:
+        build_historical_dataset(args.sport, season)
+        if args.fit_calibration:
+            hist_path = f"data/historical/{args.sport}_{season}.csv"
+            if os.path.exists(hist_path):
+                hist_df = pd.read_csv(hist_path)
+                fit_calibrator(args.sport, hist_df)
+        return
+
+    if args.fit_calibration:
+        hist_path = f"data/historical/{args.sport}_{season}.csv"
+        if not os.path.exists(hist_path):
+            raise FileNotFoundError(f"Historical CSV not found: {hist_path}")
+        hist_df = pd.read_csv(hist_path)
+        fit_calibrator(args.sport, hist_df)
+        return
+
     print(f"Running {args.sport.upper()} model for {game_date}...")
 
     odds_dict, spreads_dict = {}, {}
@@ -237,30 +267,36 @@ def main(argv=None):
         kelly_max_pct=float(args.kelly_max_pct),
     )
 
+    bet_log_path = "results/tracking/bet_log.csv"
     if not results_df.empty:
-        bet_log_path = "results/tracking/bet_log.csv"
-        if load_calibrator(args.sport) is None and os.path.exists(bet_log_path):
-            try:
-                bet_log_df = pd.read_csv(bet_log_path)
-                fit_calibrator(args.sport, bet_log_df)
-            except Exception as exc:
-                print(f"[calibration] WARNING: failed to fit calibrator: {exc}")
 
         metrics = [primary_metrics_for_row(r, sport=args.sport) for _, r in results_df.iterrows()]
         results_df["primary_market"] = [m[0] for m in metrics]
         results_df["primary_side"] = [m[1] for m in metrics]
         results_df["p_model_raw"] = [m[2] for m in metrics]
         results_df["p_model_cal"] = [m[3] for m in metrics]
-        results_df["p_market"] = [m[4] for m in metrics]
-        results_df["p_model_used"] = results_df["p_model_cal"]
+        results_df["p_model_final"] = [m[4] for m in metrics]
+        results_df["p_market"] = [m[5] for m in metrics]
+        results_df["p_model_used"] = results_df["p_model_final"]
         results_df["p_market_used"] = results_df["p_market"]
-        results_df["edge_prob_raw"] = [m[5] for m in metrics]
-        results_df["edge_prob_cal"] = [m[6] for m in metrics]
-        results_df["abs_edge_prob"] = results_df["edge_prob_cal"].abs()
-        results_df["confidence"] = [m[7] for m in metrics]
-        results_df["confidence_reason"] = [m[8] for m in metrics]
-        results_df["value_tier"] = [m[9] for m in metrics]
-        results_df["primary_price"] = [m[10] for m in metrics]
+        results_df["edge_prob_raw"] = [m[6] for m in metrics]
+        results_df["edge_prob_cal"] = [m[7] for m in metrics]
+        results_df["edge_prob_final"] = [m[8] for m in metrics]
+        results_df["abs_edge_prob"] = results_df["edge_prob_final"].abs()
+        results_df["confidence"] = [m[9] for m in metrics]
+        results_df["confidence_reason"] = [m[10] for m in metrics]
+        results_df["value_tier"] = [m[11] for m in metrics]
+        results_df["primary_price"] = [m[12] for m in metrics]
+
+        ml_probs = [ml_probabilities_for_row(r, sport=args.sport) for _, r in results_df.iterrows()]
+        results_df["model_home_prob_raw"] = [p["model_home_prob_raw"] for p in ml_probs]
+        results_df["model_home_prob_cal"] = [p["model_home_prob_cal"] for p in ml_probs]
+        results_df["model_home_prob_final"] = [p["model_home_prob_final"] for p in ml_probs]
+        results_df["model_away_prob_raw"] = [p["model_away_prob_raw"] for p in ml_probs]
+        results_df["model_away_prob_cal"] = [p["model_away_prob_cal"] for p in ml_probs]
+        results_df["model_away_prob_final"] = [p["model_away_prob_final"] for p in ml_probs]
+        results_df["market_home_prob"] = [p["market_home_prob"] for p in ml_probs]
+        results_df["market_away_prob"] = [p["market_away_prob"] for p in ml_probs]
 
         decisions = [
             decide_bet_from_row(
@@ -287,13 +323,14 @@ def main(argv=None):
         results_df["final_units"] = [d.final_units for d in decisions]
         results_df["edge_prob_raw"] = [d.edge_prob_raw for d in decisions]
         results_df["edge_prob_cal"] = [d.edge_prob_cal for d in decisions]
+        results_df["edge_prob_final"] = [d.edge_prob_final for d in decisions]
         results_df["stake_dollars"] = results_df["units"] * results_df["unit_dollars"]
 
         for (idx, r), d in zip(results_df.iterrows(), decisions):
             print(
                 "[decision] "
                 f"{r.get('away', '')} @ {r.get('home', '')} "
-                f"edge_cal={r.get('edge_prob_cal')} value_tier={r.get('value_tier')} "
+                f"edge_final={r.get('edge_prob_final')} value_tier={r.get('value_tier')} "
                 f"confidence={r.get('confidence')} primary_ev={r.get('primary_ev')} "
                 f"play_pass={d.play_pass} decision_flags={d.decision_flags or 'NONE'} "
                 f"decision_reason={d.decision_reason or d.reason}"
@@ -414,6 +451,19 @@ def main(argv=None):
             graded_path = summary.get("graded_path")
             if graded_path:
                 print(f"[tracking] Wrote graded results to {graded_path}")
+
+    try:
+        hist_path = f"data/historical/{args.sport}_{season}.csv"
+        report = generate_backtest_report(args.sport, hist_path, bet_log_path=bet_log_path)
+        if report:
+            overall = report.get("overall", {})
+            print(
+                "[report] "
+                f"{args.sport.upper()} ROI {overall.get('roi', 0.0)*100:.2f}% "
+                f"win% {overall.get('win_pct', 0.0)*100:.1f}% bets {overall.get('bets', 0)}"
+            )
+    except Exception as exc:
+        print(f"[report] WARNING: failed to generate report: {exc}")
     return 0
 
 

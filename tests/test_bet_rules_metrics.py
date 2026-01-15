@@ -31,8 +31,8 @@ def test_confidence_with_penalties():
         }
     )
     metrics = primary_metrics_for_row(row, sport="nba")
-    confidence = metrics[7]
-    reason = metrics[8]
+    confidence = metrics[9]
+    reason = metrics[10]
 
     assert confidence == "LOW"
     assert "ML_CONFIDENCE_CAP>=400" in reason
@@ -50,8 +50,8 @@ def test_confidence_disagreement_penalty():
         }
     )
     metrics = primary_metrics_for_row(row, sport="nba")
-    assert metrics[7] == "LOW"
-    assert "DISAGREE_CAP" in metrics[8]
+    assert metrics[9] == "LOW"
+    assert "DISAGREE_CAP" in metrics[10]
 
 
 def test_abs_edge_flips_for_away():
@@ -66,8 +66,8 @@ def test_abs_edge_flips_for_away():
     )
     metrics = primary_metrics_for_row(row, sport="nba")
     assert metrics[2] == 0.6
-    assert metrics[4] == 0.5
-    assert round(metrics[5], 4) == 0.1
+    assert metrics[5] == 0.5
+    assert round(metrics[6], 4) == 0.1
 
 
 def test_value_tier_from_abs_edge_prob():

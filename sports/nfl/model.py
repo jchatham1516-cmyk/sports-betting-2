@@ -22,14 +22,12 @@ from sports.nfl.injuries import (
     injury_adjustment_points,
 )
 
-from sports.common.prob_calibration import load as load_platt, save as save_platt, fit_platt
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 
 # OPTIONAL weather
 from sports.common.weather_sources import fetch_game_weather
 
 ELO_PATH = "results/elo_state_nfl.json"
-PLATT_PATH = "results/prob_cal_nfl.json"
 MARGIN_CAL_PATH = "results/margin_cal_nfl.json"
 
 # ----------------------------
@@ -504,13 +502,10 @@ def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
 
     try:
         if len(train_ps) >= CAL_MIN_GAMES:
-            cal = fit_platt(np.array(train_ps, dtype=float), np.array(train_ys, dtype=float))
-            save_platt(PLATT_PATH, cal)
-
             mcal = fit_margin(np.array(train_xs, dtype=float), np.array(train_margins, dtype=float))
             save_margin_cal(MARGIN_CAL_PATH, mcal)
     except Exception as e:
-        print(f"[nfl calibration] WARNING: calibration fit failed: {e}")
+        print(f"[nfl calibration] WARNING: margin calibration fit failed: {e}")
 
     return st
 
@@ -520,7 +515,6 @@ def update_elo_from_recent_scores(days_from: int = 14) -> EloState:
 # ----------------------------
 def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=14)
-    platt = load_platt(PLATT_PATH)
     margin_cal = load_margin_cal(MARGIN_CAL_PATH)
 
     def _margin_model_spread_from_elo_diff(elo_diff: float) -> float:
@@ -674,10 +668,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         # Win prob
         p_raw = float(elo_win_prob(eh_eff, ea_eff, home_adv=HOME_ADV))
         p_comp = _clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99)
-        try:
-            p_home = _clamp(float(platt.predict(float(p_comp))), 0.01, 0.99)
-        except Exception:
-            p_home = p_comp
+        p_home = p_comp
 
         # If Elo state is empty for either team, soften toward 0.50 and lightly blend market
         home_missing = home not in (getattr(st, "ratings", {}) or {})
@@ -895,6 +886,7 @@ def run_daily_nfl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "home": home,
                 "away": away,
                 "model_home_prob": float(p_home),
+                "model_home_prob_raw": float(p_home),
                 "model_spread_home": float(model_spread_home),
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
