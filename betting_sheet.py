@@ -112,6 +112,7 @@ def convert_to_betting_sheet(
         enriched,
         unit_dollars=float(unit_dollars),
         min_play_edge_abs=float(min_play_edge_abs),
+        sport=sport,
     )
 
     if output_path:
