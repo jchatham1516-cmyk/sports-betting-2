@@ -2,8 +2,8 @@ import pandas as pd
 
 from sports.common.bet_rules import (
     breakeven_prob_from_american,
-    decide_bet_from_row,
     implied_prob_american,
+    confidence_tier_from_edge,
     primary_metrics_for_row,
     value_tier_from_edge,
 )
@@ -30,12 +30,12 @@ def test_confidence_with_penalties():
             "injury_confidence": "low",
         }
     )
-    metrics = primary_metrics_for_row(row)
-    confidence = metrics[5]
-    reason = metrics[6]
+    metrics = primary_metrics_for_row(row, sport="nba")
+    confidence = metrics[7]
+    reason = metrics[8]
 
     assert confidence == "LOW"
-    assert "LONGSHOT_ODDS>=+500" in reason
+    assert "ML_CONFIDENCE_CAP>=400" in reason
     assert "INJURY_CONF_LOW" in reason
 
 
@@ -49,9 +49,9 @@ def test_confidence_disagreement_penalty():
             "market_home_prob": 0.5,
         }
     )
-    metrics = primary_metrics_for_row(row)
-    assert metrics[5] == "MEDIUM"
-    assert "DISAGREE_PROB>0.20" in metrics[6]
+    metrics = primary_metrics_for_row(row, sport="nba")
+    assert metrics[7] == "LOW"
+    assert "DISAGREE_CAP" in metrics[8]
 
 
 def test_abs_edge_flips_for_away():
@@ -64,45 +64,20 @@ def test_abs_edge_flips_for_away():
             "market_home_prob": 0.5,
         }
     )
-    metrics = primary_metrics_for_row(row)
+    metrics = primary_metrics_for_row(row, sport="nba")
     assert metrics[2] == 0.6
-    assert metrics[3] == 0.5
-    assert round(metrics[4], 4) == 0.1
+    assert metrics[4] == 0.5
+    assert round(metrics[5], 4) == 0.1
 
 
 def test_value_tier_from_abs_edge_prob():
-    assert value_tier_from_edge(0.065) == "HIGH VALUE"
-    assert value_tier_from_edge(0.04) == "MED VALUE"
-    assert value_tier_from_edge(0.02) == "LOW VALUE"
-    assert value_tier_from_edge(0.01) == "NO BET"
+    assert value_tier_from_edge(0.065, 0.03) == "HIGH VALUE"
+    assert value_tier_from_edge(0.04, 0.03) == "MED VALUE"
+    assert value_tier_from_edge(0.02, 0.015) == "LOW VALUE"
+    assert value_tier_from_edge(0.01, 0.03) == "NO BET"
 
 
-def test_longshot_extreme_requires_edge():
-    row = pd.Series(
-        {
-            "primary_recommendation": "Model PICK: HOME ML (strong)",
-            "home_ml": 750,
-            "away_ml": -1200,
-            "model_home_prob": 0.18,
-            "market_home_prob": 0.12,
-        }
-    )
-    decision = decide_bet_from_row(row, unit_dollars=25.0)
-    assert decision.play_pass == "PASS"
-    assert "LONGSHOT_CAP" in decision.decision_flags
-
-
-def test_longshot_cap_units():
-    row = pd.Series(
-        {
-            "primary_recommendation": "Model PICK: HOME ML (strong)",
-            "home_ml": 600,
-            "away_ml": -800,
-            "model_home_prob": 0.35,
-            "market_home_prob": 0.2,
-        }
-    )
-    decision = decide_bet_from_row(row, unit_dollars=25.0)
-    assert decision.play_pass == "PLAY"
-    assert decision.units == 0.25
-    assert "LONGSHOT_CAP" in decision.decision_flags
+def test_confidence_from_edge_prob():
+    assert confidence_tier_from_edge(0.06, 0.03) == "HIGH"
+    assert confidence_tier_from_edge(0.04, 0.03) == "MEDIUM"
+    assert confidence_tier_from_edge(0.01, 0.03) == "LOW"

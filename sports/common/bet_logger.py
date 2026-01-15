@@ -30,6 +30,11 @@ BET_LOG_COLUMNS = [
     "p_model_used",
     "p_market_used",
     "abs_edge_prob",
+    "p_model_raw",
+    "p_model_cal",
+    "p_market",
+    "edge_prob_raw",
+    "edge_prob_cal",
     "units",
     "result",
     "unit_dollars",
@@ -117,13 +122,29 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
     if market_type is None:
         return None
 
+    p_model_raw = _safe_number(row.get("p_model_raw"))
+    p_model_cal = _safe_number(row.get("p_model_cal"))
+    p_market = _safe_number(row.get("p_market"))
+    edge_prob_raw = _safe_number(row.get("edge_prob_raw"))
+    edge_prob_cal = _safe_number(row.get("edge_prob_cal"))
+    abs_edge_prob = _safe_number(row.get("abs_edge_prob"))
     p_model_used = _safe_number(row.get("p_model_used"))
     p_market_used = _safe_number(row.get("p_market_used"))
-    abs_edge_prob = _safe_number(row.get("abs_edge_prob"))
-    if np.isfinite(p_model_used):
+
+    if np.isfinite(p_model_cal):
+        model_prob = p_model_cal
+    elif np.isfinite(p_model_raw):
+        model_prob = p_model_raw
+    elif np.isfinite(p_model_used):
         model_prob = p_model_used
-    if np.isfinite(p_market_used):
+
+    if np.isfinite(p_market):
+        market_prob = p_market
+    elif np.isfinite(p_market_used):
         market_prob = p_market_used
+
+    if not np.isfinite(abs_edge_prob) and np.isfinite(edge_prob_cal):
+        abs_edge_prob = abs(float(edge_prob_cal))
 
     date_str = row.get("date")
     bet_id = _hash_bet_id(
@@ -168,6 +189,11 @@ def _build_bet_row(row: pd.Series, sport: str) -> Optional[Dict[str, object]]:
         "p_model_used": p_model_used,
         "p_market_used": p_market_used,
         "abs_edge_prob": abs_edge_prob,
+        "p_model_raw": p_model_raw,
+        "p_model_cal": p_model_cal,
+        "p_market": p_market,
+        "edge_prob_raw": edge_prob_raw,
+        "edge_prob_cal": edge_prob_cal,
         "units": units,
         "result": normalize_result_label(row.get("result", "")),
         "unit_dollars": unit_dollars,

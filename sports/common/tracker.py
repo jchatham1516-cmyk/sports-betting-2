@@ -42,6 +42,11 @@ BET_LOG_COLUMNS = [
     "p_model_used",
     "p_market_used",
     "abs_edge_prob",
+    "p_model_raw",
+    "p_model_cal",
+    "p_market",
+    "edge_prob_raw",
+    "edge_prob_cal",
     "units",
     "result",
     "unit_dollars",
@@ -648,18 +653,41 @@ def _summaries(history: pd.DataFrame) -> Dict[str, object]:
             return df[price >= 6.0]
         return df.iloc[0:0]
 
+    def _odds_bucket(value: object) -> str:
+        try:
+            odds = float(value)
+        except Exception:
+            return "UNKNOWN"
+        if not np.isfinite(odds):
+            return "UNKNOWN"
+        if odds >= 400:
+            return ">=+400"
+        if odds >= 250:
+            return "+250 to +399"
+        if odds >= 100:
+            return "+100 to +249"
+        if odds >= -110:
+            return "-110 to +99"
+        if odds >= -200:
+            return "-200 to -111"
+        return "<=-200"
+
     today = date.today()
     last_30 = today - timedelta(days=30)
 
     hist_with_date = history.copy()
     hist_with_date["date"] = hist_with_date["date"].apply(lambda d: _parse_date(d) or d)
+    if "price_at_bet" in hist_with_date.columns:
+        hist_with_date["odds_bucket"] = hist_with_date["price_at_bet"].apply(_odds_bucket)
     recent = hist_with_date[hist_with_date["date"] >= last_30] if not hist_with_date.empty else pd.DataFrame()
 
     return {
         "lifetime": _summary_for(hist_with_date),
         "last_30_days": _summary_for(recent),
+        "by_sport": _group_summary(hist_with_date, "sport"),
         "by_confidence": _group_summary(hist_with_date, "confidence"),
         "by_value_tier": _group_summary(hist_with_date, "value_tier"),
+        "by_odds_bucket": _group_summary(hist_with_date, "odds_bucket"),
         "longshots": _summary_for(_longshot_filter(hist_with_date)),
     }
 
@@ -900,6 +928,13 @@ def track_bets_for_date(
     log_df_updated = log_indexed.reset_index()
     log_df_updated.to_csv(bet_log_path, index=False)
 
+    tracking_dir = os.path.dirname(bet_log_path) or "results/tracking"
+    os.makedirs(tracking_dir, exist_ok=True)
+    summary_full = _summaries(log_df_updated)
+    summary_path = os.path.join(tracking_dir, "summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary_full, f, indent=2)
+
     played = graded[graded["result"].isin(["WIN", "LOSS", "PUSH"])]
     wins = int((played["result"] == "WIN").sum())
     losses = int((played["result"] == "LOSS").sum())
@@ -916,6 +951,11 @@ def track_bets_for_date(
         "profit": profit,
         "roi": roi,
         "graded_path": graded_out_path,
+        "summary_path": summary_path,
+        "by_sport": summary_full.get("by_sport", {}),
+        "by_confidence": summary_full.get("by_confidence", {}),
+        "by_value_tier": summary_full.get("by_value_tier", {}),
+        "by_odds_bucket": summary_full.get("by_odds_bucket", {}),
     }
 
     return BetLogTrackingResult(log_df_updated, graded, summary, ok=True)

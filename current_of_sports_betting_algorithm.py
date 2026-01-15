@@ -28,6 +28,7 @@ from sports.common.bet_rules import (
     format_decision_trace,
     primary_metrics_for_row,
 )
+from sports.common.prob_calibration import fit_calibrator, load_calibrator
 
 from sports.nba.bdl_client import (
     get_bdl_api_key,
@@ -217,16 +218,6 @@ def main(argv=None):
     unit_dollars = float(args.bankroll) * UNIT_PCT
 
     decision_settings = DecisionSettings(
-        min_play_edge_abs=float(os.getenv("MIN_PLAY_EDGE_ABS", DecisionSettings().min_play_edge_abs)),
-        min_primary_edge_abs=DecisionSettings().min_primary_edge_abs,
-        min_ev_override=float(os.getenv("MIN_EV_OVERRIDE", DecisionSettings().min_ev_override)),
-        min_ev_override_edge=float(os.getenv("MIN_EV_OVERRIDE_EDGE", DecisionSettings().min_ev_override_edge)),
-        longshot_cutoff=float(os.getenv("LONGSHOT_ODDS_CAP", 500)),
-        favorite_extreme_cutoff=float(os.getenv("FAVORITE_EXTREME_CAP", -800)),
-        max_disagreement=float(os.getenv("MAX_MODEL_MARKET_DISAGREE", 0.20)),
-        max_units=float(os.getenv("MAX_UNITS", 1.0)),
-        max_units_sanity=float(os.getenv("MAX_UNITS_SANITY", 0.25)),
-        min_play_units=float(os.getenv("MIN_PLAY_UNITS", 0.25)),
         flat_pct=float(args.flat_pct),
         sizing_mode=str(args.sizing),
         kelly_mult=float(args.kelly_mult),
@@ -234,20 +225,35 @@ def main(argv=None):
     )
 
     if not results_df.empty:
-        metrics = [primary_metrics_for_row(r) for _, r in results_df.iterrows()]
+        bet_log_path = "results/tracking/bet_log.csv"
+        if load_calibrator(args.sport) is None and os.path.exists(bet_log_path):
+            try:
+                bet_log_df = pd.read_csv(bet_log_path)
+                fit_calibrator(args.sport, bet_log_df)
+            except Exception as exc:
+                print(f"[calibration] WARNING: failed to fit calibrator: {exc}")
+
+        metrics = [primary_metrics_for_row(r, sport=args.sport) for _, r in results_df.iterrows()]
         results_df["primary_market"] = [m[0] for m in metrics]
         results_df["primary_side"] = [m[1] for m in metrics]
-        results_df["p_model_used"] = [m[2] for m in metrics]
-        results_df["p_market_used"] = [m[3] for m in metrics]
-        results_df["abs_edge_prob"] = [m[4] for m in metrics]
-        results_df["confidence"] = [m[5] for m in metrics]
-        results_df["confidence_reason"] = [m[6] for m in metrics]
-        results_df["value_tier"] = [m[7] for m in metrics]
+        results_df["p_model_raw"] = [m[2] for m in metrics]
+        results_df["p_model_cal"] = [m[3] for m in metrics]
+        results_df["p_market"] = [m[4] for m in metrics]
+        results_df["p_model_used"] = results_df["p_model_cal"]
+        results_df["p_market_used"] = results_df["p_market"]
+        results_df["edge_prob_raw"] = [m[5] for m in metrics]
+        results_df["edge_prob_cal"] = [m[6] for m in metrics]
+        results_df["abs_edge_prob"] = results_df["edge_prob_cal"].abs()
+        results_df["confidence"] = [m[7] for m in metrics]
+        results_df["confidence_reason"] = [m[8] for m in metrics]
+        results_df["value_tier"] = [m[9] for m in metrics]
+        results_df["primary_price"] = [m[10] for m in metrics]
 
         decisions = [
             decide_bet_from_row(
                 r,
                 unit_dollars=unit_dollars,
+                sport=args.sport,
                 settings=decision_settings,
                 require_pick=args.play_require_pick,
                 require_value_tier=args.play_value_tier,
@@ -266,15 +272,15 @@ def main(argv=None):
         results_df["decision_reason"] = [d.decision_reason for d in decisions]
         results_df["raw_units"] = [d.raw_units for d in decisions]
         results_df["final_units"] = [d.final_units for d in decisions]
-        results_df["abs_edge_used"] = [d.abs_edge_used for d in decisions]
-        results_df["abs_edge_prob"] = results_df["abs_edge_used"]
+        results_df["edge_prob_raw"] = [d.edge_prob_raw for d in decisions]
+        results_df["edge_prob_cal"] = [d.edge_prob_cal for d in decisions]
         results_df["stake_dollars"] = results_df["units"] * results_df["unit_dollars"]
 
         for (idx, r), d in zip(results_df.iterrows(), decisions):
             print(
                 "[decision] "
                 f"{r.get('away', '')} @ {r.get('home', '')} "
-                f"abs_edge_home={r.get('abs_edge_home')} value_tier={r.get('value_tier')} "
+                f"edge_cal={r.get('edge_prob_cal')} value_tier={r.get('value_tier')} "
                 f"confidence={r.get('confidence')} primary_ev={r.get('primary_ev')} "
                 f"play_pass={d.play_pass} decision_flags={d.decision_flags or 'NONE'} "
                 f"decision_reason={d.decision_reason or d.reason}"
@@ -367,6 +373,31 @@ def main(argv=None):
                 f"{summary.get('wins', 0)}-{summary.get('losses', 0)}-{summary.get('pushes', 0)}"
                 f", Profit ${summary.get('profit', 0.0):.2f}, ROI {summary.get('roi', 0.0)*100:.2f}%"
             )
+            if summary.get("by_sport"):
+                print("[tracking] ROI by sport:")
+                for sport, stats in summary.get("by_sport", {}).items():
+                    print(
+                        f"  {sport}: ROI {stats.get('roi', 0.0)*100:.2f}% "
+                        f"win% {stats.get('win_pct', 0.0)*100:.1f}% bets {stats.get('bets', 0)}"
+                    )
+            if summary.get("by_confidence"):
+                print("[tracking] ROI by confidence:")
+                for tier, stats in summary.get("by_confidence", {}).items():
+                    print(
+                        f"  {tier}: ROI {stats.get('roi', 0.0)*100:.2f}% "
+                        f"win% {stats.get('win_pct', 0.0)*100:.1f}% bets {stats.get('bets', 0)}"
+                    )
+            if summary.get("by_value_tier"):
+                print("[tracking] ROI by value tier:")
+                for tier, stats in summary.get("by_value_tier", {}).items():
+                    print(
+                        f"  {tier}: ROI {stats.get('roi', 0.0)*100:.2f}% "
+                        f"win% {stats.get('win_pct', 0.0)*100:.1f}% bets {stats.get('bets', 0)}"
+                    )
+            if summary.get("by_odds_bucket"):
+                print("[tracking] ROI by odds bucket:")
+                for bucket, stats in summary.get("by_odds_bucket", {}).items():
+                    print(f"  {bucket}: ROI {stats.get('roi', 0.0)*100:.2f}%")
             graded_path = summary.get("graded_path")
             if graded_path:
                 print(f"[tracking] Wrote graded results to {graded_path}")

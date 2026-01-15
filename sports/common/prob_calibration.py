@@ -1,280 +1,269 @@
-"""
-sports/common/prob_calibration.py
-
-Probability calibration for sports betting models.
-
-Supports:
-1) "Per-bet-type Platt params" format used by ProbabilityCalibrator:
-   {
-     "moneyline": {"A": 1.0, "B": 0.0},
-     "spread":    {"A": 1.0, "B": 0.0},
-     "total":     {"A": 1.0, "B": 0.0}
-   }
-
-2) "Single calibrator object" expected by older code paths:
-   - load(path) returns an object with .predict(p)
-   - save(path, calibrator) persists it
-   - calibrate_prob(ps, ys) fits a simple Platt scaler and returns (calibrator, label)
-"""
-
 from __future__ import annotations
 
 import json
-import math
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
+import pandas as pd
+
+from sports.common.util import clamp, normalize_result_label
 
 
-# -------------------------
-# Numerically stable helpers
-# -------------------------
-def _clip_prob(p: float) -> float:
-    try:
-        return float(np.clip(float(p), 0.001, 0.999))
-    except Exception:
-        return 0.5
+MIN_SAMPLES = 200
+_CALIBRATOR_CACHE: Dict[str, "Calibrator"] = {}
 
 
-def _logit(p: float) -> float:
-    p = _clip_prob(p)
-    return float(math.log(p / (1.0 - p)))
-
-
-def _sigmoid(x: float) -> float:
-    # stable sigmoid
-    x = float(x)
-    if x >= 0:
-        z = math.exp(-x)
-        return 1.0 / (1.0 + z)
-    else:
-        z = math.exp(x)
-        return z / (1.0 + z)
-
-
-# -------------------------
-# Simple Platt Calibrator object (legacy API)
-# -------------------------
 @dataclass
 class PlattCalibrator:
-    """Calibrator with .predict(p) used by existing model code."""
-    A: float = 1.0
-    B: float = 0.0
+    a: float
+    b: float
 
-    def predict(self, p: float) -> float:
-        p = _clip_prob(p)
-        x = _logit(p)
-        y = _sigmoid(self.A * x + self.B)
-        return float(np.clip(y, 0.01, 0.99))
+    def predict(self, p_raw: float) -> float:
+        if p_raw is None or not np.isfinite(p_raw):
+            return float("nan")
+        p_raw = float(clamp(float(p_raw), 1e-6, 1 - 1e-6))
+        logit = np.log(p_raw / (1 - p_raw))
+        z = self.a * logit + self.b
+        return float(1.0 / (1.0 + np.exp(-z)))
 
     def to_dict(self) -> Dict[str, float]:
-        return {"A": float(self.A), "B": float(self.B)}
+        return {"a": float(self.a), "b": float(self.b)}
 
     @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "PlattCalibrator":
-        A = float(d.get("A", 1.0))
-        B = float(d.get("B", 0.0))
-        return PlattCalibrator(A=A, B=B)
+    def from_dict(data: Dict[str, object]) -> "PlattCalibrator":
+        return PlattCalibrator(a=float(data.get("a", 1.0)), b=float(data.get("b", 0.0)))
 
 
-# -------------------------
-# New-style per bet-type calibrator (your class)
-# -------------------------
-class ProbabilityCalibrator:
-    """
-    Platt scaling-based calibration for sports betting probabilities.
-    Maintains separate calibrators for ML, ATS, and Totals per sport.
-
-    File format:
-      { "moneyline": {"A":..,"B":..}, "spread": {...}, "total": {...} }
-    """
-
-    def __init__(self, sport: str, calibration_path: Optional[str] = None):
-        self.sport = str(sport)
-        self.calibrators: Dict[str, Dict[str, float]] = {}
-        self.calibration_path = calibration_path or self._default_path()
-        self.load_calibration()
-
-    def _default_path(self) -> str:
-        # Prefer "results/" (common in your repo), but keep backward compat with the original path too.
-        # You can override with calibration_path.
-        cal_dir = os.getenv("CALIBRATION_DIR", "results")
-        return os.path.join(cal_dir, f"calibration_params_{self.sport}.json")
-
-    def load_calibration(self) -> None:
-        """Load pre-fitted calibration parameters (per bet type)."""
-        path = self.calibration_path
-
-        # Backward compatible fallback:
-        fallback = os.path.join("sports", "common", f"calibration_params_{self.sport}.json")
-
-        load_path = path if os.path.exists(path) else (fallback if os.path.exists(fallback) else None)
-
-        if load_path:
-            try:
-                with open(load_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                # ensure structure
-                if isinstance(data, dict):
-                    self.calibrators = data
-                else:
-                    self.calibrators = {}
-            except Exception:
-                self.calibrators = {}
-        else:
-            self.calibrators = {}
-
-        # Defaults if missing
-        for bt in ("moneyline", "spread", "total"):
-            if bt not in self.calibrators or not isinstance(self.calibrators.get(bt), dict):
-                self.calibrators[bt] = {"A": 1.0, "B": 0.0}
-            else:
-                # sanitize
-                self.calibrators[bt]["A"] = float(self.calibrators[bt].get("A", 1.0))
-                self.calibrators[bt]["B"] = float(self.calibrators[bt].get("B", 0.0))
-
-    def save_calibration(self) -> None:
-        """Persist calibration parameters."""
-        try:
-            os.makedirs(os.path.dirname(self.calibration_path), exist_ok=True)
-        except Exception:
-            pass
-        try:
-            with open(self.calibration_path, "w", encoding="utf-8") as f:
-                json.dump(self.calibrators, f, indent=2)
-        except Exception:
-            pass
-
-    def calibrate(self, prob: float, bet_type: str) -> float:
-        """
-        Apply Platt scaling: sigmoid(A * logit(prob) + B)
-        """
-        bt = str(bet_type)
-        if bt not in self.calibrators:
-            return float(_clip_prob(prob))
-
-        params = self.calibrators[bt]
-        A = float(params.get("A", 1.0))
-        B = float(params.get("B", 0.0))
-
-        p = _clip_prob(prob)
-        x = _logit(p)
-        y = _sigmoid(A * x + B)
-        return float(np.clip(y, 0.01, 0.99))
+@dataclass
+class MarketCalibrator:
+    a: float
+    b: float
+    n_samples: int
+    status: str
 
 
-# -------------------------
-# Legacy functions expected by your NBA model
-# -------------------------
-def load(path: str) -> Optional[PlattCalibrator]:
-    """
-    Load a calibrator saved by save() or compatible dict.
-    Returns an object with .predict(p).
-    """
+@dataclass
+class Calibrator:
+    sport: str
+    markets: Dict[str, MarketCalibrator]
+    min_samples: int = MIN_SAMPLES
+
+    def calibrate(self, p_raw: float, market_type: Optional[str] = None) -> float:
+        if p_raw is None or not np.isfinite(p_raw):
+            return float("nan")
+        p_raw = float(clamp(float(p_raw), 1e-6, 1 - 1e-6))
+        market_key = (market_type or "ML").upper()
+        market_cal = self.markets.get(market_key)
+        if market_cal is None or market_cal.status != "fit":
+            return p_raw
+        logit = np.log(p_raw / (1 - p_raw))
+        z = market_cal.a * logit + market_cal.b
+        return float(1.0 / (1.0 + np.exp(-z)))
+
+
+def _calibration_path(sport: str) -> str:
+    return os.path.join("results", "calibration", f"prob_cal_{sport}.json")
+
+
+def load_calibrator(sport: str) -> Optional[Calibrator]:
+    sport_key = str(sport).lower()
+    if sport_key in _CALIBRATOR_CACHE:
+        return _CALIBRATOR_CACHE[sport_key]
+
+    path = _calibration_path(sport_key)
+    if not os.path.exists(path):
+        return None
     try:
         with open(path, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        # If someone saved the per-bet-type dict here by mistake, try to use moneyline.
-        if isinstance(d, dict) and "A" in d and "B" in d:
-            return PlattCalibrator.from_dict(d)
-        if isinstance(d, dict) and "moneyline" in d and isinstance(d["moneyline"], dict):
-            return PlattCalibrator.from_dict(d["moneyline"])
-        return None
+            payload = json.load(f)
     except Exception:
         return None
 
+    markets: Dict[str, MarketCalibrator] = {}
+    for key, data in (payload.get("markets") or {}).items():
+        markets[key.upper()] = MarketCalibrator(
+            a=float(data.get("a", 1.0)),
+            b=float(data.get("b", 0.0)),
+            n_samples=int(data.get("n_samples", 0)),
+            status=str(data.get("status", "fallback")),
+        )
 
-def save(path: str, calibrator: Any) -> None:
-    """
-    Save a calibrator. Accepts:
-      - PlattCalibrator
-      - dict with A/B
-      - object with attributes A/B
-    """
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-    except Exception:
-        pass
-
-    out: Dict[str, float]
-    if isinstance(calibrator, PlattCalibrator):
-        out = calibrator.to_dict()
-    elif isinstance(calibrator, dict):
-        out = {"A": float(calibrator.get("A", 1.0)), "B": float(calibrator.get("B", 0.0))}
-    else:
-        out = {"A": float(getattr(calibrator, "A", 1.0)), "B": float(getattr(calibrator, "B", 0.0))}
-
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(out, f, indent=2)
-    except Exception:
-        pass
+    calibrator = Calibrator(
+        sport=payload.get("sport", sport_key),
+        markets=markets,
+        min_samples=int(payload.get("min_samples", MIN_SAMPLES)),
+    )
+    _CALIBRATOR_CACHE[sport_key] = calibrator
+    return calibrator
 
 
-def fit_platt(ps: np.ndarray, ys: np.ndarray, *, l2: float = 1e-3, max_iter: int = 500) -> PlattCalibrator:
-    """
-    Fit Platt scaling on (ps -> ys) using a tiny Newton method on logistic regression over logit(ps).
-    ps: predicted probabilities (0..1)
-    ys: outcomes (0/1)
-    """
-    p = np.clip(np.asarray(ps, dtype=float), 0.001, 0.999)
-    y = np.asarray(ys, dtype=float)
+def _fit_platt_scaling(x: np.ndarray, y: np.ndarray) -> Optional[MarketCalibrator]:
+    if x.size == 0:
+        return None
 
-    x = np.log(p / (1.0 - p))  # logit
+    a, b = 1.0, 0.0
+    reg = 1e-4
 
-    # Initialize A,B
-    A = 1.0
-    B = 0.0
+    for _ in range(50):
+        z = a * x + b
+        p = 1.0 / (1.0 + np.exp(-z))
+        w = p * (1.0 - p)
+        w = np.clip(w, 1e-6, None)
+        z_adj = z + (y - p) / w
 
-    for _ in range(int(max_iter)):
-        z = A * x + B
-        # sigmoid(z) stable enough for numpy if we clip
-        z_clip = np.clip(z, -35, 35)
-        mu = 1.0 / (1.0 + np.exp(-z_clip))
+        xw = x * w
+        sxx = float((xw * x).sum()) + reg
+        sx = float(xw.sum())
+        sw = float(w.sum()) + reg
+        szx = float((w * z_adj * x).sum())
+        sz = float((w * z_adj).sum())
 
-        # gradients
-        gA = np.sum((mu - y) * x) + l2 * A
-        gB = np.sum(mu - y)
-
-        # Hessian components
-        w = mu * (1.0 - mu)
-        hAA = np.sum(w * x * x) + l2
-        hAB = np.sum(w * x)
-        hBB = np.sum(w)
-
-        det = hAA * hBB - hAB * hAB
-        if det <= 1e-12:
+        det = sxx * sw - sx * sx
+        if abs(det) < 1e-12:
             break
 
-        # Newton step
-        dA = (hBB * gA - hAB * gB) / det
-        dB = (-hAB * gA + hAA * gB) / det
+        new_a = (szx * sw - sx * sz) / det
+        new_b = (sxx * sz - sx * szx) / det
 
-        A_new = A - dA
-        B_new = B - dB
-
-        # small convergence check
-        if abs(A_new - A) + abs(B_new - B) < 1e-8:
-            A, B = A_new, B_new
+        if abs(new_a - a) < 1e-6 and abs(new_b - b) < 1e-6:
+            a, b = new_a, new_b
             break
+        a, b = new_a, new_b
 
-        A, B = A_new, B_new
-
-    return PlattCalibrator(A=float(A), B=float(B))
-
-
-def calibrate_prob(ps: np.ndarray, ys: np.ndarray) -> Tuple[PlattCalibrator, str]:
-    """
-    Compatibility wrapper used by your NBA model.
-    Returns (calibrator, label).
-    """
-    cal = fit_platt(ps, ys)
-    return cal, "platt"
+    if not np.isfinite(a) or not np.isfinite(b):
+        return None
+    return MarketCalibrator(a=float(a), b=float(b), n_samples=int(x.size), status="fit")
 
 
-# Backward compatibility helper from your snippet
-def calibrate_probability(prob: float, sport: str, bet_type: str = "moneyline") -> float:
-    calibrator = ProbabilityCalibrator(sport)
-    return calibrator.calibrate(prob, bet_type)
+def fit_platt(p_raw: np.ndarray, y: np.ndarray) -> PlattCalibrator:
+    p_raw = np.asarray(p_raw, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(p_raw) & np.isfinite(y)
+    p_raw = np.clip(p_raw[mask], 1e-6, 1 - 1e-6)
+    y = y[mask]
+    x = np.log(p_raw / (1.0 - p_raw))
+    fitted = _fit_platt_scaling(x, y)
+    if fitted is None:
+        return PlattCalibrator(a=1.0, b=0.0)
+    return PlattCalibrator(a=fitted.a, b=fitted.b)
+
+
+def save(path: str, calibrator: PlattCalibrator) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(calibrator.to_dict(), f, indent=2)
+
+
+def load(path: str) -> Optional[PlattCalibrator]:
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return PlattCalibrator.from_dict(data)
+    except Exception:
+        return None
+
+
+def fit_calibrator(sport: str, rows_df: pd.DataFrame) -> Calibrator:
+    sport_key = str(sport).lower()
+    work = rows_df.copy()
+
+    if "sport" in work.columns:
+        work = work[work["sport"].astype(str).str.lower() == sport_key]
+
+    if work.empty:
+        calibrator = Calibrator(sport=sport_key, markets={}, min_samples=MIN_SAMPLES)
+        _CALIBRATOR_CACHE[sport_key] = calibrator
+        return calibrator
+
+    work = work.copy()
+    work["result_norm"] = work.get("result", "").apply(normalize_result_label)
+    work = work[work["result_norm"].isin(["WIN", "LOSS"])]
+
+    markets: Dict[str, MarketCalibrator] = {}
+    for market, sub in work.groupby(work.get("market_type", "")):
+        market_key = str(market).lower()
+        if market_key in {"moneyline", "ml"}:
+            market_key = "ML"
+        elif market_key in {"spread", "ats"}:
+            market_key = "ATS"
+        elif market_key in {"total", "totals"}:
+            market_key = "TOTAL"
+        else:
+            market_key = str(market).upper() or "UNKNOWN"
+
+        p_raw = pd.to_numeric(
+            sub.get("p_model_raw", sub.get("model_prob", sub.get("p_model_used"))),
+            errors="coerce",
+        ).astype(float)
+        y = (sub["result_norm"] == "WIN").astype(float).to_numpy()
+
+        mask = np.isfinite(p_raw.to_numpy())
+        p_raw = p_raw.to_numpy()[mask]
+        y = y[mask]
+
+        if p_raw.size < MIN_SAMPLES:
+            print(
+                f"[calibration] WARNING: {sport_key} {market_key} only {p_raw.size} samples; "
+                "skipping calibration"
+            )
+            markets[market_key] = MarketCalibrator(
+                a=1.0,
+                b=0.0,
+                n_samples=int(p_raw.size),
+                status="fallback",
+            )
+            continue
+
+        p_raw = np.clip(p_raw, 1e-6, 1 - 1e-6)
+        x = np.log(p_raw / (1.0 - p_raw))
+        fitted = _fit_platt_scaling(x, y)
+        if fitted is None:
+            markets[market_key] = MarketCalibrator(a=1.0, b=0.0, n_samples=int(p_raw.size), status="fallback")
+        else:
+            markets[market_key] = fitted
+
+    calibrator = Calibrator(sport=sport_key, markets=markets, min_samples=MIN_SAMPLES)
+    _CALIBRATOR_CACHE[sport_key] = calibrator
+
+    os.makedirs(os.path.join("results", "calibration"), exist_ok=True)
+    payload = {
+        "sport": sport_key,
+        "min_samples": MIN_SAMPLES,
+        "markets": {
+            key: {
+                "a": cal.a,
+                "b": cal.b,
+                "n_samples": cal.n_samples,
+                "status": cal.status,
+            }
+            for key, cal in markets.items()
+        },
+    }
+    with open(_calibration_path(sport_key), "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    return calibrator
+
+
+def calibrate_prob(
+    sport_or_probs: Union[str, np.ndarray, list],
+    p_raw_or_y: Optional[Union[float, np.ndarray, list]] = None,
+    market_type: Optional[str] = None,
+) -> Union[float, Tuple[PlattCalibrator, str]]:
+    if isinstance(sport_or_probs, str):
+        calibrator = load_calibrator(sport_or_probs)
+        if calibrator is None:
+            return float(p_raw_or_y) if p_raw_or_y is not None else float("nan")
+        return calibrator.calibrate(float(p_raw_or_y), market_type=market_type)
+
+    if p_raw_or_y is None:
+        return float("nan")
+
+    probs = np.asarray(sport_or_probs, dtype=float)
+    ys = np.asarray(p_raw_or_y, dtype=float)
+    calibrator = fit_platt(probs, ys)
+    return calibrator, "platt"
