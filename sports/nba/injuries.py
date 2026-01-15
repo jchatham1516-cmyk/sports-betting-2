@@ -298,6 +298,77 @@ def build_injury_list_for_team_nba(
     return out
 
 
+def build_injury_detail_list_for_team_nba(
+    team_name: str,
+    injuries_map: Dict[str, List[dict]],
+) -> List[dict]:
+    """
+    Returns detailed injury rows for totals adjustments:
+      {
+        "player": str,
+        "pos": str,
+        "status": str,
+        "comment": str,
+        "role": str,
+        "status_mult": float,
+        "impact": float,
+      }
+    """
+    if not injuries_map:
+        return []
+
+    team_key = canon_team(team_name)
+    rows = injuries_map.get(team_key)
+
+    if rows is None:
+        nick = team_key.split()[-1] if team_key else ""
+        for k, v in injuries_map.items():
+            if nick and nick in k:
+                rows = v
+                break
+
+    if not rows:
+        return []
+
+    out: List[dict] = []
+
+    for rr in rows:
+        name = (rr.get("player") or "").strip()
+        pos = (rr.get("pos") or "").strip()
+        status = (rr.get("status") or "").strip()
+        comment = (rr.get("comment") or "").strip()
+
+        if not name or not status:
+            continue
+
+        mult = _status_to_mult(status)
+        impact = _pos_to_impact(pos)
+
+        role = "rotation"
+        s = status.lower()
+        c = comment.lower()
+        if ("out" in s) or ("doubtful" in s) or ("starter" in c) or ("starting" in c):
+            role = "starter"
+
+        if "out for the season" in c or "season-ending" in c:
+            mult = max(mult, 1.0)
+            role = "starter"
+
+        out.append(
+            {
+                "player": name,
+                "pos": pos,
+                "status": status,
+                "comment": comment,
+                "role": role,
+                "status_mult": float(mult),
+                "impact": float(impact),
+            }
+        )
+
+    return out
+
+
 def injury_adjustment_points(home_injuries=None, away_injuries=None) -> float:
     """
     Positive means advantage HOME (away more hurt),

@@ -371,7 +371,8 @@ def add_recommendations_to_df(
         p_over = np.nan
         total_sd = _to_float(row.get("total_sd", np.nan))
         if np.isfinite(total_sd) and total_sd > 1e-6:
-            z = (_to_float(row.get("total_points")) - _to_float(row.get("model_total"))) / total_sd
+            model_total = _to_float(row.get("model_total_final", row.get("model_total")))
+            z = (_to_float(row.get("total_points")) - model_total) / total_sd
             p_over = 1.0 - _norm_cdf(z)
         else:
             side = str(row.get("total_pick_side", "")).upper().strip()

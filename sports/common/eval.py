@@ -455,7 +455,7 @@ def update_eval_history_with_scores(
 
     def _totals_outcome(row) -> Tuple[str, str]:
         try:
-            model_total = float(row.get("model_total"))
+            model_total = float(row.get("model_total_final", row.get("model_total")))
             closing_total = float(row.get("closing_total_points"))
             hs = float(row.get("home_score"))
             ascore = float(row.get("away_score"))
@@ -502,6 +502,7 @@ def update_eval_history_with_scores(
         "ats_pick",
         "ats_outcome",
         "model_total",
+        "model_total_final",
         "closing_total_points",
         "totals_pick",
         "totals_outcome",

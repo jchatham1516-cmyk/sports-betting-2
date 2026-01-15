@@ -43,6 +43,8 @@ TOTAL_SD_CEIL = float(os.getenv("NHL_TOTAL_SD_CEIL", "1.35"))
 TOTAL_MIN_EDGE_VS_BE = float(os.getenv("NHL_TOTAL_MIN_EDGE_VS_BE", "0.02"))
 TOTAL_MIN_GOALS_EDGE = float(os.getenv("NHL_TOTAL_MIN_GOALS_EDGE", "0.35"))
 TOTAL_LINE_BLEND = float(os.getenv("NHL_TOTAL_LINE_BLEND", "0.35"))
+MODEL_TOTAL_ANCHOR_W = float(os.getenv("NHL_MODEL_TOTAL_ANCHOR_W", "0.70"))
+TOTAL_SANITY_MAX_DIFF = float(os.getenv("NHL_TOTAL_SANITY_MAX_DIFF", "12.0"))
 
 # Recent scoring model
 PTS_LOOKBACK_DAYS = int(os.getenv("NHL_PTS_LOOKBACK_DAYS", "45"))
@@ -62,6 +64,15 @@ def _clamp(x: float, lo: float, hi: float) -> float:
         return float(max(lo, min(hi, float(x))))
     except Exception:
         return float("nan")
+
+
+def _anchor_model_total(model_total_raw: float, market_total: float, anchor_w: float) -> float:
+    if np.isnan(model_total_raw):
+        return float("nan")
+    if np.isnan(market_total):
+        return float(model_total_raw)
+    w = float(_clamp(anchor_w, 0.0, 1.0))
+    return float(w * market_total + (1.0 - w) * model_total_raw)
 
 
 def _safe_float(x, default=np.nan) -> float:
@@ -471,6 +482,10 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             f"model_total={_fmt_total(model_total)}"
         )
 
+        model_total_raw = float(model_total) if not np.isnan(model_total) else float("nan")
+        model_total_final = _anchor_model_total(model_total_raw, total_points, MODEL_TOTAL_ANCHOR_W)
+        anchored = not np.isnan(model_total_raw) and not np.isnan(total_points)
+
         sd = float("nan")
         if not np.isnan(home_sd) and not np.isnan(away_sd):
             sd = 0.5 * (home_sd + away_sd)
@@ -484,12 +499,25 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         sd = _clamp(sd, TOTAL_SD_FLOOR, TOTAL_SD_CEIL)
 
         total_side = "NONE"
-        total_edge_goals = float("nan")
+        total_pick = "NO BET"
+        total_edge_goals_raw = float("nan")
+        total_edge_goals_final = float("nan")
         total_edge_vs_be = float("nan")
         total_recommendation = "No total bet (missing total/model)"
+        total_flags: list[str] = ["TOTAL_ANCHORED"] if anchored else []
 
-        if not np.isnan(model_total) and not np.isnan(total_points) and sd > 0:
-            z = (model_total - total_points) / sd
+        if not np.isnan(model_total_raw) and not np.isnan(total_points):
+            total_edge_goals_raw = float(model_total_raw - total_points)
+        if not np.isnan(model_total_final) and not np.isnan(total_points):
+            total_edge_goals_final = float(model_total_final - total_points)
+
+        sanity_fail = False
+        if not np.isnan(model_total_raw) and not np.isnan(total_points):
+            if abs(float(model_total_raw - total_points)) > float(TOTAL_SANITY_MAX_DIFF):
+                sanity_fail = True
+
+        if not np.isnan(model_total_final) and not np.isnan(total_points) and sd > 0:
+            z = (model_total_final - total_points) / sd
             p_over = float(_clamp(_phi(z), 0.001, 0.999))
             p_under = 1.0 - p_over
             be_over = _breakeven_prob_from_american(over_price)
@@ -497,7 +525,6 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             edge_over = p_over - be_over
             edge_under = p_under - be_under
 
-            total_edge_goals = float(model_total - total_points)
             if edge_over >= edge_under:
                 total_side = "OVER"
                 total_edge_vs_be = float(edge_over)
@@ -505,10 +532,25 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 total_side = "UNDER"
                 total_edge_vs_be = float(edge_under)
 
-            if abs(total_edge_goals) >= TOTAL_MIN_GOALS_EDGE and total_edge_vs_be >= TOTAL_MIN_EDGE_VS_BE:
-                total_recommendation = f"Model PICK TOTAL: {total_side}"
-            else:
-                total_recommendation = "No total bet (edge too small)"
+        if sanity_fail:
+            total_flags.append("TOTAL_SANITY_FAIL_PASS")
+            total_recommendation = "No total bet (sanity fail)"
+        elif np.isnan(total_edge_goals_final):
+            total_flags.append("TOTAL_EDGE_TOO_SMALL")
+            total_recommendation = "No total bet (missing total/model)"
+        elif total_edge_goals_final >= TOTAL_MIN_GOALS_EDGE:
+            total_flags.append("TOTAL_EDGE_OK")
+            total_side = "OVER"
+            total_pick = "OVER"
+            total_recommendation = "Model PICK TOTAL: OVER"
+        elif total_edge_goals_final <= -TOTAL_MIN_GOALS_EDGE:
+            total_flags.append("TOTAL_EDGE_OK")
+            total_side = "UNDER"
+            total_pick = "UNDER"
+            total_recommendation = "Model PICK TOTAL: UNDER"
+        else:
+            total_flags.append("TOTAL_EDGE_TOO_SMALL")
+            total_recommendation = "No total bet (edge too small)"
 
         rows.append(
             {
@@ -525,11 +567,18 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "total_points": float(total_points) if not np.isnan(total_points) else np.nan,
                 "total_over_price": float(over_price),
                 "total_under_price": float(under_price),
-                "model_total": float(model_total) if not np.isnan(model_total) else np.nan,
-                "total_edge_goals": float(total_edge_goals) if not np.isnan(total_edge_goals) else np.nan,
+                "model_total_raw": float(model_total_raw) if not np.isnan(model_total_raw) else np.nan,
+                "model_total_final": float(model_total_final) if not np.isnan(model_total_final) else np.nan,
+                "market_total_used": float(total_points) if not np.isnan(total_points) else np.nan,
+                "model_total": float(model_total_final) if not np.isnan(model_total_final) else np.nan,
+                "total_edge_goals_raw": float(total_edge_goals_raw) if not np.isnan(total_edge_goals_raw) else np.nan,
+                "total_edge_goals_final": float(total_edge_goals_final) if not np.isnan(total_edge_goals_final) else np.nan,
+                "total_edge_goals": float(total_edge_goals_final) if not np.isnan(total_edge_goals_final) else np.nan,
                 "total_edge_vs_be": float(total_edge_vs_be) if not np.isnan(total_edge_vs_be) else np.nan,
                 "total_pick_side": total_side,
+                "total_pick": total_pick,
                 "total_recommendation": str(total_recommendation),
+                "total_decision_flags": ",".join(total_flags),
             }
         )
 
