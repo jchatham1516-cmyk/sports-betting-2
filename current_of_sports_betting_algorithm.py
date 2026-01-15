@@ -41,10 +41,10 @@ from sports.nfl.model import run_daily_nfl
 from sports.nhl.model import run_daily_nhl
 
 
-def _cap_to_top_plays(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
+def _cap_to_top_plays(df: pd.DataFrame, max_plays: int | None) -> pd.DataFrame:
     if df is None or df.empty:
         return df
-    if max_plays is None:
+    if max_plays is None or int(max_plays) <= 0:
         return df
     if "play_pass" not in df.columns:
         return df
@@ -53,10 +53,11 @@ def _cap_to_top_plays(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
     if plays.empty:
         return df
 
-    if "pick_score" in df.columns:
-        plays = plays.sort_values("pick_score", ascending=False)
-    elif "abs_edge_home" in df.columns:
-        plays = plays.assign(_score=plays["abs_edge_home"].astype(float))
+    if "edge_prob_cal" in df.columns:
+        plays = plays.assign(_score=plays["edge_prob_cal"].astype(float))
+        plays = plays.sort_values("_score", ascending=False)
+    elif "abs_edge_prob" in df.columns:
+        plays = plays.assign(_score=plays["abs_edge_prob"].astype(float))
         plays = plays.sort_values("_score", ascending=False)
 
     if len(plays) <= int(max_plays):
@@ -84,6 +85,17 @@ def _cap_to_top_plays(df: pd.DataFrame, max_plays: int) -> pd.DataFrame:
             if "decision_reason" in df.columns:
                 df.loc[i, "decision_reason"] = str(df.loc[i, "decision_reason"]) + " | filtered: top-N plays"
     return df
+
+
+def _top_n_default_for_sport(sport: str) -> int:
+    per_sport = os.getenv(f"TOP_N_{sport.upper()}")
+    if per_sport is not None:
+        return int(per_sport)
+    legacy = os.getenv("MAX_PLAYS_PER_SPORT_PER_DAY")
+    if legacy is not None:
+        return int(legacy)
+    defaults = {"nba": 5, "nhl": 2, "nfl": 2}
+    return int(defaults.get(sport, 3))
 
 
 def _maybe_load_results_csv(sport: str, game_date: str) -> pd.DataFrame:
@@ -128,7 +140,7 @@ def main(argv=None):
 
     parser.add_argument("--debug_decisions", action="store_true", help="Print decision traces for each game.")
 
-    parser.add_argument("--max_plays", type=int, default=int(os.getenv("MAX_PLAYS_PER_SPORT_PER_DAY", "3")))
+    parser.add_argument("--max_plays", type=int, default=None)
     parser.add_argument("--force_full_rebuild", action="store_true", help="Force full Elo backfill before daily run.")
 
     args = parser.parse_args(argv)
@@ -215,6 +227,7 @@ def main(argv=None):
         )
 
     play_max_abs_ml = None if int(args.play_max_abs_ml) == 0 else int(args.play_max_abs_ml)
+    max_plays = int(args.max_plays) if args.max_plays is not None else _top_n_default_for_sport(args.sport)
     unit_dollars = float(args.bankroll) * UNIT_PCT
 
     decision_settings = DecisionSettings(
@@ -295,7 +308,7 @@ def main(argv=None):
                 elif d.decision_flags:
                     print(format_decision_trace(r, d))
 
-        results_df = _cap_to_top_plays(results_df, int(args.max_plays))
+        results_df = _cap_to_top_plays(results_df, max_plays)
 
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
