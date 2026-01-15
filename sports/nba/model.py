@@ -25,11 +25,6 @@ from sports.nba.injuries import (
 )
 
 from sports.common.eval import build_game_key
-from sports.common.prob_calibration import (
-    load as load_platt,
-    save as save_platt,
-    calibrate_prob,
-)
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 from sports.common.calibration import load_nba_calibrator, update_and_save_nba_calibration
 
@@ -37,7 +32,6 @@ from sports.common.calibration import load_nba_calibrator, update_and_save_nba_c
 from sports.nba.bdl_client import bdl_get, season_start_year_for_date, get_bdl_api_key
 
 ELO_PATH = "results/elo_state_nba.json"
-PLATT_PATH = "results/prob_cal_nba.json"
 MARGIN_CAL_PATH = "results/margin_cal_nba.json"
 TOTAL_CAL_PATH = "results/total_cal_nba.json"
 UNCERTAINTY_PATH = "results/prob_uncertainty_nba.json"
@@ -649,8 +643,6 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
         if len(train_ps) >= CAL_MIN_GAMES:
             ps_arr = np.array(train_ps, dtype=float)
             ys_arr = np.array(train_ys, dtype=float)
-            cal, label = calibrate_prob(ps_arr, ys_arr)
-            save_platt(PLATT_PATH, cal)
 
             resid = ys_arr - ps_arr
             resid_var = float(np.var(resid))
@@ -666,11 +658,6 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 
 
 def _load_calibrators():
-    platt = None
-    try:
-        platt = load_platt(PLATT_PATH)
-    except Exception:
-        platt = None
     unc = None
     try:
         with open(UNCERTAINTY_PATH, "r", encoding="utf-8") as f:
@@ -682,7 +669,7 @@ def _load_calibrators():
         mcal = load_margin_cal(MARGIN_CAL_PATH)
     except Exception:
         mcal = None
-    return platt, unc, mcal
+    return unc, mcal
 
 
 def _load_total_calibration() -> tuple[float, float]:
@@ -714,7 +701,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
     except Exception as e:
         print(f"[nba] WARNING: Elo update failed ({e}); using backfill state")
         st = backfill_nba_elo_state()
-    platt, resid_var, margin_cal = _load_calibrators()
+    resid_var, margin_cal = _load_calibrators()
 
     form_adjs = _build_form_adjustments(stats_df) if stats_df is not None else {}
 
@@ -847,27 +834,13 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_home = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
 
-        if platt is not None:
-            try:
-                p_home = float(platt.predict(p_home))
-                p_home = float(_clamp(p_home, 0.01, 0.99))
-            except Exception:
-                pass
-
         resid_sd = float(math.sqrt(resid_var)) if resid_var is not None and not math.isnan(resid_var) else 0.06
         shrink = 1.0 + float(UNCERTAINTY_SHRINK) * float(_clamp(resid_sd, 0.0, 0.50))
         p_home = 0.5 + (p_home - 0.5) / shrink
 
-        BLEND_W = 0.65
-        p_home_blend = (
-            float(BLEND_W * p_home + (1.0 - BLEND_W) * mkt_home_p)
-            if not (np.isnan(p_home) or np.isnan(mkt_home_p))
-            else float(p_home)
-        )
-
-        edge_home = float(p_home_blend - mkt_home_p) if not (np.isnan(p_home_blend) or np.isnan(mkt_home_p)) else float("nan")
+        edge_home = float(p_home - mkt_home_p) if not (np.isnan(p_home) or np.isnan(mkt_home_p)) else float("nan")
         edge_away = float(-edge_home) if not np.isnan(edge_home) else float("nan")
-        ml_reco = _ml_recommendation(p_home_blend, mkt_home_p, min_edge=MIN_ML_EDGE)
+        ml_reco = _ml_recommendation(p_home, mkt_home_p, min_edge=MIN_ML_EDGE)
 
         elo_diff = (eh + HOME_ADV) - ea
         model_spread_home = float(-float(elo_diff) / 16.0)
@@ -1064,7 +1037,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "date": game_date_str,
                 "home": home,
                 "away": away,
-                "model_home_prob": float(p_home_blend),
+                "model_home_prob": float(p_home),
                 "model_home_prob_raw": float(p_home),
                 "market_home_imp": float(p_home_imp) if not np.isnan(p_home_imp) else np.nan,
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
