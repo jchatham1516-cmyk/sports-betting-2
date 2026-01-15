@@ -253,7 +253,7 @@ def _model_prob_for_total(row: pd.Series, primary_side: str) -> Optional[float]:
         return float(prob) if side == "OVER" else 1.0 - float(prob)
 
     total_sd = safe_float(row.get("total_sd"))
-    model_total = safe_float(row.get("model_total"))
+    model_total = safe_float(row.get("model_total_final", row.get("model_total")))
     total_points = safe_float(row.get("total_points"))
     if total_sd is None or model_total is None or total_points is None:
         return None
@@ -783,7 +783,26 @@ def add_betting_outputs(
     out["unit_dollars"] = [d.unit_dollars for d in decisions]
     out["units"] = [d.units for d in decisions]
     out["why_bet"] = [d.reason for d in decisions]
-    out["decision_flags"] = [d.decision_flags for d in decisions]
+    merged_flags: list[str] = []
+    for i, d in enumerate(decisions):
+        flags = [f for f in str(d.decision_flags or "").split(",") if f]
+        total_flags = str(out.loc[i, "total_decision_flags"] or "").strip()
+        total_flag_list = [f for f in total_flags.split(",") if f]
+
+        apply_total_flags = False
+        if str(out.loc[i, "primary_market"]).upper() == "TOTAL":
+            apply_total_flags = True
+        elif str(out.loc[i, "total_recommendation"]).startswith("Model PICK TOTAL") and d.play_pass == "PLAY":
+            apply_total_flags = True
+
+        if apply_total_flags:
+            for flag in total_flag_list:
+                if flag not in flags:
+                    flags.append(flag)
+
+        merged_flags.append(",".join(flags))
+
+    out["decision_flags"] = merged_flags
     out["decision_reason"] = [d.decision_reason for d in decisions]
     out["raw_units"] = [d.raw_units for d in decisions]
     out["final_units"] = [d.final_units for d in decisions]

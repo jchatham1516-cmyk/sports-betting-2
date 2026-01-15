@@ -18,6 +18,7 @@ from sports.common.scores_sources import fetch_recent_scores
 from sports.common.historical_totals import build_team_historical_total_lines
 from sports.nba.injuries import (
     build_injury_list_for_team_nba,
+    build_injury_detail_list_for_team_nba,
     injury_adjustment_points,
     _fetch_from_espn,
     _fetch_from_official_nba,
@@ -84,6 +85,16 @@ TOTAL_DEFAULT_PRICE = float(os.getenv("NBA_TOTAL_DEFAULT_PRICE", "-110.0"))
 TOTAL_DYNAMIC_VAR_MULT = float(os.getenv("NBA_TOTAL_DYNAMIC_VAR_MULT", "0.35"))
 TOTAL_PACE_HOME_W = float(os.getenv("NBA_TOTAL_PACE_HOME_W", "0.6"))
 TOTAL_PACE_AWAY_W = float(os.getenv("NBA_TOTAL_PACE_AWAY_W", "0.4"))
+MODEL_TOTAL_ANCHOR_W = float(os.getenv("NBA_MODEL_TOTAL_ANCHOR_W", "0.70"))
+MIN_TOTAL_EDGE_POINTS = float(os.getenv("NBA_MIN_TOTAL_EDGE_POINTS", "4.0"))
+TOTAL_SANITY_MAX_DIFF = float(os.getenv("NBA_TOTAL_SANITY_MAX_DIFF", "12.0"))
+TOTAL_RECENCY_GAMES = int(os.getenv("NBA_TOTAL_RECENCY_GAMES", "10"))
+W_LAST5 = float(os.getenv("NBA_W_LAST5", "0.50"))
+W_PREV5 = float(os.getenv("NBA_W_PREV5", "0.30"))
+W_SEASON = float(os.getenv("NBA_W_SEASON", "0.20"))
+PACE_FACTOR_MIN = float(os.getenv("NBA_PACE_FACTOR_MIN", "0.92"))
+PACE_FACTOR_MAX = float(os.getenv("NBA_PACE_FACTOR_MAX", "1.08"))
+TOTAL_INJ_ADJ_MAX = float(os.getenv("NBA_TOTAL_INJ_ADJ_MAX", "8.0"))
 
 # ATS (kept simple)
 ATS_SD_PTS = float(os.getenv("NBA_ATS_SD_PTS", "13.5"))
@@ -244,6 +255,150 @@ def _pace_proxy_from_total(exp_total: float, league_total: float) -> float:
         return float(_clamp(exp_total / league_total, 0.85, 1.20))
     except Exception:
         return 1.0
+
+
+def _anchor_model_total(model_total_raw: float, market_total: float, anchor_w: float) -> float:
+    if np.isnan(model_total_raw):
+        return float("nan")
+    if np.isnan(market_total):
+        return float(model_total_raw)
+    w = float(_clamp(anchor_w, 0.0, 1.0))
+    return float(w * market_total + (1.0 - w) * model_total_raw)
+
+
+def _recency_weighted_team_totals(
+    team_tbl: Optional[pd.DataFrame],
+    team: str,
+    *,
+    n_games: int,
+    w_last5: float,
+    w_prev5: float,
+    w_season: float,
+) -> dict:
+    if team_tbl is None or team_tbl.empty or not team:
+        return {"pts_for": float("nan"), "pts_against": float("nan"), "recent_total": float("nan"), "n": 0}
+
+    df = team_tbl[team_tbl["team"] == team].copy()
+    if df.empty:
+        return {"pts_for": float("nan"), "pts_against": float("nan"), "recent_total": float("nan"), "n": 0}
+
+    df = df.sort_values("date", ascending=False)
+    last_n = df.head(int(n_games))
+    last5 = last_n.head(5)
+    prev5 = last_n.iloc[5:10]
+
+    def _avg(series: pd.Series) -> float:
+        if series is None or series.empty:
+            return float("nan")
+        return float(series.mean())
+
+    last5_for = _avg(last5["pts_for"])
+    last5_against = _avg(last5["pts_against"])
+    prev5_for = _avg(prev5["pts_for"])
+    prev5_against = _avg(prev5["pts_against"])
+    season_for = _avg(df["pts_for"])
+    season_against = _avg(df["pts_against"])
+
+    weights = []
+    comps_for = []
+    comps_against = []
+
+    if not np.isnan(last5_for):
+        weights.append(float(w_last5))
+        comps_for.append(float(last5_for))
+        comps_against.append(float(last5_against))
+    if not np.isnan(prev5_for):
+        weights.append(float(w_prev5))
+        comps_for.append(float(prev5_for))
+        comps_against.append(float(prev5_against))
+    if not np.isnan(season_for):
+        weights.append(float(w_season))
+        comps_for.append(float(season_for))
+        comps_against.append(float(season_against))
+
+    if not weights or sum(weights) <= 0:
+        return {"pts_for": float("nan"), "pts_against": float("nan"), "recent_total": float("nan"), "n": int(len(last_n))}
+
+    w_sum = float(sum(weights))
+    weights = [w / w_sum for w in weights]
+
+    pts_for = float(sum(w * v for w, v in zip(weights, comps_for)))
+    pts_against = float(sum(w * v for w, v in zip(weights, comps_against)))
+
+    recent_total = float("nan")
+    if not last_n.empty:
+        recent_total = float((last_n["pts_for"] + last_n["pts_against"]).mean())
+
+    return {
+        "pts_for": pts_for,
+        "pts_against": pts_against,
+        "recent_total": recent_total,
+        "n": int(len(last_n)),
+    }
+
+
+def _injury_total_adjustment(inj_home: list[dict], inj_away: list[dict]) -> tuple[float, str]:
+    def _adj_for_row(row: dict) -> tuple[float, str]:
+        pos = str(row.get("pos", "")).upper()
+        role = str(row.get("role", "")).lower()
+        mult = float(row.get("status_mult", 0.0))
+        impact = float(row.get("impact", 0.0))
+        base = float(mult * impact)
+        if base <= 0:
+            return 0.0, ""
+
+        is_guard = pos in {"PG", "SG", "G", "G-F", "F-G"}
+        is_wing = pos in {"SF", "SG", "SF-PF", "F"}
+        is_big = pos in {"PF", "C", "PF-C"}
+
+        if is_guard and role == "starter":
+            pts = -float(_clamp(1.2 * base, 1.0, 3.0))
+            return pts, f"ball-handler:{pts:+.1f}"
+        if (is_guard or is_wing) and role == "starter":
+            pts = -float(_clamp(1.6 * base, 2.0, 6.0))
+            return pts, f"scorer:{pts:+.1f}"
+        if is_big and role == "starter":
+            pts = float(_clamp(1.2 * base, 1.0, 4.0))
+            return pts, f"rim-protector:{pts:+.1f}"
+
+        pts = -float(_clamp(0.8 * base, 0.5, 2.0))
+        return pts, f"rotation:{pts:+.1f}"
+
+    total_adj = 0.0
+    reasons: list[str] = []
+    for row in (inj_home or []) + (inj_away or []):
+        adj, reason = _adj_for_row(row or {})
+        if adj != 0 and reason:
+            total_adj += adj
+            reasons.append(reason)
+
+    total_adj = float(_clamp(total_adj, -TOTAL_INJ_ADJ_MAX, TOTAL_INJ_ADJ_MAX))
+    reason_text = ";".join(reasons[:4]) if reasons else ""
+    return total_adj, reason_text
+
+
+def _total_pick_from_edge(
+    edge_points: float,
+    *,
+    min_edge: float,
+    sanity_fail: bool,
+    anchored: bool,
+) -> tuple[str, str, list[str]]:
+    flags: list[str] = ["TOTAL_ANCHORED"] if anchored else []
+    if sanity_fail:
+        flags.append("TOTAL_SANITY_FAIL_PASS")
+        return "NONE", "No total bet (sanity fail)", flags
+    if np.isnan(edge_points):
+        flags.append("TOTAL_EDGE_TOO_SMALL")
+        return "NONE", "No total bet (missing total/model)", flags
+    if edge_points >= float(min_edge):
+        flags.append("TOTAL_EDGE_OK")
+        return "OVER", "Model PICK TOTAL: OVER", flags
+    if edge_points <= -float(min_edge):
+        flags.append("TOTAL_EDGE_OK")
+        return "UNDER", "Model PICK TOTAL: UNDER", flags
+    flags.append("TOTAL_EDGE_TOO_SMALL")
+    return "NONE", "No total bet (edge too small)", flags
 
 
 def _exp_weighted_team_stats(team: str, team_tbl: pd.DataFrame, as_of: date) -> tuple[float, float, float, float, int]:
@@ -671,10 +826,17 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         inj_list_home = build_injury_list_for_team_nba(home, injury_data)
         inj_list_away = build_injury_list_for_team_nba(away, injury_data)
+        inj_detail_home = build_injury_detail_list_for_team_nba(home, injury_data)
+        inj_detail_away = build_injury_detail_list_for_team_nba(away, injury_data)
         inj_pts_home = _clamp(injury_adjustment_points(inj_list_home), -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS) * INJ_DAMP
         inj_pts_away = _clamp(injury_adjustment_points(inj_list_away), -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS) * INJ_DAMP
         inj_elo_home = float(inj_pts_home) * float(ELO_PER_POINT)
         inj_elo_away = float(inj_pts_away) * float(ELO_PER_POINT)
+
+        inj_total_adj, inj_total_reason = _injury_total_adjustment(inj_detail_home, inj_detail_away)
+        if injury_source in {"NONE", "UNKNOWN"}:
+            inj_total_adj = 0.0
+            inj_total_reason = "INJURY_UNKNOWN"
 
         form_home = float(form_adjs.get(home, 0.0))
         form_away = float(form_adjs.get(away, 0.0))
@@ -724,19 +886,58 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         league_anchor = league_avg_total if not np.isnan(league_avg_total) else (2.0 * league_pts if not np.isnan(league_pts) else 224.0)
 
+        recent_home = _recency_weighted_team_totals(
+            team_tbl,
+            home,
+            n_games=TOTAL_RECENCY_GAMES,
+            w_last5=W_LAST5,
+            w_prev5=W_PREV5,
+            w_season=W_SEASON,
+        )
+        recent_away = _recency_weighted_team_totals(
+            team_tbl,
+            away,
+            n_games=TOTAL_RECENCY_GAMES,
+            w_last5=W_LAST5,
+            w_prev5=W_PREV5,
+            w_season=W_SEASON,
+        )
+
+        home_pts_for = recent_home.get("pts_for", float("nan"))
+        home_pts_allowed = recent_home.get("pts_against", float("nan"))
+        away_pts_for = recent_away.get("pts_for", float("nan"))
+        away_pts_allowed = recent_away.get("pts_against", float("nan"))
+
+        home_exp = np.nanmean([home_pts_for, away_pts_allowed])
+        away_exp = np.nanmean([away_pts_for, home_pts_allowed])
+
         weighted_team_offense = np.nanmean([h_off, a_off])
         weighted_opponent_defense = np.nanmean([h_def, a_def])
+        fallback_base_total = weighted_team_offense + weighted_opponent_defense
 
-        pace_home = h_pace_home if not np.isnan(h_pace_home) else 1.0
-        pace_away = a_pace_away if not np.isnan(a_pace_away) else 1.0
-        pace_adjustment = league_anchor * (TOTAL_PACE_HOME_W * (pace_home - 1.0) + TOTAL_PACE_AWAY_W * (pace_away - 1.0))
+        base_total = home_exp + away_exp if not (np.isnan(home_exp) or np.isnan(away_exp)) else fallback_base_total
+        if np.isnan(base_total) and not np.isnan(league_anchor):
+            base_total = float(league_anchor)
 
-        inj_total_adj = _clamp(inj_pts_home + inj_pts_away, -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
+        model_total_raw = float(base_total + inj_total_adj)
 
-        base_total = weighted_team_offense + weighted_opponent_defense
-        model_total = base_total + pace_adjustment + inj_total_adj
+        pace_factor = float("nan")
+        pace_reason = "pace=neutral (missing data)"
+        if not np.isnan(league_anchor) and league_anchor > 0:
+            home_recent_total = recent_home.get("recent_total", float("nan"))
+            away_recent_total = recent_away.get("recent_total", float("nan"))
+            if not (np.isnan(home_recent_total) or np.isnan(away_recent_total)):
+                pace_factor = (home_recent_total + away_recent_total) / float(league_anchor)
+                pace_factor = float(_clamp(pace_factor, PACE_FACTOR_MIN, PACE_FACTOR_MAX))
+                pace_reason = "pace=recent_totals_vs_league"
+            else:
+                pace_factor = 1.0
+        if np.isnan(pace_factor):
+            pace_factor = 1.0
 
-        pace_proxy = _pace_proxy_from_total(model_total, league_anchor) if not np.isnan(league_anchor) else 1.0
+        model_total_raw = float(model_total_raw * pace_factor)
+
+        pace_proxy = _pace_proxy_from_total(model_total_raw, league_anchor) if not np.isnan(league_anchor) else 1.0
         margin_sd = float(MARGIN_SD_BASE) * float(_clamp(0.92 + 0.20 * pace_proxy, 0.85, 1.15))
 
         win_prob_home = _mix_norm_win_prob(mu_margin_home, margin_sd)
@@ -761,20 +962,20 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         if not np.isnan(hist_base):
             w = float(_clamp(TOTAL_LINE_BLEND, 0.20, 0.60))
-            model_total = float((1.0 - w) * model_total + w * hist_base)
+            model_total_raw = float((1.0 - w) * model_total_raw + w * hist_base)
 
         league_anchor_total = league_anchor
         if np.isnan(league_anchor_total) and not np.isnan(league_pts):
             league_anchor_total = float(2.0 * league_pts)
 
-        if not np.isnan(model_total) and not np.isnan(league_anchor_total):
-            model_total = float((1.0 - TOTAL_REGRESS_WEIGHT) * model_total + TOTAL_REGRESS_WEIGHT * league_anchor_total)
+        if not np.isnan(model_total_raw) and not np.isnan(league_anchor_total):
+            model_total_raw = float((1.0 - TOTAL_REGRESS_WEIGHT) * model_total_raw + TOTAL_REGRESS_WEIGHT * league_anchor_total)
 
-        if not np.isnan(model_total):
-            model_total = float(total_cal_a + total_cal_b * model_total)
+        if not np.isnan(model_total_raw):
+            model_total_raw = float(total_cal_a + total_cal_b * model_total_raw)
 
-        if not np.isnan(model_total) and not np.isnan(total_points):
-            total_calibration_samples.append((model_total, total_points))
+        if not np.isnan(model_total_raw) and not np.isnan(total_points):
+            total_calibration_samples.append((model_total_raw, total_points))
 
         sd = float("nan")
         if not np.isnan(h_sd) and not np.isnan(a_sd):
@@ -788,16 +989,32 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         sd = float(_clamp(sd, TOTAL_SD_FLOOR, TOTAL_SD_CEIL))
 
-        total_ci95_low, total_ci95_high = _normal_ci(model_total, sd, z=1.96)
-        total_ci80_low, total_ci80_high = _normal_ci(model_total, sd, z=1.2816)
+        model_total_final = _anchor_model_total(model_total_raw, total_points, MODEL_TOTAL_ANCHOR_W)
+        anchored = not np.isnan(total_points) and not np.isnan(model_total_raw)
+
+        total_ci95_low, total_ci95_high = _normal_ci(model_total_final, sd, z=1.96)
+        total_ci80_low, total_ci80_high = _normal_ci(model_total_final, sd, z=1.2816)
 
         total_pick_side = "NONE"
-        total_edge_points = float("nan")
+        total_pick = "NO BET"
+        total_edge_points_raw = float("nan")
+        total_edge_points_final = float("nan")
         total_edge_vs_be = float("nan")
         total_reco = "No total bet (missing total/model)"
+        total_flags: list[str] = []
 
-        if not np.isnan(model_total) and not np.isnan(total_points) and sd > 0:
-            z = (model_total - total_points) / sd
+        if not np.isnan(model_total_raw) and not np.isnan(total_points):
+            total_edge_points_raw = float(model_total_raw - total_points)
+        if not np.isnan(model_total_final) and not np.isnan(total_points):
+            total_edge_points_final = float(model_total_final - total_points)
+
+        sanity_fail = False
+        if not np.isnan(model_total_raw) and not np.isnan(total_points):
+            if abs(float(model_total_raw - total_points)) > float(TOTAL_SANITY_MAX_DIFF):
+                sanity_fail = True
+
+        if not np.isnan(model_total_final) and not np.isnan(total_points) and sd > 0:
+            z = (model_total_final - total_points) / sd
             p_over = float(_clamp(_phi(z), 0.001, 0.999))
             p_under = 1.0 - p_over
 
@@ -811,7 +1028,6 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             edge_over = p_over - be_over
             edge_under = p_under - be_under
 
-            total_edge_points = float(model_total - total_points)
             if edge_over >= edge_under:
                 total_pick_side = "OVER"
                 total_edge_vs_be = float(edge_over)
@@ -819,11 +1035,16 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 total_pick_side = "UNDER"
                 total_edge_vs_be = float(edge_under)
 
-            dynamic_pts_thresh = TOTAL_MIN_PTS_EDGE + TOTAL_DYNAMIC_VAR_MULT * (sd / 10.0)
-            if abs(total_edge_points) >= dynamic_pts_thresh and total_edge_vs_be >= TOTAL_MIN_EDGE_VS_BE:
-                total_reco = f"Model PICK TOTAL: {total_pick_side}"
-            else:
-                total_reco = "No total bet (edge too small)"
+        total_pick_side, total_reco, total_flags = _total_pick_from_edge(
+            total_edge_points_final,
+            min_edge=MIN_TOTAL_EDGE_POINTS,
+            sanity_fail=sanity_fail,
+            anchored=anchored,
+        )
+
+        if total_pick_side in {"OVER", "UNDER"}:
+            total_pick = total_pick_side
+        total_reco = total_reco
 
         home_spread = _safe_float((oi or {}).get("home_spread"))
         spread_price = _safe_float((oi or {}).get("spread_price"), default=ATS_DEFAULT_PRICE)
@@ -871,19 +1092,30 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "spread_price": float(spread_price) if not np.isnan(spread_price) else np.nan,
                 "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
                 "p_home_cover": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
+                "pace_factor": float(pace_factor) if not np.isnan(pace_factor) else np.nan,
+                "pace_reason": str(pace_reason),
+                "inj_total_adj": float(inj_total_adj),
+                "inj_total_reason": str(inj_total_reason),
                 "total_points": float(total_points) if not np.isnan(total_points) else np.nan,
                 "total_over_price": float(total_over_price),
                 "total_under_price": float(total_under_price),
-                "model_total": float(model_total),
+                "model_total_raw": float(model_total_raw) if not np.isnan(model_total_raw) else np.nan,
+                "model_total_final": float(model_total_final) if not np.isnan(model_total_final) else np.nan,
+                "market_total_used": float(total_points) if not np.isnan(total_points) else np.nan,
+                "model_total": float(model_total_final) if not np.isnan(model_total_final) else np.nan,
                 "total_sd": float(sd) if not np.isnan(sd) else np.nan,
                 "total_ci95_low": float(total_ci95_low),
                 "total_ci95_high": float(total_ci95_high),
                 "total_ci80_low": float(total_ci80_low),
                 "total_ci80_high": float(total_ci80_high),
-                "total_edge_points": float(total_edge_points) if not np.isnan(total_edge_points) else np.nan,
+                "total_edge_points_raw": float(total_edge_points_raw) if not np.isnan(total_edge_points_raw) else np.nan,
+                "total_edge_points_final": float(total_edge_points_final) if not np.isnan(total_edge_points_final) else np.nan,
+                "total_edge_points": float(total_edge_points_final) if not np.isnan(total_edge_points_final) else np.nan,
                 "total_edge_vs_be": float(total_edge_vs_be) if not np.isnan(total_edge_vs_be) else np.nan,
                 "total_pick_side": str(total_pick_side),
+                "total_pick": str(total_pick),
                 "total_recommendation": str(total_reco),
+                "total_decision_flags": ",".join(total_flags),
                 "hist_total_home_avg": float(h_avg) if not np.isnan(h_avg) else np.nan,
                 "hist_total_away_avg": float(a_avg) if not np.isnan(a_avg) else np.nan,
                 "hist_total_home_n": int(h_n),
