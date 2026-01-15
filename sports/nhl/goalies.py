@@ -26,7 +26,13 @@ class GoalieInfo:
     source: str  # dailyfaceoff/puckpedia/...
 
 
-def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 20, max_retries: int = 3) -> str:
+def _get_with_retry(
+    url: str,
+    *,
+    params: Optional[dict] = None,
+    timeout: int = 20,
+    max_retries: int = 3,
+) -> tuple[str, int]:
     last_exc: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -34,13 +40,14 @@ def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 2
                 url,
                 params=params,
                 timeout=timeout,
-                headers={"User-Agent": USER_AGENT},
+                headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
             )
             if resp.status_code >= 500:
                 raise RuntimeError(f"server error {resp.status_code}")
             if resp.status_code != 200:
+                print(f"[nhl goalies] WARNING: status={resp.status_code} html_len={len(resp.text or '')} url={url}")
                 raise RuntimeError(f"unexpected status {resp.status_code}")
-            return resp.text
+            return resp.text, resp.status_code
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:
@@ -164,11 +171,12 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
 
     for _, url, parser in providers:
         try:
-            html = _get_with_retry(url)
+            html, status = _get_with_retry(url)
             parsed = parser(html)
             if parsed:
                 _write_cached_goalies(cache_path, parsed)
                 return parsed
+            print(f"[nhl goalies] WARNING: empty parse status={status} html_len={len(html or '')} url={url}")
         except Exception as exc:
             print(f"[nhl goalies] WARNING: failed to fetch {url}: {exc}")
 
