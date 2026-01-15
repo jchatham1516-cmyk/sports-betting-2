@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import math
 from typing import Dict, List, Optional, Tuple
 
@@ -660,6 +661,11 @@ def decide_bet_from_row(
     ) = primary_metrics_for_row(row, sport=sport, settings=settings)
 
     config = get_sport_bet_config(sport)
+    min_edge_cal = float(config.min_edge_cal)
+    if str(sport).lower() == "nhl":
+        goalie_status = str(row.get("goalie_status", "UNKNOWN")).upper().strip()
+        if goalie_status == "UNKNOWN":
+            min_edge_cal = max(min_edge_cal, float(os.getenv("NHL_MIN_EDGE_CAL_UNKNOWN", "0.05")))
 
     if data_reason or not np.isfinite(p_model_cal) or not np.isfinite(p_market):
         flags.append("MISSING_DATA_PASS")
@@ -682,15 +688,15 @@ def decide_bet_from_row(
             edge_prob_final,
         )
 
-    if edge_prob_final < float(config.min_edge_cal):
+    if edge_prob_final < float(min_edge_cal):
         return DecisionOutcome(
             "PASS",
             0.0,
             float(unit_dollars),
             0.0,
-            f"PASS: edge_final<{config.min_edge_cal:.3f}",
+            f"PASS: edge_final<{min_edge_cal:.3f}",
             "LOW_EDGE_PASS",
-            f"edge_cal<{config.min_edge_cal:.3f}",
+            f"edge_cal<{min_edge_cal:.3f}",
             0.0,
             0.0,
             p_model_raw,

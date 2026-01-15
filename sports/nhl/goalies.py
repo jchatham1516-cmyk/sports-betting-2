@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import dataclass
+from typing import Dict, Optional
+
+import requests
+from bs4 import BeautifulSoup
+
+from sports.common.teams import canon_team
+
+
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+GOALIE_CACHE_DIR = "results/cache"
+DAILY_FACEOFF_URL = "https://www.dailyfaceoff.com/starting-goalies"
+PUCKPEDIA_URL = "https://www.puckpedia.com/lineups"
+
+
+@dataclass
+class GoalieInfo:
+    team: str
+    goalie_name: Optional[str]
+    status: str  # CONFIRMED/PROJECTED/UNKNOWN
+    source: str  # dailyfaceoff/puckpedia/...
+
+
+def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 20, max_retries: int = 3) -> str:
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(
+                url,
+                params=params,
+                timeout=timeout,
+                headers={"User-Agent": USER_AGENT},
+            )
+            if resp.status_code >= 500:
+                raise RuntimeError(f"server error {resp.status_code}")
+            if resp.status_code != 200:
+                raise RuntimeError(f"unexpected status {resp.status_code}")
+            return resp.text
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                time.sleep(2)
+    raise RuntimeError(f"failed to fetch {url}") from last_exc
+
+
+def _normalize_status(text: str) -> str:
+    text = (text or "").strip().upper()
+    if "CONF" in text:
+        return "CONFIRMED"
+    if "PROJ" in text:
+        return "PROJECTED"
+    return "UNKNOWN"
+
+
+def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
+    soup = BeautifulSoup(html, "html.parser")
+    results: Dict[str, GoalieInfo] = {}
+
+    for row in soup.select("table tr"):
+        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+        if len(cells) < 2:
+            continue
+        team_raw = cells[0]
+        goalie_raw = cells[1]
+        status_raw = cells[2] if len(cells) > 2 else ""
+
+        team = canon_team(team_raw)
+        if not team:
+            continue
+        goalie_name = goalie_raw.strip() if goalie_raw.strip() else None
+        status = _normalize_status(status_raw)
+        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="dailyfaceoff")
+
+    if results:
+        return results
+
+    for card in soup.select(".starting-goalies__goalie"):
+        team_node = card.select_one(".starting-goalies__team-name")
+        goalie_node = card.select_one(".starting-goalies__goalie-name")
+        status_node = card.select_one(".starting-goalies__status")
+        team = canon_team(team_node.get_text(" ", strip=True) if team_node else "")
+        if not team:
+            continue
+        goalie_name = goalie_node.get_text(" ", strip=True) if goalie_node else None
+        status = _normalize_status(status_node.get_text(" ", strip=True) if status_node else "")
+        results[team] = GoalieInfo(team=team, goalie_name=goalie_name or None, status=status, source="dailyfaceoff")
+
+    return results
+
+
+def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
+    soup = BeautifulSoup(html, "html.parser")
+    results: Dict[str, GoalieInfo] = {}
+
+    for row in soup.select("table tr"):
+        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+        if len(cells) < 2:
+            continue
+        team_raw = cells[0]
+        goalie_raw = cells[1]
+        status_raw = cells[2] if len(cells) > 2 else ""
+        team = canon_team(team_raw)
+        if not team:
+            continue
+        goalie_name = goalie_raw.strip() if goalie_raw.strip() else None
+        status = _normalize_status(status_raw)
+        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
+
+    return results
+
+
+def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
+    if not os.path.exists(cache_path):
+        return {}
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            payload = json.load(f) or {}
+        results = {}
+        for team, info in (payload.get("goalies") or {}).items():
+            if not isinstance(info, dict):
+                continue
+            results[team] = GoalieInfo(
+                team=team,
+                goalie_name=info.get("goalie_name"),
+                status=info.get("status") or "UNKNOWN",
+                source=info.get("source") or "cache",
+            )
+        return results
+    except Exception:
+        return {}
+
+
+def _write_cached_goalies(cache_path: str, goalies: Dict[str, GoalieInfo]) -> None:
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    payload = {
+        "goalies": {
+            team: {
+                "goalie_name": info.goalie_name,
+                "status": info.status,
+                "source": info.source,
+            }
+            for team, info in goalies.items()
+        }
+    }
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
+
+def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
+    cache_path = os.path.join(GOALIE_CACHE_DIR, f"nhl_goalies_{date}.json")
+    cached = _load_cached_goalies(cache_path)
+    if cached:
+        return cached
+
+    providers = [
+        ("dailyfaceoff", DAILY_FACEOFF_URL, _parse_daily_faceoff),
+        ("puckpedia", PUCKPEDIA_URL, _parse_puckpedia),
+    ]
+
+    for _, url, parser in providers:
+        try:
+            html = _get_with_retry(url)
+            parsed = parser(html)
+            if parsed:
+                _write_cached_goalies(cache_path, parsed)
+                return parsed
+        except Exception as exc:
+            print(f"[nhl goalies] WARNING: failed to fetch {url}: {exc}")
+
+    _write_cached_goalies(cache_path, {})
+    return {}
