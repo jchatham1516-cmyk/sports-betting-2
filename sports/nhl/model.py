@@ -424,11 +424,11 @@ def _goalie_status_weight(status: str) -> float:
     return 0.35
 
 
-def _goalie_game_status(home_status: str, away_status: str) -> str:
-    if home_status == "CONFIRMED" and away_status == "CONFIRMED":
-        return "CONFIRMED"
-    if home_status == "PROJECTED" or away_status == "PROJECTED":
-        return "PROJECTED"
+def _goalie_game_status(home_name: str, away_name: str) -> str:
+    if home_name and away_name:
+        return "OK"
+    if home_name or away_name:
+        return "PARTIAL"
     return "UNKNOWN"
 
 
@@ -443,7 +443,7 @@ def _compute_goalie_adjustment(
     goalie_home_rating = NHL_LEAGUE_AVG_GOALIE_RATING
     goalie_away_rating = NHL_LEAGUE_AVG_GOALIE_RATING
     goalie_adj = 0.0
-    goalie_status = _goalie_game_status(goalie_home_status, goalie_away_status)
+    goalie_status = _goalie_game_status(goalie_home_name, goalie_away_name)
     goalie_reason = "goalie_status_unknown"
 
     home_found = False
@@ -565,7 +565,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     except Exception:
         pass
 
-    debug_goalies = os.getenv("NHL_GOALIES_DEBUG") == "1"
+    debug_goalies = os.getenv("NHL_DEBUG_GOALIES") == "1"
     try:
         goalies_map = get_starting_goalies(date_key)
     except Exception as exc:
@@ -578,7 +578,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     def _get_goalie(team_canon: str, team_raw: str) -> tuple[GoalieInfo, list[str]]:
         keys_tried: list[str] = []
         seen: set[str] = set()
-        for k in [team_canon, team_raw, canon_team(team_raw), canon_team(team_canon)]:
+        for k in [team_canon, canon_team(team_raw), (team_raw or "").strip(), canon_team(team_canon)]:
             if not k or k in seen:
                 continue
             seen.add(k)
@@ -611,6 +611,10 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         goalie_away_name = goalie_away_info.goalie_name or ""
         goalie_home_status = goalie_home_info.status or "UNKNOWN"
         goalie_away_status = goalie_away_info.status or "UNKNOWN"
+        if not goalie_home_name:
+            goalie_home_status = "UNKNOWN"
+        if not goalie_away_name:
+            goalie_away_status = "UNKNOWN"
 
         (
             goalie_adj,
@@ -627,7 +631,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         )
         if debug_goalies:
             print(
-                "[nhl goalies] game "
+                "[nhl goalies] matchup "
                 f"{away} @ {home} home_goalie={goalie_home_name} ({goalie_home_status}) "
                 f"away_goalie={goalie_away_name} ({goalie_away_status}) "
                 f"home_rating={goalie_home_rating:.3f} away_rating={goalie_away_rating:.3f} adj={goalie_adj:.4f}"
@@ -825,7 +829,30 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                     raise RuntimeError(msg)
                 print(f"[NHL WARNING] {msg}")
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if os.getenv("NHL_GOALIE_REGRESSION_TEST") == "1":
+        _run_goalie_regression_check(df)
+    return df
+
+
+def _run_goalie_regression_check(df: pd.DataFrame) -> None:
+    if df is None or df.empty:
+        return
+    home_names = df.get("goalie_home_name")
+    away_names = df.get("goalie_away_name")
+    if home_names is None or away_names is None:
+        return
+    home_found = home_names.fillna("").astype(str).str.strip().ne("")
+    away_found = away_names.fillna("").astype(str).str.strip().ne("")
+    any_goalie_found = bool((home_found | away_found).any())
+    if not any_goalie_found:
+        return
+    goalie_adj = df.get("goalie_adj")
+    if goalie_adj is None:
+        raise RuntimeError("goalie_adj column missing during regression check")
+    any_non_zero = bool(goalie_adj.fillna(0.0).astype(float).ne(0.0).any())
+    if not any_non_zero:
+        raise RuntimeError("goalie_adj was zero for all games despite goalie names present")
 
 
 def run_daily_probs_for_date(
