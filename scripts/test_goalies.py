@@ -37,6 +37,8 @@ def main() -> None:
         "[test_goalies] model output "
         f"home={row.get('home_team')} away={row.get('away_team')} "
         f"goalie_home_name={row.get('goalie_home_name')} goalie_away_name={row.get('goalie_away_name')} "
+        f"goalie_home_rating={row.get('goalie_home_rating')} "
+        f"goalie_away_rating={row.get('goalie_away_rating')} "
         f"goalie_adj={row.get('goalie_adj')}")
 
     non_zero = df["goalie_adj"].abs().gt(0).any()

@@ -135,20 +135,20 @@ def _goalie_lookup_for_season(season: str) -> dict[str, dict]:
     return lookup
 
 
-def get_goalie_rating(goalie_name: str, season: str) -> float:
+def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, bool]:
     if not goalie_name:
-        return 0.0
+        return (0.0, False)
 
     lookup = _goalie_lookup_for_season(season)
     if not lookup:
-        return 0.0
+        return (0.0, False)
 
     name_norm = normalize_goalie_name(goalie_name)
     best = lookup.get(name_norm)
     if best is None:
         if os.getenv("NHL_GOALIES_DEBUG") == "1":
             print(f"[goalie_rating] missing rating for: {goalie_name} season={season}")
-        return 0.0
+        return (0.0, False)
 
     sv_pct = best.get("savePct")
     games = best.get("gamesPlayed", 0)
@@ -156,13 +156,18 @@ def get_goalie_rating(goalie_name: str, season: str) -> float:
         sv_pct = float(sv_pct)
         games = int(games)
     except Exception:
-        return 0.0
+        return (0.0, False)
 
     league_avg = DEFAULT_LEAGUE_AVG_SV
     rating = (sv_pct - league_avg) * 1000.0
     rating = max(-30.0, min(30.0, rating))
     if games < 5:
         rating *= 0.5
+    return (float(rating), True)
+
+
+def get_goalie_rating(goalie_name: str, season: str) -> float:
+    rating, _ = get_goalie_rating_with_meta(goalie_name, season)
     return float(rating)
 
 
