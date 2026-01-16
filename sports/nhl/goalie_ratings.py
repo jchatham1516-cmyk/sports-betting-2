@@ -99,8 +99,7 @@ def _fetch_goalie_stats(season: str) -> dict:
         payload = _get_with_retry(NHL_STATS_BASE, params=params)
     except Exception as exc:
         print(f"[nhl goalie ratings] WARNING: stats fetch failed: {exc}")
-        _write_cached_stats(cache_path, {})
-        return {}
+        return cached or {}
 
     _write_cached_stats(cache_path, payload)
     return payload
@@ -178,15 +177,33 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
     if not goalie_name:
         return (0.0, False)
 
+    debug = os.getenv("NHL_GOALIES_DEBUG") == "1"
+    if debug:
+        sample_names = getattr(get_goalie_rating_with_meta, "_debug_sample", [])
+        if len(sample_names) >= 5:
+            sample_names = sample_names[-4:]
+        sample_names = sample_names + [goalie_name]
+        setattr(get_goalie_rating_with_meta, "_debug_sample", sample_names)
+
     lookup = _goalie_lookup_for_season(season)
     if not lookup:
+        if debug:
+            sample_names = getattr(get_goalie_rating_with_meta, "_debug_sample", [])
+            print(
+                "[goalie_rating] "
+                f"season={season} sample_names={sample_names} lookup_success=False"
+            )
         return (0.0, False)
 
     name_norm = normalize_goalie_name(goalie_name)
     best = lookup.get(name_norm)
     if best is None:
-        if os.getenv("NHL_GOALIES_DEBUG") == "1":
-            print(f"[goalie_rating] missing rating for: {goalie_name} season={season}")
+        if debug:
+            sample_names = getattr(get_goalie_rating_with_meta, "_debug_sample", [])
+            print(
+                "[goalie_rating] "
+                f"season={season} sample_names={sample_names} lookup_success=False missing={goalie_name}"
+            )
         return (0.0, False)
 
     sv_pct = best.get("savePct")
@@ -203,6 +220,12 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
     if games < 5:
         rating *= 0.5
     strength = (rating - league_avg_rating) / league_std_rating
+    if debug:
+        sample_names = getattr(get_goalie_rating_with_meta, "_debug_sample", [])
+        print(
+            "[goalie_rating] "
+            f"season={season} sample_names={sample_names} lookup_success=True goalie={goalie_name}"
+        )
     return (float(strength), True)
 
 

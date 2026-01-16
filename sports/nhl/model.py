@@ -558,20 +558,20 @@ def _compute_goalie_adjustment(
             goalie_strength_diff = goalie_rating_diff
             weight = float(_clamp(NHL_GOALIE_WEIGHT, 0.0, 1.0))
             raw_shift = float(goalie_strength_diff * weight)
-            scaled_shift = float(raw_shift * conf_w)
-            goalie_prob_shift = scaled_shift
-            goalie_adj = float(_clamp(scaled_shift, -max_adj, max_adj))
+            goalie_prob_shift = raw_shift
+            goalie_adj = float(_clamp(raw_shift, -max_adj, max_adj))
             goalie_reason = "goalie_rating_applied"
         else:
             penalty = float(max(0.0, NHL_GOALIE_UNKNOWN_PENALTY))
             if home_found and not away_found:
-                scaled_penalty = float(penalty * conf_w)
-                goalie_adj = float(_clamp(scaled_penalty, -max_adj, max_adj))
+                goalie_adj = float(_clamp(penalty, -max_adj, max_adj))
             elif away_found and not home_found:
-                scaled_penalty = float(penalty * conf_w)
-                goalie_adj = float(_clamp(-scaled_penalty, -max_adj, max_adj))
+                goalie_adj = float(_clamp(-penalty, -max_adj, max_adj))
             goalie_prob_shift = goalie_adj
             goalie_reason = "goalie_rating_fallback"
+        if conf_w < 1.0:
+            goalie_adj = float(_clamp(goalie_adj * conf_w, -max_adj, max_adj))
+        goalie_prob_shift = goalie_adj
         return (
             goalie_adj,
             goalie_home_rating,
@@ -589,11 +589,11 @@ def _compute_goalie_adjustment(
     max_adj = float(max(0.0, NHL_GOALIE_MAX_PROB_SHIFT))
     penalty = float(max(0.0, NHL_GOALIE_UNKNOWN_PENALTY))
     if goalie_home_name and not goalie_away_name:
-        scaled_penalty = float(penalty * conf_w)
-        goalie_adj = float(_clamp(scaled_penalty, -max_adj, max_adj))
+        goalie_adj = float(_clamp(penalty, -max_adj, max_adj))
     elif goalie_away_name and not goalie_home_name:
-        scaled_penalty = float(penalty * conf_w)
-        goalie_adj = float(_clamp(-scaled_penalty, -max_adj, max_adj))
+        goalie_adj = float(_clamp(-penalty, -max_adj, max_adj))
+    if conf_w < 1.0:
+        goalie_adj = float(_clamp(goalie_adj * conf_w, -max_adj, max_adj))
     goalie_prob_shift = goalie_adj
     goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
     return (
@@ -1036,10 +1036,28 @@ def _run_goalie_regression_check(df: pd.DataFrame) -> None:
     away_names = df.get("goalie_away_name")
     if home_names is None or away_names is None:
         return
-    home_found = home_names.fillna("").astype(str).str.strip().ne("")
-    away_found = away_names.fillna("").astype(str).str.strip().ne("")
-    any_goalie_found = bool((home_found | away_found).any())
-    if not any_goalie_found:
+    home_present = home_names.fillna("").astype(str).str.strip().ne("")
+    away_present = away_names.fillna("").astype(str).str.strip().ne("")
+    any_goalie_present = bool((home_present | away_present).any())
+    if not any_goalie_present:
+        return
+    home_found = df.get("goalie_home_found")
+    away_found = df.get("goalie_away_found")
+    goalie_reason = df.get("goalie_reason")
+    found_any = False
+    if home_found is not None and away_found is not None:
+        try:
+            found_any = bool((home_found.fillna(False).astype(bool) | away_found.fillna(False).astype(bool)).any())
+        except Exception:
+            found_any = False
+    applied_any = False
+    if goalie_reason is not None:
+        applied_any = bool(goalie_reason.fillna("").astype(str).eq("goalie_rating_applied").any())
+    if not found_any and not applied_any:
+        print(
+            "[NHL WARNING] goalie regression check skipped: goalie names present but no ratings found; "
+            "external goalie data likely missing."
+        )
         return
     goalie_adj = df.get("goalie_adj")
     if goalie_adj is None:

@@ -598,8 +598,6 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
             print(f"[nhl goalies] WARNING: failed to fetch puckpedia: {exc}")
 
     providers = [("dailyfaceoff", DAILY_FACEOFF_URL, _parse_daily_faceoff)]
-    for date_key in date_keys:
-        providers.insert(0, ("dailyfaceoff", f"{DAILY_FACEOFF_URL}/{date_key}", _parse_daily_faceoff))
     for name, url, parser in providers:
         try:
             html, status = _get_with_retry(url, headers={"Accept": "text/html"})
@@ -648,4 +646,5 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     fallback = _load_most_recent_cached_goalies()
     if fallback:
         return fallback
-    raise RuntimeError(last_error or "No goalie providers returned data")
+    print(f"[nhl goalies] WARNING: {last_error or 'No goalie providers returned data'}; returning empty goalies.")
+    return {}
