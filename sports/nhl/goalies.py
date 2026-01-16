@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -82,14 +81,6 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
 
-    def _extract_json_candidates(text: str) -> list[str]:
-        candidates: list[str] = []
-        for match in re.finditer(r"(?s)(\{.*?\}|\[.*?\])", text):
-            snippet = match.group(1)
-            if snippet:
-                candidates.append(snippet)
-        return candidates
-
     def _add_row(team_raw: str, goalie_raw: str, status_raw: str) -> None:
         team = canon_team(team_raw)
         if not team:
@@ -108,98 +99,44 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
             return False
         return all(word[0].isupper() for word in words if word)
 
-    def _find_team_in_text(text: str) -> Optional[str]:
-        tokens = [t.strip(",/") for t in text.split()]
-        for size in range(4, 0, -1):
-            for i in range(0, len(tokens) - size + 1):
-                candidate = " ".join(tokens[i : i + size])
-                team = canon_team(candidate)
-                if team:
-                    return team
+    def _extract_team_name(value: object) -> Optional[str]:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in ("teamName", "name", "fullName", "team", "teamAbbrev", "abbrev"):
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    return candidate
         return None
 
     def _extract_goalies_from_json(data: object) -> None:
         if isinstance(data, dict):
-            team_candidate = None
-            goalie_candidate = None
-            status_candidate = None
-            for key, value in data.items():
-                if isinstance(value, str):
-                    if key.lower() in {"team", "teamname", "team_name", "teamfullname", "team_full_name"}:
-                        team_candidate = value
-                    elif key.lower() in {
-                        "goalie",
-                        "goaliename",
-                        "goalie_name",
-                        "goaliefullname",
-                        "goalie_full_name",
-                        "player",
-                        "playername",
-                        "player_name",
-                        "name",
-                    }:
-                        goalie_candidate = value
-                    elif key.lower() in {"status", "goaliestatus", "confirmationstatus", "state"}:
-                        status_candidate = value
-                elif isinstance(value, dict):
-                    nested_team = value.get("name") or value.get("fullName") or value.get("shortName")
-                    if isinstance(nested_team, str):
-                        team_candidate = team_candidate or nested_team
-                    nested_goalie = value.get("name") or value.get("fullName")
-                    if isinstance(nested_goalie, str):
-                        goalie_candidate = goalie_candidate or nested_goalie
-                elif isinstance(value, list):
-                    pass
-            if team_candidate and goalie_candidate and _looks_like_player_name(goalie_candidate):
-                _add_row(team_candidate, goalie_candidate, status_candidate or "")
-            for key, value in data.items():
-                if isinstance(key, str) and isinstance(value, dict):
-                    team_from_key = canon_team(key)
-                    if team_from_key:
-                        goalie_name = value.get("goalieName") or value.get("goalie") or value.get("name")
-                        status_raw = value.get("status") or value.get("goalieStatus") or value.get("state")
-                        if isinstance(goalie_name, str) and _looks_like_player_name(goalie_name):
-                            _add_row(team_from_key, goalie_name, status_raw or "")
+            team_value = data.get("teamName") or data.get("team") or data.get("teamAbbrev")
+            goalie_value = data.get("goalieName") or data.get("name")
+            status_value = data.get("status")
+            team_name = _extract_team_name(team_value)
+            goalie_name = goalie_value if isinstance(goalie_value, str) else None
+            status_raw = status_value if isinstance(status_value, str) else ""
+            if team_name and goalie_name and _looks_like_player_name(goalie_name):
+                _add_row(team_name, goalie_name, status_raw)
+            for value in data.values():
                 if isinstance(value, (dict, list)):
                     _extract_goalies_from_json(value)
         elif isinstance(data, list):
             for item in data:
                 _extract_goalies_from_json(item)
 
-    for script in soup.find_all("script"):
-        script_text = script.string or script.get_text(" ", strip=True)
-        if not script_text:
-            continue
-        if not re.search(r"(startinggoalies|goalies)", script_text, re.IGNORECASE):
-            continue
-        for snippet in _extract_json_candidates(script_text):
-            try:
-                parsed = json.loads(snippet)
-            except json.JSONDecodeError:
-                continue
-            _extract_goalies_from_json(parsed)
-        if results:
-            return results
-
-    blocks = soup.find_all(["div", "li", "tr", "section", "article", "p"])
-    for block in blocks:
-        block_text = block.get_text(" ", strip=True)
-        if not block_text:
-            continue
-        team = _find_team_in_text(block_text)
-        if not team:
-            continue
-        goalie_match = re.search(
-            r"\b[A-Z][a-zA-Z'’.-]+ [A-Z][a-zA-Z'’.-]+(?: [A-Z][a-zA-Z'’.-]+)?\b",
-            block_text,
-        )
-        if not goalie_match:
-            continue
-        goalie_name = goalie_match.group(0)
-        if not _looks_like_player_name(goalie_name):
-            continue
-        status = _normalize_status(block_text)
-        _add_row(team, goalie_name, status)
+    next_data = soup.find("script", id="__NEXT_DATA__")
+    if not next_data:
+        return results
+    script_text = next_data.string or next_data.get_text(" ", strip=True)
+    if not script_text:
+        return results
+    try:
+        parsed = json.loads(script_text)
+    except json.JSONDecodeError:
+        return results
+    _extract_goalies_from_json(parsed)
 
     return results
 
