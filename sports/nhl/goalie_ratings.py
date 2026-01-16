@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
+import unicodedata
 from datetime import date, datetime
 from typing import Optional
 
@@ -13,6 +15,7 @@ STATS_CACHE_DIR = "results/cache"
 NHL_STATS_BASE = "https://api.nhle.com/stats/rest/en/goalie"
 NHL_STATS_LIMIT = 300
 DEFAULT_LEAGUE_AVG_SV = 0.903
+_GOALIE_LOOKUP_CACHE: dict[str, dict[str, dict]] = {}
 
 
 def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 20, max_retries: int = 3) -> dict:
@@ -37,8 +40,27 @@ def _season_for_date(dt: date) -> str:
     return str(dt.year - 1 if dt.month < 7 else dt.year)
 
 
+def normalize_goalie_name(name: str) -> str:
+    if not name:
+        return ""
+    cleaned = unicodedata.normalize("NFKD", str(name))
+    cleaned = cleaned.encode("ascii", "ignore").decode("ascii")
+    cleaned = cleaned.replace(".", " ").replace("-", " ").replace("’", "'")
+    cleaned = re.sub(r"\(.*?\)", " ", cleaned)
+    cleaned = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.replace(",", " , ")
+    cleaned = re.sub(r"[^\w\s,']", " ", cleaned)
+    cleaned = " ".join(cleaned.strip().split())
+    if "," in cleaned:
+        last, first = [p.strip() for p in cleaned.split(",", 1)]
+        if first and last:
+            cleaned = f"{first} {last}"
+    tokens = [t for t in cleaned.lower().split() if len(t) > 1]
+    return " ".join(tokens)
+
+
 def _normalize_name(name: str) -> str:
-    return " ".join((name or "").strip().lower().split())
+    return normalize_goalie_name(name)
 
 
 def _load_cached_stats(cache_path: str) -> dict:
@@ -83,24 +105,49 @@ def _fetch_goalie_stats(season: str) -> dict:
     return payload
 
 
+def _goalie_lookup_for_season(season: str) -> dict[str, dict]:
+    cached = _GOALIE_LOOKUP_CACHE.get(season)
+    if cached is not None:
+        return cached
+    payload = _fetch_goalie_stats(season)
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    lookup: dict[str, dict] = {}
+    for row in data:
+        row_name = row.get("goalieFullName") or row.get("playerName") or ""
+        name_norm = normalize_goalie_name(row_name)
+        if not name_norm:
+            continue
+        current = lookup.get(name_norm)
+        try:
+            games = int(row.get("gamesPlayed") or 0)
+        except Exception:
+            games = 0
+        if current is None:
+            lookup[name_norm] = row
+            continue
+        try:
+            current_games = int(current.get("gamesPlayed") or 0)
+        except Exception:
+            current_games = 0
+        if games > current_games:
+            lookup[name_norm] = row
+    _GOALIE_LOOKUP_CACHE[season] = lookup
+    return lookup
+
+
 def get_goalie_rating(goalie_name: str, season: str) -> float:
     if not goalie_name:
         return 0.0
 
-    payload = _fetch_goalie_stats(season)
-    data = payload.get("data", []) if isinstance(payload, dict) else []
-    if not data:
+    lookup = _goalie_lookup_for_season(season)
+    if not lookup:
         return 0.0
 
-    name_norm = _normalize_name(goalie_name)
-    best = None
-    for row in data:
-        row_name = _normalize_name(row.get("goalieFullName") or row.get("playerName") or "")
-        if row_name == name_norm:
-            best = row
-            break
-
+    name_norm = normalize_goalie_name(goalie_name)
+    best = lookup.get(name_norm)
     if best is None:
+        if os.getenv("NHL_GOALIES_DEBUG") == "1":
+            print(f"[goalie_rating] missing rating for: {goalie_name} season={season}")
         return 0.0
 
     sv_pct = best.get("savePct")

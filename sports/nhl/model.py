@@ -60,6 +60,7 @@ TOTAL_MODEL_MAX = float(os.getenv("NHL_TOTAL_MODEL_MAX", "8.5"))
 
 STRICT_SANITY = os.getenv("NHL_STRICT_SANITY", "0") == "1"
 GOALIE_PROB_PER_RATING = float(os.getenv("NHL_GOALIE_PROB_PER_RATING", "0.0020"))
+NHL_LEAGUE_AVG_GOALIE_RATING = float(os.getenv("NHL_LEAGUE_AVG_GOALIE_RATING", "0.0"))
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -412,6 +413,14 @@ def _goalie_adjustment(home_rating: float, away_rating: float) -> float:
     return float(rating_diff * GOALIE_PROB_PER_RATING)
 
 
+def _goalie_status_weight(status: str) -> float:
+    if status == "CONFIRMED":
+        return 1.0
+    if status == "PROJECTED":
+        return 0.6
+    return 0.35
+
+
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     st = update_elo_from_recent_scores(days_from=120)
 
@@ -543,21 +552,32 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         goalie_home_rating = 0.0
         goalie_away_rating = 0.0
         goalie_adj = 0.0
-        if goalie_home_name and goalie_away_name:
+        if goalie_home_name:
             goalie_home_rating = float(get_goalie_rating(goalie_home_name, season_label))
+        if goalie_away_name:
             goalie_away_rating = float(get_goalie_rating(goalie_away_name, season_label))
+
+        if goalie_home_name and goalie_away_name:
             raw_adj = _goalie_adjustment(goalie_home_rating, goalie_away_rating)
+            weight = min(_goalie_status_weight(goalie_home_status), _goalie_status_weight(goalie_away_status))
             if goalie_home_status == "CONFIRMED" and goalie_away_status == "CONFIRMED":
-                weight = 1.0
                 goalie_status = "CONFIRMED"
             elif goalie_home_status == "PROJECTED" or goalie_away_status == "PROJECTED":
-                weight = 0.6
                 goalie_status = "PROJECTED"
             else:
-                weight = 0.35
                 goalie_status = "UNKNOWN"
             goalie_adj = float(_clamp(raw_adj * weight, -0.06, 0.06))
             goalie_reason = "goalie_rating_applied"
+        elif goalie_home_name or goalie_away_name:
+            if goalie_home_name:
+                raw_adj = _goalie_adjustment(goalie_home_rating, NHL_LEAGUE_AVG_GOALIE_RATING)
+                goalie_status = goalie_home_status or "UNKNOWN"
+            else:
+                raw_adj = _goalie_adjustment(NHL_LEAGUE_AVG_GOALIE_RATING, goalie_away_rating)
+                goalie_status = goalie_away_status or "UNKNOWN"
+            weight = 0.5 * _goalie_status_weight(goalie_status)
+            goalie_adj = float(_clamp(raw_adj * weight, -0.06, 0.06))
+            goalie_reason = "goalie_partial"
         else:
             goalie_adj = 0.0
             goalie_reason = "goalie_missing"
