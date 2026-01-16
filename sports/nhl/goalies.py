@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import time
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import brotli
 import requests
 from bs4 import BeautifulSoup
 
@@ -40,10 +42,9 @@ def _get_with_retry(
     req_headers = {
         "User-Agent": USER_AGENT,
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.dailyfaceoff.com/",
-        "Accept": "text/html",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
     if headers:
         req_headers.update(headers)
@@ -54,13 +55,38 @@ def _get_with_retry(
                 params=params,
                 timeout=timeout,
                 headers=req_headers,
+                stream=True,
             )
             if resp.status_code >= 500:
                 raise RuntimeError(f"server error {resp.status_code}")
             if resp.status_code != 200:
                 print(f"[nhl goalies] WARNING: status={resp.status_code} html_len={len(resp.text or '')} url={url}")
                 raise RuntimeError(f"unexpected status {resp.status_code}")
-            return resp.text, resp.status_code
+            raw = resp.content
+            try:
+                html = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                html = raw.decode("latin-1", errors="ignore")
+
+            decompressed: Optional[bytes] = None
+            if raw.startswith(b"\x1f\x8b"):
+                try:
+                    decompressed = gzip.decompress(raw)
+                except OSError:
+                    decompressed = None
+            else:
+                try:
+                    decompressed = brotli.decompress(raw)
+                except brotli.error:
+                    decompressed = None
+
+            if decompressed:
+                try:
+                    html = decompressed.decode("utf-8")
+                except UnicodeDecodeError:
+                    html = decompressed.decode("latin-1", errors="ignore")
+
+            return html, resp.status_code
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:
