@@ -27,6 +27,7 @@ class GoalieInfo:
     goalie_name: Optional[str]
     status: str  # CONFIRMED/PROJECTED/UNKNOWN
     source: str  # dailyfaceoff/puckpedia/...
+    original_team: Optional[str] = None
 
 
 def _get_with_retry(
@@ -256,6 +257,20 @@ def fetch_goalies_puckpedia(day_count: int = 1) -> Dict[str, GoalieInfo]:
     return parsed
 
 
+def _canonicalize_goalies_map(goalies: Dict[str, GoalieInfo]) -> Dict[str, GoalieInfo]:
+    canon_results: Dict[str, GoalieInfo] = {}
+    for team_key, info in goalies.items():
+        team_canon = canon_team(team_key)
+        if not team_canon:
+            continue
+        original_team = info.team
+        if info.original_team is None and original_team and original_team != team_canon:
+            info.original_team = original_team
+        info.team = team_canon
+        canon_results[team_canon] = info
+    return canon_results
+
+
 def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
     if not os.path.exists(cache_path):
         return {}
@@ -266,11 +281,16 @@ def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
         for team, info in (payload.get("goalies") or {}).items():
             if not isinstance(info, dict):
                 continue
-            results[team] = GoalieInfo(
-                team=team,
+            stored_team = info.get("team") or team
+            team_canon = canon_team(stored_team)
+            if not team_canon:
+                continue
+            results[team_canon] = GoalieInfo(
+                team=team_canon,
                 goalie_name=info.get("goalie_name"),
                 status=info.get("status") or "UNKNOWN",
                 source=info.get("source") or "cache",
+                original_team=info.get("team_raw") or (stored_team if stored_team != team_canon else None),
             )
         return results
     except Exception:
@@ -307,9 +327,11 @@ def _write_cached_goalies(
         "fetched_at_iso": datetime.now(timezone.utc).isoformat(),
         "goalies": {
             team: {
+                "team": info.team,
                 "goalie_name": info.goalie_name,
                 "status": info.status,
                 "source": info.source,
+                **({"team_raw": info.original_team} if info.original_team else {}),
             }
             for team, info in goalies.items()
         }
@@ -338,6 +360,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
 
     try:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
+        parsed = _canonicalize_goalies_map(parsed)
         parsed_count = len(parsed)
         if parsed_count >= 5:
             _write_cached_goalies(
@@ -384,6 +407,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
             if debug:
                 print(f"[nhl goalies] debug provider={name} url={url} status={status} html_len={len(html or '')}")
             parsed = parser(html)
+            parsed = _canonicalize_goalies_map(parsed)
             if debug:
                 _debug_parse_details(name, url, status, html, parsed)
             if parsed:
