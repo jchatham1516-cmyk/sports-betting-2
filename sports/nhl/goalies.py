@@ -82,6 +82,14 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
 
+    def _extract_json_candidates(text: str) -> list[str]:
+        candidates: list[str] = []
+        for match in re.finditer(r"(?s)(\{.*?\}|\[.*?\])", text):
+            snippet = match.group(1)
+            if snippet:
+                candidates.append(snippet)
+        return candidates
+
     def _add_row(team_raw: str, goalie_raw: str, status_raw: str) -> None:
         team = canon_team(team_raw)
         if not team:
@@ -158,16 +166,15 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
             for item in data:
                 _extract_goalies_from_json(item)
 
-    decoder = json.JSONDecoder()
     for script in soup.find_all("script"):
         script_text = script.string or script.get_text(" ", strip=True)
         if not script_text:
             continue
-        if not re.search(r"(startingGoalies|StartingGoalies|goalie)", script_text):
+        if not re.search(r"(startinggoalies|goalies)", script_text, re.IGNORECASE):
             continue
-        for match in re.finditer(r"[\{\[]", script_text):
+        for snippet in _extract_json_candidates(script_text):
             try:
-                parsed, _ = decoder.raw_decode(script_text[match.start() :])
+                parsed = json.loads(snippet)
             except json.JSONDecodeError:
                 continue
             _extract_goalies_from_json(parsed)
