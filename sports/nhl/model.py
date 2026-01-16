@@ -432,6 +432,17 @@ def _goalie_game_status(home_name: str, away_name: str) -> str:
     return "UNKNOWN"
 
 
+def _sanitize_goalie_name(name: Optional[str]) -> str:
+    if not name:
+        return ""
+    cleaned = " ".join(str(name).strip().split())
+    if not cleaned:
+        return ""
+    if cleaned.upper() in {"TBD", "UNKNOWN", "TBA", "N/A"}:
+        return ""
+    return cleaned
+
+
 def _compute_goalie_adjustment(
     *,
     goalie_home_name: str,
@@ -607,8 +618,8 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         goalie_home_info, goalie_home_keys = _get_goalie(home, home_in)
         goalie_away_info, goalie_away_keys = _get_goalie(away, away_in)
 
-        goalie_home_name = goalie_home_info.goalie_name or ""
-        goalie_away_name = goalie_away_info.goalie_name or ""
+        goalie_home_name = _sanitize_goalie_name(goalie_home_info.goalie_name)
+        goalie_away_name = _sanitize_goalie_name(goalie_away_info.goalie_name)
         goalie_home_status = goalie_home_info.status or "UNKNOWN"
         goalie_away_status = goalie_away_info.status or "UNKNOWN"
         if not goalie_home_name:
@@ -634,6 +645,8 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "[nhl goalies] matchup "
                 f"{away} @ {home} home_goalie={goalie_home_name} ({goalie_home_status}) "
                 f"away_goalie={goalie_away_name} ({goalie_away_status}) "
+                f"home_source={goalie_home_info.source or 'unknown'} "
+                f"away_source={goalie_away_info.source or 'unknown'} "
                 f"home_rating={goalie_home_rating:.3f} away_rating={goalie_away_rating:.3f} adj={goalie_adj:.4f}"
             )
 

@@ -16,7 +16,7 @@ from sports.common.teams import canon_team
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 GOALIE_CACHE_DIR = "results/cache"
-CACHE_TTL_SECONDS = 2 * 60 * 60
+DEFAULT_CACHE_TTL_MINUTES = 120
 DAILY_FACEOFF_URL = "https://www.dailyfaceoff.com/starting-goalies"
 PUCKPEDIA_URL = "https://depth-charts.puckpedia.com/starting-goalies"
 PUCKPEDIA_PARAMS = {"dayCount": 1, "utm_medium": "embed", "utm_source": "puckpedia", "ads": "true"}
@@ -114,9 +114,17 @@ def _normalize_goalie_name(name: Optional[str]) -> Optional[str]:
     cleaned = " ".join(str(name).strip().split())
     if not cleaned:
         return None
-    if cleaned.upper() in {"TBD", "UNKNOWN", "TBA"}:
+    if cleaned.upper() in {"TBD", "UNKNOWN", "TBA", "N/A"}:
         return None
     return cleaned
+
+
+def _cache_ttl_seconds() -> int:
+    try:
+        ttl_min = int(float(os.getenv("NHL_GOALIE_CACHE_TTL_MIN", str(DEFAULT_CACHE_TTL_MINUTES))))
+    except Exception:
+        ttl_min = DEFAULT_CACHE_TTL_MINUTES
+    return max(0, ttl_min) * 60
 
 
 def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
@@ -144,40 +152,58 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
 
     next_data = soup.find("script", {"id": "__NEXT_DATA__"})
     if not next_data:
-        return {}
-    script_text = next_data.string or next_data.get_text()
-    if not script_text:
-        return {}
-    try:
-        parsed = json.loads(script_text)
-    except json.JSONDecodeError:
-        return {}
+        next_data = None
+    script_text = (next_data.string or next_data.get_text()) if next_data else None
+    if script_text:
+        try:
+            parsed = json.loads(script_text)
+        except json.JSONDecodeError:
+            parsed = None
+    else:
+        parsed = None
 
     team_keys = ("teamName", "team", "teamAbbrev", "abbrev", "shortName")
     goalie_keys = ("goalieName", "goalie", "starter", "startingGoalie", "goalieFullName")
     fallback_team_keys = ("teamName", "team", "teamAbbrev", "abbrev", "shortName", "name")
     fallback_goalie_keys = ("goalieName", "goalie", "starter", "startingGoalie", "goalieFullName", "name")
 
-    for node in _walk(parsed):
-        if not isinstance(node, dict):
+    if parsed:
+        for node in _walk(parsed):
+            if not isinstance(node, dict):
+                continue
+            team_key = next((key for key in team_keys if key in node), None)
+            goalie_key = next((key for key in goalie_keys if key in node), None)
+            if not team_key or not goalie_key:
+                continue
+            team_raw = _coerce_string(node.get(team_key), fallback_keys=fallback_team_keys)
+            goalie_raw = _coerce_string(node.get(goalie_key), fallback_keys=fallback_goalie_keys)
+            goalie_name = _normalize_goalie_name(goalie_raw)
+            if not goalie_name:
+                continue
+            if len(goalie_name.split()) < 2:
+                continue
+            team = canon_team(team_raw or "") if team_raw else None
+            if not team and team_raw:
+                team = team_raw.strip()
+            if not team:
+                continue
+            results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status="UNKNOWN", source="dailyfaceoff")
+
+    if results:
+        return results
+
+    for card in soup.select(".starting-goalies__goalie-card"):
+        team_raw = card.select_one(".starting-goalies__team-name")
+        goalie_raw = card.select_one(".starting-goalies__goalie-name")
+        status_raw = card.select_one(".starting-goalies__status")
+        goalie_name = _normalize_goalie_name(goalie_raw.get_text(" ", strip=True) if goalie_raw else "")
+        if not goalie_name or len(goalie_name.split()) < 2:
             continue
-        team_key = next((key for key in team_keys if key in node), None)
-        goalie_key = next((key for key in goalie_keys if key in node), None)
-        if not team_key or not goalie_key:
-            continue
-        team_raw = _coerce_string(node.get(team_key), fallback_keys=fallback_team_keys)
-        goalie_raw = _coerce_string(node.get(goalie_key), fallback_keys=fallback_goalie_keys)
-        goalie_name = _normalize_goalie_name(goalie_raw)
-        if not goalie_name:
-            continue
-        if len(goalie_name.split()) < 2:
-            continue
-        team = canon_team(team_raw or "") if team_raw else None
-        if not team and team_raw:
-            team = team_raw.strip()
+        team = canon_team(team_raw.get_text(" ", strip=True) if team_raw else "")
         if not team:
             continue
-        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status="UNKNOWN", source="dailyfaceoff")
+        status = _normalize_status(status_raw.get_text(" ", strip=True) if status_raw else "")
+        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="dailyfaceoff")
 
     return results
 
@@ -187,6 +213,29 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
     results: Dict[str, GoalieInfo] = {}
     tables = soup.find_all("table")
     if not tables:
+        for card in soup.select(".goalie-card"):
+            team_raw = (
+                card.get("data-team")
+                or card.get("data-team-name")
+                or (card.select_one(".team-name").get_text(" ", strip=True) if card.select_one(".team-name") else "")
+            )
+            goalie_raw = card.select_one(".goalie-name")
+            status_raw = card.select_one(".status")
+            goalie_name = _normalize_goalie_name(goalie_raw.get_text(" ", strip=True) if goalie_raw else "")
+            if not goalie_name or len(goalie_name.split()) < 2:
+                continue
+            team = canon_team(team_raw)
+            if not team:
+                continue
+            status = _normalize_status(status_raw.get_text(" ", strip=True) if status_raw else "")
+            original_team = team_raw if team_raw and team_raw != team else None
+            results[team] = GoalieInfo(
+                team=team,
+                goalie_name=goalie_name,
+                status=status,
+                source="puckpedia",
+                original_team=original_team,
+            )
         return results
 
     def _row_count(table) -> int:
@@ -287,7 +336,7 @@ def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
             try:
                 fetched_dt = datetime.fromisoformat(str(fetched_at))
                 age_seconds = (datetime.now(timezone.utc) - fetched_dt).total_seconds()
-                if age_seconds > CACHE_TTL_SECONDS:
+                if age_seconds > _cache_ttl_seconds():
                     return {}
             except Exception:
                 pass
