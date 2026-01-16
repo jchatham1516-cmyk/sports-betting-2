@@ -1,9 +1,13 @@
 import json
 from pathlib import Path
 
+import pandas as pd
+
 from sports.nhl import goalies as goalies_module
 from sports.nhl import goalie_ratings
+from sports.common.elo import EloState
 from sports.nhl.model import GOALIE_PROB_PER_RATING, _compute_goalie_adjustment, _goalie_adjustment
+from sports.nhl.model import run_daily_nhl
 
 
 def test_goalie_provider_parses_daily_faceoff_table(monkeypatch, tmp_path):
@@ -137,3 +141,45 @@ def test_goalie_adj_clamped_to_max(monkeypatch):
     )
 
     assert abs(adj) <= 0.02
+
+
+def test_run_daily_nhl_uses_goalies_when_available(monkeypatch):
+    st = EloState(ratings={"Boston Bruins": 1500.0, "Toronto Maple Leafs": 1500.0})
+    monkeypatch.setattr("sports.nhl.model.update_elo_from_recent_scores", lambda days_from=120: st)
+    monkeypatch.setattr("sports.nhl.model.build_team_historical_total_lines", lambda **_kwargs: {})
+    monkeypatch.setattr("sports.nhl.model._build_team_scoring_table", lambda *_args, **_kwargs: pd.DataFrame())
+    monkeypatch.setattr(
+        "sports.nhl.model.get_goalie_rating_with_meta",
+        lambda name, _season: ((15.0, True) if "Home" in name else (-10.0, True)),
+    )
+    monkeypatch.setattr(
+        "sports.nhl.model.get_starting_goalies",
+        lambda _date: {
+            "Boston Bruins": goalies_module.GoalieInfo(
+                team="Boston Bruins",
+                goalie_name="Home Starter",
+                status="CONFIRMED",
+                source="test",
+            ),
+            "Toronto Maple Leafs": goalies_module.GoalieInfo(
+                team="Toronto Maple Leafs",
+                goalie_name="Away Starter",
+                status="CONFIRMED",
+                source="test",
+            ),
+        },
+    )
+
+    odds_dict = {
+        ("Boston Bruins", "Toronto Maple Leafs"): {
+            "home_ml": -110,
+            "away_ml": 100,
+            "total_points": 5.5,
+            "over_price": -110,
+            "under_price": -110,
+        }
+    }
+    df = run_daily_nhl("01/16/2026", odds_dict=odds_dict)
+
+    assert df["goalie_home_name"].fillna("").astype(str).str.strip().ne("").any()
+    assert df["goalie_adj"].fillna(0.0).astype(float).ne(0.0).any()
