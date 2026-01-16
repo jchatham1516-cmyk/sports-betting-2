@@ -405,6 +405,8 @@ def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
         if fetched_at:
             try:
                 fetched_dt = datetime.fromisoformat(str(fetched_at))
+                if fetched_dt.tzinfo is None:
+                    fetched_dt = fetched_dt.replace(tzinfo=timezone.utc)
                 age_seconds = (datetime.now(timezone.utc) - fetched_dt).total_seconds()
                 if age_seconds > _cache_ttl_seconds():
                     return {}
