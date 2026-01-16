@@ -193,6 +193,7 @@ def _cache_ttl_seconds() -> int:
 def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
+    debug = os.getenv("NHL_DEBUG_GOALIES") == "1"
 
     def _walk(obj: object):
         yield obj
@@ -224,6 +225,48 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
             parsed = None
     else:
         parsed = None
+
+    if parsed:
+        page_props = parsed.get("props", {}).get("pageProps", {})
+        data = page_props.get("data") or []
+        if isinstance(data, list):
+            if debug:
+                print(f"[nhl goalies] debug dailyfaceoff pageProps.data games={len(data)}")
+            for game in data:
+                if not isinstance(game, dict):
+                    continue
+                home_team_raw = game.get("homeTeamName")
+                away_team_raw = game.get("awayTeamName")
+                home_goalie_raw = game.get("homeGoalieName")
+                away_goalie_raw = game.get("awayGoalieName")
+
+                home_team_canon = canon_team(home_team_raw or "") if home_team_raw else None
+                if not home_team_canon and home_team_raw:
+                    home_team_canon = home_team_raw.strip()
+                away_team_canon = canon_team(away_team_raw or "") if away_team_raw else None
+                if not away_team_canon and away_team_raw:
+                    away_team_canon = away_team_raw.strip()
+
+                if home_team_canon:
+                    results[home_team_canon] = _build_goalie_info(
+                        home_team_canon,
+                        goalie_raw=home_goalie_raw,
+                        status_raw="PROJECTED",
+                        source="dailyfaceoff",
+                        original_team=home_team_raw,
+                    )
+                if away_team_canon:
+                    results[away_team_canon] = _build_goalie_info(
+                        away_team_canon,
+                        goalie_raw=away_goalie_raw,
+                        status_raw="PROJECTED",
+                        source="dailyfaceoff",
+                        original_team=away_team_raw,
+                    )
+            if debug:
+                print(f"[nhl goalies] debug dailyfaceoff next_data_goalies={len(results)}")
+            if results:
+                return results
 
     team_keys = ("teamName", "team", "teamAbbrev", "abbrev", "shortName")
     goalie_keys = ("goalieName", "goalie", "starter", "startingGoalie", "goalieFullName")
