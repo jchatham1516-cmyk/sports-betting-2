@@ -188,74 +188,67 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
             return False
         return True
 
-    def _status_near(anchor, container) -> str:
+    def _status_near(anchor) -> str:
         for node in [anchor, anchor.parent, anchor.find_parent(["div", "td", "li", "p", "span"])]:
             status = _status_from_block(node)
             if status != "UNKNOWN":
                 return status
         return "UNKNOWN"
 
-    def _goalie_after_team(team_anchor, container) -> tuple[Optional[str], str]:
-        if not team_anchor or not container:
+    def _first_goalie_in_container(container) -> tuple[Optional[str], str]:
+        if not container:
             return (None, "UNKNOWN")
-        for anchor in team_anchor.find_all_next("a", href=True):
-            if container not in anchor.parents:
-                break
+        for anchor in container.select("a[href*='/player/'], a[href*='puckpedia.com/player/']"):
             if _is_goalie_anchor(anchor):
                 goalie_name = _text_from(anchor)
-                status = _status_near(anchor, container)
-                return (goalie_name, status)
+                status = _status_near(anchor)
+                return goalie_name, status
         return (None, "UNKNOWN")
 
-    def _find_matchup_containers() -> list:
-        containers: list = []
-        seen = set()
-        for team_anchor in soup.select("a[href*='/team/']"):
-            parent = team_anchor.parent
-            while parent and parent.name not in {"html", "body"}:
-                if len(parent.select("a[href*='/team/']")) >= 2:
-                    if id(parent) not in seen:
-                        containers.append(parent)
-                        seen.add(id(parent))
-                    break
-                parent = parent.parent
-        return containers
-
-    for container in _find_matchup_containers():
-        team_links = container.select("a[href*='/team/']")
-        if len(team_links) < 2:
+    for team_anchor in soup.select("a[href*='/team/']"):
+        href = team_anchor.get("href") or ""
+        slug = _slug_from_href(href)
+        team_guess = _team_from_slug(slug)
+        team = canon_team(team_guess)
+        if not team or team in results:
             continue
-        seen_teams = set()
-        for team_anchor in team_links:
-            href = team_anchor.get("href") or ""
-            slug = _slug_from_href(href)
-            team_guess = _team_from_slug(slug)
-            team = canon_team(team_guess)
-            if not team or team in seen_teams:
-                continue
-            goalie_name, status = _goalie_after_team(team_anchor, container)
-            if not goalie_name:
-                continue
-            results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
-            seen_teams.add(team)
-
-    if results:
-        return results
-
-    for row in soup.select("table tr"):
-        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-        if len(cells) < 2:
+        container = None
+        if team_anchor.parent and team_anchor.parent.parent:
+            container = team_anchor.parent.parent
+        if not container:
+            container = team_anchor.find_parent(["section", "article", "div"])
+        goalie_name, status = _first_goalie_in_container(container)
+        if not goalie_name:
             continue
-        team_raw = cells[0]
-        goalie_raw = cells[1]
-        status_raw = cells[2] if len(cells) > 2 else ""
-        team = canon_team(team_raw)
-        if not team:
-            continue
-        goalie_name = goalie_raw.strip() if goalie_raw.strip() else None
-        status = _normalize_status(status_raw)
         results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
 
+    if len(results) < 10:
+        for container in soup.select("section, article, div"):
+            team_links = container.select("a[href*='/team/']")
+            if len(team_links) != 2:
+                continue
+            player_links = [
+                anchor
+                for anchor in container.select("a[href*='/player/'], a[href*='puckpedia.com/player/']")
+                if _is_goalie_anchor(anchor)
+            ]
+            if len(player_links) != 2:
+                continue
+            for team_anchor, player_anchor in zip(team_links, player_links):
+                href = team_anchor.get("href") or ""
+                slug = _slug_from_href(href)
+                team_guess = _team_from_slug(slug)
+                team = canon_team(team_guess)
+                if not team or team in results:
+                    continue
+                goalie_name = _text_from(player_anchor)
+                if not goalie_name:
+                    continue
+                status = _status_near(player_anchor)
+                results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
+
+    if len(results) < 15:
+        return {}
     return results
 
 
@@ -269,15 +262,20 @@ def _fetch_goalies_puckpedia_with_meta(day_count: int = 1) -> tuple[Dict[str, Go
     html_len = len(html or "")
     if debug:
         print(f"[nhl goalies] debug provider=puckpedia url={PUCKPEDIA_URL} status={status} html_len={html_len}")
-        os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
-        html_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.html")
-        text_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.txt")
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html or "")
-        soup = BeautifulSoup(html or "", "html.parser")
-        cleaned_text = "\n".join(line for line in (soup.get_text("\n", strip=True) or "").splitlines() if line.strip())
-        with open(text_path, "w", encoding="utf-8") as f:
-            f.write(cleaned_text)
+    os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
+    html_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.html")
+    text_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.txt")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html or "")
+    soup = BeautifulSoup(html or "", "html.parser")
+    with open(text_path, "w", encoding="utf-8") as f:
+        f.write(soup.get_text())
+    team_links_count = len(soup.select("a[href*='/team/']"))
+    player_links_count = len(soup.select("a[href*='/player/'], a[href*='puckpedia.com/player/']"))
+    if debug:
+        print(f"[nhl goalies] debug puckpedia team_links={team_links_count} player_links={player_links_count}")
+    if team_links_count < 10 or player_links_count < 10:
+        return {}, {"status": status, "html_len": html_len, "html": html}
     parsed = _parse_puckpedia(html)
     if debug:
         _debug_parse_details("puckpedia", PUCKPEDIA_URL, status, html, parsed)
@@ -370,7 +368,8 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
 
     try:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
-        if parsed:
+        parsed_count = len(parsed)
+        if parsed_count >= 15:
             _write_cached_goalies(
                 cache_path,
                 parsed,
@@ -380,11 +379,21 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
                 html_len=meta.get("html_len"),
             )
             return parsed
-        last_error = "puckpedia returned zero goalies"
+        last_error = f"puckpedia returned {parsed_count} goalies"
         last_http_status = meta.get("status")
         last_html_len = meta.get("html_len")
+        _write_cached_goalies(
+            cache_path,
+            {},
+            source="puckpedia",
+            date_key=date,
+            error=last_error,
+            http_status=last_http_status,
+            html_len=last_html_len,
+        )
         if debug:
             print(f"[nhl goalies] WARNING: empty puckpedia parse status={last_http_status} html_len={last_html_len}")
+        return {}
     except Exception as exc:
         last_error = f"puckpedia fetch failed: {exc}"
         if debug:
