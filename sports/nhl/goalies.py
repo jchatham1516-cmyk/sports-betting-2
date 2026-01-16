@@ -81,62 +81,70 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
 
-    def _add_row(team_raw: str, goalie_raw: str, status_raw: str) -> None:
+    os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
+    debug_html_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_goalies_debug.html")
+    with open(debug_html_path, "w", encoding="utf-8") as f:
+        f.write(html or "")
+
+    def _add_row(team_raw: str, goalie_raw: str, status_raw: str, confirmed: bool) -> None:
         team = canon_team(team_raw)
         if not team:
             return
         goalie_name = goalie_raw.strip() if goalie_raw and goalie_raw.strip() else None
         if not goalie_name:
             return
-        status = _normalize_status(status_raw)
+        status_text = (status_raw or "").upper()
+        if confirmed or "CONF" in status_text:
+            status = "CONFIRMED"
+        elif "PROJ" in status_text:
+            status = "PROJECTED"
+        else:
+            status = "PROJECTED"
         results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="dailyfaceoff")
 
-    def _looks_like_player_name(value: str) -> bool:
-        if not value:
-            return False
-        words = value.split()
-        if len(words) < 2:
-            return False
-        return all(word[0].isupper() for word in words if word)
+    def _walk(obj: object):
+        yield obj
+        if isinstance(obj, dict):
+            for value in obj.values():
+                yield from _walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                yield from _walk(value)
 
-    def _extract_team_name(value: object) -> Optional[str]:
-        if isinstance(value, str):
-            return value
-        if isinstance(value, dict):
-            for key in ("teamName", "name", "fullName", "team", "teamAbbrev", "abbrev"):
-                candidate = value.get(key)
-                if isinstance(candidate, str):
-                    return candidate
-        return None
-
-    def _extract_goalies_from_json(data: object) -> None:
-        if isinstance(data, dict):
-            team_value = data.get("teamName") or data.get("team") or data.get("teamAbbrev")
-            goalie_value = data.get("goalieName") or data.get("name")
-            status_value = data.get("status")
-            team_name = _extract_team_name(team_value)
-            goalie_name = goalie_value if isinstance(goalie_value, str) else None
-            status_raw = status_value if isinstance(status_value, str) else ""
-            if team_name and goalie_name and _looks_like_player_name(goalie_name):
-                _add_row(team_name, goalie_name, status_raw)
-            for value in data.values():
-                if isinstance(value, (dict, list)):
-                    _extract_goalies_from_json(value)
-        elif isinstance(data, list):
-            for item in data:
-                _extract_goalies_from_json(item)
-
-    next_data = soup.find("script", id="__NEXT_DATA__")
+    next_data = soup.find("script", {"id": "__NEXT_DATA__"})
     if not next_data:
         return results
-    script_text = next_data.string or next_data.get_text(" ", strip=True)
+    script_text = next_data.string
     if not script_text:
         return results
     try:
         parsed = json.loads(script_text)
     except json.JSONDecodeError:
         return results
-    _extract_goalies_from_json(parsed)
+
+    debug_json_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_next_data.json")
+    with open(debug_json_path, "w", encoding="utf-8") as f:
+        json.dump(parsed, f, indent=2, sort_keys=True)
+
+    team_keys = ("teamName", "team", "teamAbbrev", "abbrev", "shortName")
+    goalie_keys = ("goalieName", "goalie", "starter", "startingGoalie", "goalieFullName")
+    status_keys = ("status", "confirmed", "projection")
+
+    for node in _walk(parsed):
+        if not isinstance(node, dict):
+            continue
+        team_key = next((key for key in team_keys if key in node), None)
+        goalie_key = next((key for key in goalie_keys if key in node), None)
+        if not team_key or not goalie_key:
+            continue
+        status_key = next((key for key in status_keys if key in node), None)
+        team_raw = node.get(team_key)
+        goalie_raw = node.get(goalie_key)
+        status_raw = ""
+        confirmed = bool(node.get("confirmed"))
+        if status_key:
+            status_raw = str(node.get(status_key, ""))
+        _add_row(str(team_raw or ""), str(goalie_raw or ""), status_raw, confirmed)
 
     return results
 
@@ -310,7 +318,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     try:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
         parsed_count = len(parsed)
-        if parsed_count >= 10:
+        if parsed_count >= 5:
             _write_cached_goalies(
                 cache_path,
                 parsed,
