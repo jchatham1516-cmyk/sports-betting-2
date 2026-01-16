@@ -522,6 +522,18 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     if debug_goalies:
         print(f"[nhl goalies] date_key={date_key} goalies_map_size={len(goalies_map)}")
 
+    def _get_goalie(team_canon: str, team_raw: str) -> tuple[GoalieInfo, list[str]]:
+        keys_tried: list[str] = []
+        seen: set[str] = set()
+        for k in [team_canon, team_raw, canon_team(team_raw), canon_team(team_canon)]:
+            if not k or k in seen:
+                continue
+            seen.add(k)
+            keys_tried.append(k)
+            if k in goalies_map:
+                return goalies_map[k], keys_tried
+        return GoalieInfo(team=team_canon, goalie_name=None, status="UNKNOWN", source=""), keys_tried
+
     rows: list[dict] = []
     for (home_in, away_in), oi in (odds_dict or {}).items():
         home = canon_team(home_in)
@@ -539,8 +551,8 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         # Elo-based prob (if we actually have ratings)
         eh = st.get(home)
         ea = st.get(away)
-        goalie_home_info = goalies_map.get(home, GoalieInfo(team=home, goalie_name=None, status="UNKNOWN", source=""))
-        goalie_away_info = goalies_map.get(away, GoalieInfo(team=away, goalie_name=None, status="UNKNOWN", source=""))
+        goalie_home_info, goalie_home_keys = _get_goalie(home, home_in)
+        goalie_away_info, goalie_away_keys = _get_goalie(away, away_in)
 
         goalie_home_name = goalie_home_info.goalie_name or ""
         goalie_away_name = goalie_away_info.goalie_name or ""
@@ -735,6 +747,8 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "goalie_home_rating": float(goalie_home_rating),
                 "goalie_away_rating": float(goalie_away_rating),
                 "goalie_reason": goalie_reason,
+                "goalie_lookup_home_keys": ",".join(goalie_home_keys),
+                "goalie_lookup_away_keys": ",".join(goalie_away_keys),
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
                 "edge_away": float(-edge_home) if not np.isnan(edge_home) else np.nan,
