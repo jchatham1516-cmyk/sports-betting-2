@@ -165,13 +165,12 @@ def _date_keys_for_goalies(date_str: str) -> tuple[str, list[str]]:
         raw = str(date_str)
         safe_raw = raw.replace("/", "-")
         return safe_raw, [safe_raw]
-    return (
+    date_keys = [
         parsed.strftime("%Y-%m-%d"),
-        [
-            parsed.strftime("%Y-%m-%d"),
-            parsed.strftime("%m-%d-%Y"),
-        ],
-    )
+        parsed.strftime("%m-%d-%Y"),
+    ]
+    date_keys = [key for key in date_keys if "/" not in key]
+    return parsed.strftime("%Y-%m-%d"), date_keys
 
 
 def _debug_goalies_summary(source: str, date_received: str, goalies: Dict[str, GoalieInfo]) -> None:
