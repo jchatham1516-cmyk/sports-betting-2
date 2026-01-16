@@ -109,6 +109,21 @@ def _parse_iso_date(s: str) -> Optional[date]:
         return None
 
 
+def _goalie_date_keys(game_date_str: str) -> list[str]:
+    formats = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y")
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(str(game_date_str), fmt).date()
+            return [
+                parsed.strftime("%Y-%m-%d"),
+                parsed.strftime("%m-%d-%Y"),
+                parsed.strftime("%m/%d/%Y"),
+            ]
+        except Exception:
+            continue
+    return [str(game_date_str)]
+
+
 def _american_to_prob(ml: float) -> float:
     ml = float(ml)
     if ml == 0:
@@ -616,33 +631,37 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 
     debug_goalies = os.getenv("NHL_DEBUG_GOALIES") == "1"
     goalies_map_raw: dict = {}
-    date_keys_tried: list[str] = []
-    try:
-        dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
-        date_key_iso = dt.strftime("%Y-%m-%d")
-        date_key_mdy = dt.strftime("%m-%d-%Y")
-        date_key_slash = dt.strftime("%m/%d/%Y")
-        for dk in [date_key_iso, date_key_mdy, date_key_slash]:
-            date_keys_tried.append(dk)
-            try:
-                goalies_map_raw = get_starting_goalies(dk) or {}
-                if goalies_map_raw:
-                    break
-            except Exception as exc:
-                if debug_goalies:
-                    print(f"[nhl goalies] get_starting_goalies({dk}) failed: {exc}")
-                continue
-    except Exception:
-        date_key_iso = str(game_date_str)
-        date_keys_tried = [date_key_iso]
-        goalies_map_raw = get_starting_goalies(date_key_iso) or {}
+    date_keys_tried = _goalie_date_keys(game_date_str)
+    for dk in date_keys_tried:
+        try:
+            goalies_map_raw = get_starting_goalies(dk) or {}
+            if goalies_map_raw:
+                break
+        except Exception as exc:
+            if debug_goalies:
+                print(f"[nhl goalies] get_starting_goalies({dk}) failed: {exc}")
+            continue
 
     if debug_goalies:
         print(
             "[nhl goalies] "
             f"date_keys_tried={date_keys_tried} raw_size={len(goalies_map_raw)}"
         )
-    goalies_map = goalies_map_raw
+    goalies_map: dict[str, GoalieInfo] = {}
+    for key, info in (goalies_map_raw or {}).items():
+        if not key:
+            continue
+        key_trim = str(key).strip()
+        if key_trim and key_trim not in goalies_map:
+            goalies_map[key_trim] = info
+        key_canon = canon_team(key_trim)
+        if key_canon and key_canon not in goalies_map:
+            goalies_map[key_canon] = info
+    if debug_goalies:
+        print(
+            "[nhl goalies] "
+            f"normalized_size={len(goalies_map)} raw_keys_sample={list(goalies_map_raw)[:5]}"
+        )
 
     def _get_goalie(team_canon: str, team_raw: str) -> tuple[GoalieInfo, list[str]]:
         keys_tried: list[str] = []
@@ -707,6 +726,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 f"away_goalie={goalie_away_name} ({goalie_away_status}) "
                 f"home_source={goalie_home_info.source or 'unknown'} "
                 f"away_source={goalie_away_info.source or 'unknown'} "
+                f"home_keys={goalie_home_keys} away_keys={goalie_away_keys} "
                 f"home_rating={goalie_home_rating:.3f} away_rating={goalie_away_rating:.3f} "
                 f"rating_diff={goalie_rating_diff:.3f} prob_shift={goalie_prob_shift:.4f} adj={goalie_adj:.4f}"
             )
