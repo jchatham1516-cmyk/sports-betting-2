@@ -432,6 +432,7 @@ def _goalie_prob_shift(home_strength: float, away_strength: float) -> float:
 
 
 def _goalie_status_weight(status: str) -> float:
+    status = str(status or "").upper()
     if status == "CONFIRMED":
         return 1.0
     if status == "PROJECTED":
@@ -465,7 +466,7 @@ def _compute_goalie_adjustment(
     goalie_home_status: str,
     goalie_away_status: str,
     season_label: str,
-) -> tuple[float, float, float, float, float, str, str]:
+) -> tuple[float, float, float, float, float, str, str, float, bool, bool]:
     goalie_home_rating = NHL_LEAGUE_AVG_GOALIE_RATING
     goalie_away_rating = NHL_LEAGUE_AVG_GOALIE_RATING
     goalie_rating_diff = 0.0
@@ -476,6 +477,10 @@ def _compute_goalie_adjustment(
 
     home_found = False
     away_found = False
+    status_w_home = _goalie_status_weight(goalie_home_status)
+    status_w_away = _goalie_status_weight(goalie_away_status)
+    # Use the minimum status weight so a single uncertain goalie dampens confidence.
+    conf_w = float(min(status_w_home, status_w_away))
 
     if goalie_home_name:
         goalie_home_rating, home_found = get_goalie_rating_with_meta(goalie_home_name, season_label)
@@ -491,21 +496,30 @@ def _compute_goalie_adjustment(
             goalie_prob_shift,
             goalie_status,
             "goalie_missing",
+            conf_w,
+            home_found,
+            away_found,
         )
 
     if goalie_home_name and goalie_away_name:
         max_adj = float(max(0.0, NHL_GOALIE_MAX_PROB_SHIFT))
         goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
         if home_found and away_found:
-            goalie_prob_shift = _goalie_prob_shift(goalie_home_rating, goalie_away_rating)
-            goalie_adj = float(_clamp(goalie_prob_shift, -max_adj, max_adj))
+            goalie_strength_diff = goalie_rating_diff
+            weight = float(_clamp(NHL_GOALIE_WEIGHT, 0.0, 1.0))
+            raw_shift = float(goalie_strength_diff * weight)
+            scaled_shift = float(raw_shift * conf_w)
+            goalie_prob_shift = scaled_shift
+            goalie_adj = float(_clamp(scaled_shift, -max_adj, max_adj))
             goalie_reason = "goalie_rating_applied"
         else:
             penalty = float(max(0.0, NHL_GOALIE_UNKNOWN_PENALTY))
             if home_found and not away_found:
-                goalie_adj = float(_clamp(penalty, -max_adj, max_adj))
+                scaled_penalty = float(penalty * conf_w)
+                goalie_adj = float(_clamp(scaled_penalty, -max_adj, max_adj))
             elif away_found and not home_found:
-                goalie_adj = float(_clamp(-penalty, -max_adj, max_adj))
+                scaled_penalty = float(penalty * conf_w)
+                goalie_adj = float(_clamp(-scaled_penalty, -max_adj, max_adj))
             goalie_prob_shift = goalie_adj
             goalie_reason = "goalie_rating_fallback"
         return (
@@ -516,15 +530,20 @@ def _compute_goalie_adjustment(
             goalie_prob_shift,
             goalie_status,
             goalie_reason,
+            conf_w,
+            home_found,
+            away_found,
         )
 
     goalie_reason = "goalie_missing_opponent"
     max_adj = float(max(0.0, NHL_GOALIE_MAX_PROB_SHIFT))
     penalty = float(max(0.0, NHL_GOALIE_UNKNOWN_PENALTY))
     if goalie_home_name and not goalie_away_name:
-        goalie_adj = float(_clamp(penalty, -max_adj, max_adj))
+        scaled_penalty = float(penalty * conf_w)
+        goalie_adj = float(_clamp(scaled_penalty, -max_adj, max_adj))
     elif goalie_away_name and not goalie_home_name:
-        goalie_adj = float(_clamp(-penalty, -max_adj, max_adj))
+        scaled_penalty = float(penalty * conf_w)
+        goalie_adj = float(_clamp(-scaled_penalty, -max_adj, max_adj))
     goalie_prob_shift = goalie_adj
     goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
     return (
@@ -535,6 +554,9 @@ def _compute_goalie_adjustment(
         goalie_prob_shift,
         goalie_status,
         goalie_reason,
+        conf_w,
+        home_found,
+        away_found,
     )
 
 
@@ -712,6 +734,9 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             goalie_prob_shift,
             goalie_status,
             goalie_reason,
+            goalie_confidence_weight,
+            goalie_home_found,
+            goalie_away_found,
         ) = _compute_goalie_adjustment(
             goalie_home_name=goalie_home_name,
             goalie_away_name=goalie_away_name,
@@ -724,11 +749,13 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "[nhl goalies] matchup "
                 f"{away} @ {home} home_goalie={goalie_home_name} ({goalie_home_status}) "
                 f"away_goalie={goalie_away_name} ({goalie_away_status}) "
+                f"home_found={goalie_home_found} away_found={goalie_away_found} "
                 f"home_source={goalie_home_info.source or 'unknown'} "
                 f"away_source={goalie_away_info.source or 'unknown'} "
                 f"home_keys={goalie_home_keys} away_keys={goalie_away_keys} "
                 f"home_rating={goalie_home_rating:.3f} away_rating={goalie_away_rating:.3f} "
-                f"rating_diff={goalie_rating_diff:.3f} prob_shift={goalie_prob_shift:.4f} adj={goalie_adj:.4f}"
+                f"rating_diff={goalie_rating_diff:.3f} conf_w={goalie_confidence_weight:.2f} "
+                f"prob_shift={goalie_prob_shift:.4f} adj={goalie_adj:.4f}"
             )
 
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
@@ -874,6 +901,9 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "goalie_away_status": goalie_away_status,
                 "goalie_home_name": goalie_home_name,
                 "goalie_away_name": goalie_away_name,
+                "goalie_home_found": bool(goalie_home_found),
+                "goalie_away_found": bool(goalie_away_found),
+                "goalie_confidence_weight": float(goalie_confidence_weight),
                 "goalie_home_rating": float(goalie_home_rating),
                 "goalie_away_rating": float(goalie_away_rating),
                 "goalie_rating_diff": float(goalie_rating_diff),
@@ -948,7 +978,11 @@ def _run_goalie_regression_check(df: pd.DataFrame) -> None:
         raise RuntimeError("goalie_adj column missing during regression check")
     any_non_zero = bool(goalie_adj.fillna(0.0).astype(float).ne(0.0).any())
     if not any_non_zero:
-        raise RuntimeError("goalie_adj was zero for all games despite goalie names present")
+        raise RuntimeError(
+            "goalie_adj was zero for all games despite goalie names present; "
+            "inspect goalie_home_name/goalie_away_name, goalie_home_status/goalie_away_status, "
+            "goalie_home_found/goalie_away_found, goalie_confidence_weight, goalie_prob_shift, goalie_reason"
+        )
 
 
 def run_daily_probs_for_date(
