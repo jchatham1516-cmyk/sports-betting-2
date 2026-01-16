@@ -5,8 +5,8 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone, date as date_type
 from dataclasses import dataclass
+from datetime import datetime, timezone, date as date_type
 from typing import Dict, Optional
 
 import requests
@@ -18,11 +18,14 @@ from sports.common.teams import canon_team
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 GOALIE_CACHE_DIR = "results/cache"
 DEFAULT_CACHE_TTL_MINUTES = 120
+
 DAILY_FACEOFF_URL = "https://www.dailyfaceoff.com/starting-goalies"
 PUCKPEDIA_URL = "https://depth-charts.puckpedia.com/starting-goalies"
 PUCKPEDIA_PARAMS = {"dayCount": 1, "utm_medium": "embed", "utm_source": "puckpedia", "ads": "true"}
-DATE_FORMATS = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y")  # keep parsing formats
-DATE_URL_FORMATS = ("%Y-%m-%d", "%m-%d-%Y")          # ONLY formats safe for URL paths
+
+# keep parsing formats (accept slashes as INPUT), but NEVER use slash dates in URL paths
+DATE_FORMATS = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y")
+DATE_URL_FORMATS = ("%Y-%m-%d", "%m-%d-%Y")  # ONLY formats safe for URL paths
 
 
 @dataclass
@@ -52,6 +55,7 @@ def _get_with_retry(
     }
     if headers:
         req_headers.update(headers)
+
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.get(
@@ -66,6 +70,7 @@ def _get_with_retry(
             if resp.status_code != 200:
                 print(f"[nhl goalies] WARNING: status={resp.status_code} html_len={len(resp.text or '')} url={url}")
                 raise RuntimeError(f"unexpected status {resp.status_code}")
+
             raw = resp.content
             try:
                 html = raw.decode("utf-8")
@@ -79,8 +84,9 @@ def _get_with_retry(
                 except OSError:
                     decompressed = None
             else:
+                # Optional brotli (don’t hard-require dependency)
                 try:
-                    import brotli
+                    import brotli  # type: ignore
 
                     decompressed = brotli.decompress(raw)
                 except ImportError:
@@ -95,10 +101,12 @@ def _get_with_retry(
                     html = decompressed.decode("latin-1", errors="ignore")
 
             return html, resp.status_code
+
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:
                 time.sleep(2)
+
     raise RuntimeError(f"failed to fetch {url}") from last_exc
 
 
@@ -148,12 +156,14 @@ def _parse_goalie_date(date_str: str) -> Optional[datetime]:
         return date_str
     if isinstance(date_str, date_type):
         return datetime.combine(date_str, datetime.min.time())
+
     raw = str(date_str)
     for fmt in DATE_FORMATS:
         try:
             return datetime.strptime(raw, fmt)
         except Exception:
             continue
+
     try:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except Exception:
@@ -161,20 +171,23 @@ def _parse_goalie_date(date_str: str) -> Optional[datetime]:
 
 
 def _date_keys_for_goalies(date_str: str) -> tuple[str, list[str]]:
+    """
+    Returns:
+      cache_key: always YYYY-MM-DD if parseable (else raw with / replaced)
+      date_keys: URL-safe keys ONLY (no slashes), used to build DailyFaceoff dated URLs
+    """
     parsed = _parse_goalie_date(date_str)
     if not parsed:
         raw = str(date_str)
         safe_raw = raw.replace("/", "-")
-        return (
-    parsed.strftime("%Y-%m-%d"),
-    [
-        parsed.strftime("%Y-%m-%d"),
-        parsed.strftime("%m-%d-%Y"),
-        # IMPORTANT: never include %m/%d/%Y here because DailyFaceoff URL breaks with slashes
-    ],
-)
-    date_keys = [key for key in date_keys if "/" not in key]
-    return parsed.strftime("%Y-%m-%d"), date_keys
+        # Only return url-safe variants; safest is the raw with slashes replaced
+        return safe_raw, [safe_raw]
+
+    cache_key = parsed.strftime("%Y-%m-%d")
+    date_keys = [parsed.strftime(fmt) for fmt in DATE_URL_FORMATS]
+    # paranoia: never allow "/" to slip in
+    date_keys = [k for k in date_keys if "/" not in k]
+    return cache_key, date_keys
 
 
 def _debug_goalies_summary(source: str, date_received: str, goalies: Dict[str, GoalieInfo]) -> None:
@@ -198,6 +211,61 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     results: Dict[str, GoalieInfo] = {}
     debug = os.getenv("NHL_DEBUG_GOALIES") == "1"
 
+    # ---------- Preferred path: Next.js __NEXT_DATA__ schema (new DailyFaceoff) ----------
+    next_data = soup.find("script", {"id": "__NEXT_DATA__"})
+    script_text = (next_data.string or next_data.get_text()) if next_data else None
+    parsed = None
+    if script_text:
+        try:
+            parsed = json.loads(script_text)
+        except json.JSONDecodeError:
+            parsed = None
+
+    if isinstance(parsed, dict):
+        page_props = (parsed.get("props") or {}).get("pageProps") or {}
+        data = page_props.get("data") or []
+        if isinstance(data, list):
+            if debug:
+                print(f"[nhl goalies] debug dailyfaceoff pageProps.data games={len(data)}")
+            for game in data:
+                if not isinstance(game, dict):
+                    continue
+
+                home_team_raw = game.get("homeTeamName")
+                away_team_raw = game.get("awayTeamName")
+                home_goalie_raw = game.get("homeGoalieName")
+                away_goalie_raw = game.get("awayGoalieName")
+
+                home_team_canon = canon_team(home_team_raw or "") if home_team_raw else None
+                away_team_canon = canon_team(away_team_raw or "") if away_team_raw else None
+                if not home_team_canon and home_team_raw:
+                    home_team_canon = str(home_team_raw).strip()
+                if not away_team_canon and away_team_raw:
+                    away_team_canon = str(away_team_raw).strip()
+
+                if home_team_canon:
+                    results[home_team_canon] = _build_goalie_info(
+                        home_team_canon,
+                        goalie_raw=home_goalie_raw,
+                        status_raw="PROJECTED",
+                        source="dailyfaceoff",
+                        original_team=str(home_team_raw).strip() if home_team_raw else None,
+                    )
+                if away_team_canon:
+                    results[away_team_canon] = _build_goalie_info(
+                        away_team_canon,
+                        goalie_raw=away_goalie_raw,
+                        status_raw="PROJECTED",
+                        source="dailyfaceoff",
+                        original_team=str(away_team_raw).strip() if away_team_raw else None,
+                    )
+
+            if debug:
+                print(f"[nhl goalies] debug dailyfaceoff next_data_goalies={len(results)}")
+            if results:
+                return results
+
+    # ---------- Fallback path: generic deep-walk (older schema variations) ----------
     def _walk(obj: object):
         yield obj
         if isinstance(obj, dict):
@@ -217,66 +285,12 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
                     return candidate
         return None
 
-    next_data = soup.find("script", {"id": "__NEXT_DATA__"})
-    if not next_data:
-        next_data = None
-    script_text = (next_data.string or next_data.get_text()) if next_data else None
-    if script_text:
-        try:
-            parsed = json.loads(script_text)
-        except json.JSONDecodeError:
-            parsed = None
-    else:
-        parsed = None
-
-    if parsed:
-        page_props = parsed.get("props", {}).get("pageProps", {})
-        data = page_props.get("data") or []
-        if isinstance(data, list):
-            if debug:
-                print(f"[nhl goalies] debug dailyfaceoff pageProps.data games={len(data)}")
-            for game in data:
-                if not isinstance(game, dict):
-                    continue
-                home_team_raw = game.get("homeTeamName")
-                away_team_raw = game.get("awayTeamName")
-                home_goalie_raw = game.get("homeGoalieName")
-                away_goalie_raw = game.get("awayGoalieName")
-
-                home_team_canon = canon_team(home_team_raw or "") if home_team_raw else None
-                if not home_team_canon and home_team_raw:
-                    home_team_canon = home_team_raw.strip()
-                away_team_canon = canon_team(away_team_raw or "") if away_team_raw else None
-                if not away_team_canon and away_team_raw:
-                    away_team_canon = away_team_raw.strip()
-
-                if home_team_canon:
-                    results[home_team_canon] = _build_goalie_info(
-                        home_team_canon,
-                        goalie_raw=home_goalie_raw,
-                        status_raw="PROJECTED",
-                        source="dailyfaceoff",
-                        original_team=home_team_raw,
-                    )
-                if away_team_canon:
-                    results[away_team_canon] = _build_goalie_info(
-                        away_team_canon,
-                        goalie_raw=away_goalie_raw,
-                        status_raw="PROJECTED",
-                        source="dailyfaceoff",
-                        original_team=away_team_raw,
-                    )
-            if debug:
-                print(f"[nhl goalies] debug dailyfaceoff next_data_goalies={len(results)}")
-            if results:
-                return results
-
     team_keys = ("teamName", "team", "teamAbbrev", "abbrev", "shortName")
     goalie_keys = ("goalieName", "goalie", "starter", "startingGoalie", "goalieFullName")
     fallback_team_keys = ("teamName", "team", "teamAbbrev", "abbrev", "shortName", "name")
     fallback_goalie_keys = ("goalieName", "goalie", "starter", "startingGoalie", "goalieFullName", "name")
 
-    if parsed:
+    if isinstance(parsed, dict):
         for node in _walk(parsed):
             if not isinstance(node, dict):
                 continue
@@ -284,16 +298,20 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
             goalie_key = next((key for key in goalie_keys if key in node), None)
             if not team_key or not goalie_key:
                 continue
+
             team_raw = _coerce_string(node.get(team_key), fallback_keys=fallback_team_keys)
             goalie_raw = _coerce_string(node.get(goalie_key), fallback_keys=fallback_goalie_keys)
+
             goalie_name = _normalize_goalie_name(goalie_raw)
             if goalie_name and len(goalie_name.split()) < 2:
                 continue
+
             team = canon_team(team_raw or "") if team_raw else None
             if not team and team_raw:
                 team = team_raw.strip()
             if not team:
                 continue
+
             results[team] = _build_goalie_info(
                 team,
                 goalie_raw=goalie_raw,
@@ -305,23 +323,27 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     if results:
         return results
 
+    # ---------- Final fallback: HTML cards (older/alternate markup) ----------
     for card in soup.select(".starting-goalies__goalie-card"):
-        team_raw = card.select_one(".starting-goalies__team-name")
-        goalie_raw = card.select_one(".starting-goalies__goalie-name")
-        status_raw = card.select_one(".starting-goalies__status")
-        goalie_name = _normalize_goalie_name(goalie_raw.get_text(" ", strip=True) if goalie_raw else "")
+        team_raw_el = card.select_one(".starting-goalies__team-name")
+        goalie_raw_el = card.select_one(".starting-goalies__goalie-name")
+        status_raw_el = card.select_one(".starting-goalies__status")
+
+        goalie_name = _normalize_goalie_name(goalie_raw_el.get_text(" ", strip=True) if goalie_raw_el else "")
         if goalie_name and len(goalie_name.split()) < 2:
             continue
-        team = canon_team(team_raw.get_text(" ", strip=True) if team_raw else "")
+
+        team = canon_team(team_raw_el.get_text(" ", strip=True) if team_raw_el else "")
         if not team:
             continue
-        status_text = status_raw.get_text(" ", strip=True) if status_raw else ""
+
+        status_text = status_raw_el.get_text(" ", strip=True) if status_raw_el else ""
         results[team] = _build_goalie_info(
             team,
             goalie_raw=goalie_name,
             status_raw=status_text,
             source="dailyfaceoff",
-            original_team=team_raw.get_text(" ", strip=True) if team_raw else None,
+            original_team=team_raw_el.get_text(" ", strip=True) if team_raw_el else None,
         )
 
     return results
@@ -330,6 +352,7 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
 def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
+
     tables = soup.find_all("table")
     if not tables:
         for card in soup.select(".goalie-card"):
@@ -338,19 +361,22 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
                 or card.get("data-team-name")
                 or (card.select_one(".team-name").get_text(" ", strip=True) if card.select_one(".team-name") else "")
             )
-            goalie_raw = card.select_one(".goalie-name")
-            status_raw = card.select_one(".status")
-            goalie_name = _normalize_goalie_name(goalie_raw.get_text(" ", strip=True) if goalie_raw else "")
+            goalie_el = card.select_one(".goalie-name")
+            status_el = card.select_one(".status")
+
+            goalie_name = _normalize_goalie_name(goalie_el.get_text(" ", strip=True) if goalie_el else "")
             if goalie_name and len(goalie_name.split()) < 2:
                 continue
+
             team = canon_team(team_raw)
             if not team:
                 continue
+
             original_team = team_raw if team_raw and team_raw != team else None
             results[team] = _build_goalie_info(
                 team,
                 goalie_raw=goalie_name,
-                status_raw=status_raw.get_text(" ", strip=True) if status_raw else "",
+                status_raw=status_el.get_text(" ", strip=True) if status_el else "",
                 source="puckpedia",
                 original_team=original_team,
             )
@@ -368,12 +394,15 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
         team_raw = cells[0].get_text(" ", strip=True)
         goalie_raw = cells[1].get_text(" ", strip=True)
         status_raw = cells[2].get_text(" ", strip=True) if len(cells) > 2 else ""
+
         goalie_name = _normalize_goalie_name(goalie_raw)
         if goalie_name and len(goalie_name.split()) < 2:
             continue
+
         team = canon_team(team_raw)
         if not team:
             continue
+
         original_team = team_raw if team_raw and team_raw != team else None
         results[team] = _build_goalie_info(
             team,
@@ -386,6 +415,19 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
     return results
 
 
+def _debug_parse_details(provider: str, url: str, status: int, html: str, parsed: Dict[str, GoalieInfo]) -> None:
+    html_len = len(html or "")
+    sample = [(t, g.goalie_name, g.status) for t, g in list(parsed.items())[:5]]
+    print(
+        f"[nhl goalies] debug provider={provider} url={url} status={status} html_len={html_len} "
+        f"parsed_rows={len(parsed)} sample={sample}"
+    )
+    if not parsed:
+        soup = BeautifulSoup(html, "html.parser")
+        text_head = " ".join(soup.get_text(" ", strip=True).split())
+        print(f"[nhl goalies] debug provider={provider} text_head={text_head[:800]}")
+
+
 def _fetch_goalies_puckpedia_with_meta(day_count: int = 1) -> tuple[Dict[str, GoalieInfo], dict]:
     debug = os.getenv("NHL_DEBUG_GOALIES") == "1"
     html, status = _get_with_retry(
@@ -396,10 +438,12 @@ def _fetch_goalies_puckpedia_with_meta(day_count: int = 1) -> tuple[Dict[str, Go
     html_len = len(html or "")
     if debug:
         print(f"[nhl goalies] debug provider=puckpedia url={PUCKPEDIA_URL} status={status} html_len={html_len}")
+
     os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
     html_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.html")
     text_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.txt")
     meta_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug_meta.json")
+
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html or "")
     soup = BeautifulSoup(html or "", "html.parser")
@@ -407,19 +451,20 @@ def _fetch_goalies_puckpedia_with_meta(day_count: int = 1) -> tuple[Dict[str, Go
         f.write(soup.get_text())
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump({"status": status, "html_len": html_len}, f, indent=2, sort_keys=True)
+
     team_links_count = len(soup.find_all("a", href=lambda h: h and "/team/" in h))
-    player_links_count = len(
-        soup.find_all("a", href=lambda h: h and ("/player/" in h or "puckpedia.com/player/" in h))
-    )
+    player_links_count = len(soup.find_all("a", href=lambda h: h and ("/player/" in h or "puckpedia.com/player/" in h)))
     print("[PuckPedia] team_links=", team_links_count)
     print("[PuckPedia] player_links=", player_links_count)
     if debug:
         print(f"[nhl goalies] debug puckpedia team_links={team_links_count} player_links={player_links_count}")
+
     parsed = _parse_puckpedia(html)
     print("[PuckPedia] parsed_goalies=", len(parsed))
     print("[PuckPedia] sample=", list(parsed.items())[:5])
     if debug:
         _debug_parse_details("puckpedia", PUCKPEDIA_URL, status, html, parsed)
+
     return parsed, {"status": status, "html_len": html_len, "html": html}
 
 
@@ -427,7 +472,11 @@ def fetch_goalies_puckpedia(day_count: int = 1) -> Dict[str, GoalieInfo]:
     parsed, _meta = _fetch_goalies_puckpedia_with_meta(day_count=day_count)
     return parsed
 
+
 def _canonicalize_goalies_map(goalies: Dict[str, GoalieInfo]) -> Dict[str, GoalieInfo]:
+    """
+    Keep BOTH raw and canonical keys so we don't drop provider keys.
+    """
     canon_results: Dict[str, GoalieInfo] = {}
 
     for team_key, info in (goalies or {}).items():
@@ -437,17 +486,12 @@ def _canonicalize_goalies_map(goalies: Dict[str, GoalieInfo]) -> Dict[str, Goali
 
         team_canon = canon_team(raw_key)
 
-        # Preserve the original team label if we have it
         if info.original_team is None and info.team and info.team != (team_canon or raw_key):
             info.original_team = info.team
 
-        # Set info.team to canonical if available, else raw
         info.team = team_canon or raw_key
 
-        # ALWAYS keep raw key so we never drop provider keys
         canon_results[raw_key] = info
-
-        # ALSO store canonical key when available (helps model lookups)
         if team_canon:
             canon_results[team_canon] = info
 
@@ -460,6 +504,7 @@ def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             payload = json.load(f) or {}
+
         fetched_at = payload.get("fetched_at_iso")
         if fetched_at:
             try:
@@ -471,7 +516,8 @@ def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
                     return {}
             except Exception:
                 pass
-        results = {}
+
+        results: Dict[str, GoalieInfo] = {}
         for team, info in (payload.get("goalies") or {}).items():
             if not isinstance(info, dict):
                 continue
@@ -510,19 +556,6 @@ def _load_most_recent_cached_goalies() -> Dict[str, GoalieInfo]:
     return {}
 
 
-def _debug_parse_details(provider: str, url: str, status: int, html: str, parsed: Dict[str, GoalieInfo]) -> None:
-    html_len = len(html or "")
-    sample = [(t, g.goalie_name, g.status) for t, g in list(parsed.items())[:5]]
-    print(
-        f"[nhl goalies] debug provider={provider} url={url} status={status} html_len={html_len} "
-        f"parsed_rows={len(parsed)} sample={sample}"
-    )
-    if not parsed:
-        soup = BeautifulSoup(html, "html.parser")
-        text_head = " ".join(soup.get_text(" ", strip=True).split())
-        print(f"[nhl goalies] debug provider={provider} text_head={text_head[:800]}")
-
-
 def _write_cached_goalies(
     cache_path: str,
     goalies: Dict[str, GoalieInfo],
@@ -547,7 +580,7 @@ def _write_cached_goalies(
                 **({"team_raw": info.original_team} if info.original_team else {}),
             }
             for team, info in goalies.items()
-        }
+        },
     }
     if error:
         payload["error"] = error
@@ -555,6 +588,7 @@ def _write_cached_goalies(
         payload["http_status"] = http_status
     if html_len is not None:
         payload["html_len"] = html_len
+
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
 
@@ -563,6 +597,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     date_received = str(date)
     cache_key, date_keys = _date_keys_for_goalies(date_received)
     cache_path = os.path.join(GOALIE_CACHE_DIR, f"nhl_goalies_{cache_key}.json")
+
     cached = _load_cached_goalies(cache_path)
     if cached:
         if os.getenv("NHL_DEBUG_GOALIES") == "1":
@@ -574,11 +609,11 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     last_http_status: Optional[int] = None
     last_html_len: Optional[int] = None
 
+    # 1) Try puckpedia
     try:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
         parsed = _canonicalize_goalies_map(parsed)
-        parsed_count = len(parsed)
-        if parsed_count >= 1:
+        if len(parsed) >= 1:
             _write_cached_goalies(
                 cache_path,
                 parsed,
@@ -590,7 +625,8 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
             if debug:
                 _debug_goalies_summary("puckpedia", date_received, parsed)
             return parsed
-        last_error = f"puckpedia returned {parsed_count} goalies"
+
+        last_error = f"puckpedia returned {len(parsed)} goalies"
         last_http_status = meta.get("status")
         last_html_len = meta.get("html_len")
         if debug:
@@ -600,19 +636,26 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
         if debug:
             print(f"[nhl goalies] WARNING: failed to fetch puckpedia: {exc}")
 
+    # 2) DailyFaceoff: ALWAYS include base URL; optionally try dated URL keys that are URL-safe
     providers = [("dailyfaceoff", DAILY_FACEOFF_URL, _parse_daily_faceoff)]
     for date_key in date_keys:
-        # DailyFaceoff URL paths must be url-safe; avoid slash-formatted dates to prevent 404s.
+        # Only allow YYYY-MM-DD or MM-DD-YYYY in path. Never allow slashes.
+        if "/" in (date_key or ""):
+            continue
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}|\d{2}-\d{2}-\d{4}", date_key or ""):
             continue
         providers.insert(0, ("dailyfaceoff", f"{DAILY_FACEOFF_URL}/{date_key}", _parse_daily_faceoff))
+
     for name, url, parser in providers:
         try:
             html, status = _get_with_retry(url, headers={"Accept": "text/html"})
             os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
+
+            # debug artifacts
             debug_html_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_goalies_debug.html")
             with open(debug_html_path, "w", encoding="utf-8") as f:
                 f.write(html or "")
+
             soup = BeautifulSoup(html or "", "html.parser")
             next_data = soup.find("script", {"id": "__NEXT_DATA__"})
             next_data_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_next_data.json")
@@ -623,12 +666,16 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
                 missing_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_next_data_missing.txt")
                 with open(missing_path, "w", encoding="utf-8") as f:
                     f.write((html or "")[:500])
+
             if debug:
                 print(f"[nhl goalies] debug provider={name} url={url} status={status} html_len={len(html or '')}")
+
             parsed = parser(html)
             parsed = _canonicalize_goalies_map(parsed)
+
             if debug:
                 _debug_parse_details(name, url, status, html, parsed)
+
             if len(parsed) >= 1:
                 _write_cached_goalies(
                     cache_path,
@@ -641,17 +688,21 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
                 if debug:
                     _debug_goalies_summary(name, date_received, parsed)
                 return parsed
+
             last_error = f"{name} returned {len(parsed)} goalies"
             last_http_status = status
             last_html_len = len(html or "")
             if debug:
                 print(f"[nhl goalies] WARNING: empty parse status={status} html_len={len(html or '')} url={url}")
+
         except Exception as exc:
             last_error = f"{name} fetch failed: {exc}"
             if debug:
                 print(f"[nhl goalies] WARNING: failed to fetch {url}: {exc}")
 
+    # 3) Last resort: most recent cached goalie map (any date)
     fallback = _load_most_recent_cached_goalies()
     if fallback:
         return fallback
+
     raise RuntimeError(last_error or "No goalie providers returned data")
