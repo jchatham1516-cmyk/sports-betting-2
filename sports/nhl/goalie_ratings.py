@@ -16,6 +16,7 @@ NHL_STATS_BASE = "https://api.nhle.com/stats/rest/en/goalie"
 NHL_STATS_LIMIT = 300
 DEFAULT_LEAGUE_AVG_SV = 0.903
 _GOALIE_LOOKUP_CACHE: dict[str, dict[str, dict]] = {}
+_GOALIE_LEAGUE_STATS_CACHE: dict[str, tuple[float, float, float]] = {}
 
 
 def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 20, max_retries: int = 3) -> dict:
@@ -135,6 +136,44 @@ def _goalie_lookup_for_season(season: str) -> dict[str, dict]:
     return lookup
 
 
+def _league_goalie_stats(season: str) -> tuple[float, float, float]:
+    cached = _GOALIE_LEAGUE_STATS_CACHE.get(season)
+    if cached is not None:
+        return cached
+    payload = _fetch_goalie_stats(season)
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    sv_values: list[float] = []
+    for row in data:
+        try:
+            sv_pct = float(row.get("savePct"))
+        except Exception:
+            continue
+        if sv_pct <= 0:
+            continue
+        sv_values.append(sv_pct)
+    league_avg_sv = float(sum(sv_values) / len(sv_values)) if sv_values else DEFAULT_LEAGUE_AVG_SV
+    ratings: list[float] = []
+    for sv_pct in sv_values:
+        rating = (sv_pct - league_avg_sv) * 1000.0
+        rating = max(-30.0, min(30.0, rating))
+        ratings.append(rating)
+    if ratings:
+        league_avg_rating = float(sum(ratings) / len(ratings))
+        if len(ratings) > 1:
+            mean = league_avg_rating
+            league_std_rating = float((sum((r - mean) ** 2 for r in ratings) / len(ratings)) ** 0.5)
+        else:
+            league_std_rating = 1.0
+    else:
+        league_avg_rating = 0.0
+        league_std_rating = 1.0
+    if league_std_rating <= 1e-6:
+        league_std_rating = 1.0
+    stats = (league_avg_sv, league_avg_rating, league_std_rating)
+    _GOALIE_LEAGUE_STATS_CACHE[season] = stats
+    return stats
+
+
 def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, bool]:
     if not goalie_name:
         return (0.0, False)
@@ -158,12 +197,13 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
     except Exception:
         return (0.0, False)
 
-    league_avg = DEFAULT_LEAGUE_AVG_SV
-    rating = (sv_pct - league_avg) * 1000.0
+    league_avg_sv, league_avg_rating, league_std_rating = _league_goalie_stats(season)
+    rating = (sv_pct - league_avg_sv) * 1000.0
     rating = max(-30.0, min(30.0, rating))
     if games < 5:
         rating *= 0.5
-    return (float(rating), True)
+    strength = (rating - league_avg_rating) / league_std_rating
+    return (float(strength), True)
 
 
 def get_goalie_rating(goalie_name: str, season: str) -> float:

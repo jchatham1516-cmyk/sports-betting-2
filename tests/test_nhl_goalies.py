@@ -6,8 +6,7 @@ import pandas as pd
 from sports.nhl import goalies as goalies_module
 from sports.nhl import goalie_ratings
 from sports.common.elo import EloState
-from sports.nhl.model import GOALIE_PROB_PER_RATING, _compute_goalie_adjustment, _goalie_adjustment
-from sports.nhl.model import run_daily_nhl
+from sports.nhl.model import _compute_goalie_adjustment, run_daily_nhl
 
 
 def test_goalie_provider_parses_daily_faceoff_table(monkeypatch, tmp_path):
@@ -66,6 +65,11 @@ def test_goalie_rating_known_and_unknown(monkeypatch):
                 "goalieFullName": "Igor Shesterkin",
                 "savePct": 0.92,
                 "gamesPlayed": 12,
+            },
+            {
+                "goalieFullName": "Connor Hellebuyck",
+                "savePct": 0.88,
+                "gamesPlayed": 12,
             }
         ]
     }
@@ -79,23 +83,16 @@ def test_goalie_rating_known_and_unknown(monkeypatch):
     assert missing == 0.0
 
 
-def test_goalie_adjustment_returns_raw_direction():
-    diff = 30.0 - (-30.0)
-    expected = diff * GOALIE_PROB_PER_RATING
-    assert _goalie_adjustment(30.0, -30.0) == expected
-    assert _goalie_adjustment(-30.0, 30.0) == -expected
-
-
 def test_goalie_adj_non_zero_when_both_goalies_found(monkeypatch):
     def _rating(name, _season):
-        return (20.0, True) if "Home" in name else (-10.0, True)
+        return (1.8, True) if "Home" in name else (-1.2, True)
 
     monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", _rating)
     monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 0.5)
-    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_ADJ", 0.08)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_PROB_SHIFT", 0.08)
     monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_UNKNOWN_PENALTY", 0.01)
 
-    adj, _, _, _, reason = _compute_goalie_adjustment(
+    adj, _, _, _, _, _, reason = _compute_goalie_adjustment(
         goalie_home_name="Home Goalie",
         goalie_away_name="Away Goalie",
         goalie_home_status="CONFIRMED",
@@ -107,32 +104,15 @@ def test_goalie_adj_non_zero_when_both_goalies_found(monkeypatch):
     assert reason == "goalie_rating_applied"
 
 
-def test_goalie_adj_neutral_when_one_goalie_missing(monkeypatch):
-    monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", lambda name, _season: (12.0, True))
-    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 0.5)
-
-    adj, _, _, _, reason = _compute_goalie_adjustment(
-        goalie_home_name="Home Goalie",
-        goalie_away_name="",
-        goalie_home_status="CONFIRMED",
-        goalie_away_status="UNKNOWN",
-        season_label="2024",
-    )
-
-    assert abs(adj) <= 0.0
-    assert reason == "goalie_missing_opponent"
-
-
-def test_goalie_adj_clamped_to_max(monkeypatch):
+def test_goalie_adj_limited_for_elite_vs_weak(monkeypatch):
     def _rating(name, _season):
-        return (50.0, True) if "Home" in name else (-50.0, True)
+        return (3.0, True) if "Home" in name else (-3.0, True)
 
     monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", _rating)
-    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 1.0)
-    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_ADJ", 0.02)
-    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_UNKNOWN_PENALTY", 0.01)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 0.35)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_PROB_SHIFT", 0.06)
 
-    adj, _, _, _, _ = _compute_goalie_adjustment(
+    adj, _, _, _, _, _, _ = _compute_goalie_adjustment(
         goalie_home_name="Home Goalie",
         goalie_away_name="Away Goalie",
         goalie_home_status="CONFIRMED",
@@ -140,7 +120,40 @@ def test_goalie_adj_clamped_to_max(monkeypatch):
         season_label="2024",
     )
 
-    assert abs(adj) <= 0.02
+    assert abs(adj) <= 0.06
+
+
+def test_goalie_adj_zero_for_equal_goalies(monkeypatch):
+    monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", lambda _name, _season: (1.2, True))
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 0.35)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_PROB_SHIFT", 0.06)
+
+    adj, _, _, _, _, _, _ = _compute_goalie_adjustment(
+        goalie_home_name="Home Goalie",
+        goalie_away_name="Away Goalie",
+        goalie_home_status="CONFIRMED",
+        goalie_away_status="CONFIRMED",
+        season_label="2024",
+    )
+
+    assert abs(adj) < 1e-6
+
+
+def test_goalie_adj_small_when_goalie_missing(monkeypatch):
+    monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", lambda _name, _season: (1.2, True))
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_UNKNOWN_PENALTY", 0.01)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_PROB_SHIFT", 0.06)
+
+    adj, _, _, _, _, _, reason = _compute_goalie_adjustment(
+        goalie_home_name="Home Goalie",
+        goalie_away_name="",
+        goalie_home_status="CONFIRMED",
+        goalie_away_status="UNKNOWN",
+        season_label="2024",
+    )
+
+    assert abs(adj) <= 0.01
+    assert reason == "goalie_missing_opponent"
 
 
 def test_run_daily_nhl_uses_goalies_when_available(monkeypatch):
