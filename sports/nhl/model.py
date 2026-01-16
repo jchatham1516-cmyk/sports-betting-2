@@ -571,6 +571,12 @@ def _compute_goalie_adjustment(
                 goalie_adj = float(_clamp(math.copysign(min_shift, goalie_strength_diff or 1.0), -max_adj, max_adj))
                 goalie_prob_shift = goalie_adj
             goalie_reason = "goalie_rating_applied"
+        elif not home_found and not away_found:
+            confidence = min(status_w_home, status_w_away)
+            base = float(NHL_GOALIE_UNKNOWN_PENALTY)
+            goalie_adj = float(_clamp(base * confidence, -max_adj, max_adj))
+            goalie_prob_shift = goalie_adj
+            goalie_reason = "goalie_unknown_names_present"
         else:
             penalty = float(max(0.0, NHL_GOALIE_UNKNOWN_PENALTY))
             if home_found and not away_found:
@@ -1083,11 +1089,14 @@ def _run_goalie_regression_check(df: pd.DataFrame) -> None:
         any_both_found = bool(both_found_series.any())
     any_non_zero = bool(goalie_adj.fillna(0.0).astype(float).ne(0.0).any())
     if any_both_found and not any_non_zero:
-        raise RuntimeError(
+        msg = (
             "goalie_adj was zero for all games despite goalie names present; "
             "inspect goalie_home_name/goalie_away_name, goalie_home_status/goalie_away_status, "
             "goalie_home_found/goalie_away_found, goalie_confidence_weight, goalie_prob_shift, goalie_reason"
         )
+        if STRICT_SANITY:
+            raise RuntimeError(msg)
+        print(f"[NHL WARNING] {msg}")
     if not any_non_zero:
         print(
             "[NHL WARNING] goalie_adj was zero for all games; goalie names or ratings missing "

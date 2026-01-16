@@ -101,11 +101,12 @@ def _fetch_goalie_stats(season: str) -> dict:
         payload = _get_with_retry(NHL_STATS_BASE, params=params)
     except Exception as exc:
         print(f"[nhl goalie ratings] WARNING: stats fetch failed: {exc}")
-        cached = _load_cached_stats(cache_path)
-        if cached:
-            if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
-                print(f"[nhl goalie ratings] using cached stats fallback for season {season}")
-            return cached
+        if os.path.exists(cache_path):
+            cached = _load_cached_stats(cache_path)
+            if cached:
+                if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
+                    print(f"[nhl goalie ratings] using cached stats fallback for season {season}")
+                return cached
         return {}
 
     if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
