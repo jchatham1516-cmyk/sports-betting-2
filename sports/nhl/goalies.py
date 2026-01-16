@@ -163,13 +163,13 @@ def _date_keys_for_goalies(date_str: str) -> tuple[str, list[str]]:
     parsed = _parse_goalie_date(date_str)
     if not parsed:
         raw = str(date_str)
-        return raw, [raw]
+        safe_raw = raw.replace("/", "-")
+        return safe_raw, [safe_raw]
     return (
         parsed.strftime("%Y-%m-%d"),
         [
             parsed.strftime("%Y-%m-%d"),
             parsed.strftime("%m-%d-%Y"),
-            parsed.strftime("%m/%d/%Y"),
         ],
     )
 
@@ -599,6 +599,8 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
 
     providers = [("dailyfaceoff", DAILY_FACEOFF_URL, _parse_daily_faceoff)]
     for date_key in date_keys:
+        if "/" in date_key:
+            continue
         providers.insert(0, ("dailyfaceoff", f"{DAILY_FACEOFF_URL}/{date_key}", _parse_daily_faceoff))
     for name, url, parser in providers:
         try:

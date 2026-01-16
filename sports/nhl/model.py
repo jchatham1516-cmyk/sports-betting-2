@@ -570,6 +570,15 @@ def _compute_goalie_adjustment(
             elif away_found and not home_found:
                 scaled_penalty = float(penalty * conf_w)
                 goalie_adj = float(_clamp(-scaled_penalty, -max_adj, max_adj))
+            elif not home_found and not away_found:
+                unknown_weight = _goalie_status_weight("UNKNOWN")
+                if status_w_home > unknown_weight or status_w_away > unknown_weight:
+                    if status_w_home > status_w_away:
+                        scaled_penalty = float(penalty * conf_w)
+                        goalie_adj = float(_clamp(scaled_penalty, -max_adj, max_adj))
+                    elif status_w_away > status_w_home:
+                        scaled_penalty = float(penalty * conf_w)
+                        goalie_adj = float(_clamp(-scaled_penalty, -max_adj, max_adj))
             goalie_prob_shift = goalie_adj
             goalie_reason = "goalie_rating_fallback"
         return (
@@ -1044,7 +1053,24 @@ def _run_goalie_regression_check(df: pd.DataFrame) -> None:
     goalie_adj = df.get("goalie_adj")
     if goalie_adj is None:
         raise RuntimeError("goalie_adj column missing during regression check")
+    goalie_reason = df.get("goalie_reason")
+    goalie_home_found = df.get("goalie_home_found")
+    goalie_away_found = df.get("goalie_away_found")
+    any_rating_applied = bool(
+        goalie_reason.fillna("").astype(str).eq("goalie_rating_applied").any()
+    ) if goalie_reason is not None else False
+    any_rating_found = any_rating_applied
+    if goalie_home_found is not None:
+        any_rating_found = any_rating_found or bool(goalie_home_found.fillna(False).astype(bool).any())
+    if goalie_away_found is not None:
+        any_rating_found = any_rating_found or bool(goalie_away_found.fillna(False).astype(bool).any())
     any_non_zero = bool(goalie_adj.fillna(0.0).astype(float).ne(0.0).any())
+    if not any_rating_found:
+        print(
+            "[NHL WARNING] goalie ratings unavailable for games with goalie names; "
+            "continuing without goalie adjustments."
+        )
+        return
     if not any_non_zero:
         raise RuntimeError(
             "goalie_adj was zero for all games despite goalie names present; "
