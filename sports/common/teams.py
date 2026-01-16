@@ -47,6 +47,7 @@ NHL_ALIASES = {
     "NY Rangers": "New York Rangers",
     "NY Islanders": "New York Islanders",
     "NJ Devils": "New Jersey Devils",
+    "New Jersey": "New Jersey Devils",
     "Tampa Bay": "Tampa Bay Lightning",
     "Vegas": "Vegas Golden Knights",
     "St Louis": "St Louis Blues",

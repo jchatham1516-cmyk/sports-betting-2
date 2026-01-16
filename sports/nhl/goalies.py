@@ -20,6 +20,7 @@ DEFAULT_CACHE_TTL_MINUTES = 120
 DAILY_FACEOFF_URL = "https://www.dailyfaceoff.com/starting-goalies"
 PUCKPEDIA_URL = "https://depth-charts.puckpedia.com/starting-goalies"
 PUCKPEDIA_PARAMS = {"dayCount": 1, "utm_medium": "embed", "utm_source": "puckpedia", "ads": "true"}
+DATE_FORMATS = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y")
 
 
 @dataclass
@@ -119,6 +120,59 @@ def _normalize_goalie_name(name: Optional[str]) -> Optional[str]:
     return cleaned
 
 
+def _build_goalie_info(
+    team: str,
+    *,
+    goalie_raw: Optional[str],
+    status_raw: Optional[str],
+    source: str,
+    original_team: Optional[str] = None,
+) -> GoalieInfo:
+    goalie_name = _normalize_goalie_name(goalie_raw)
+    status = _normalize_status(status_raw or "")
+    if not goalie_name:
+        status = "UNKNOWN"
+    return GoalieInfo(
+        team=team,
+        goalie_name=goalie_name,
+        status=status,
+        source=source,
+        original_team=original_team,
+    )
+
+
+def _parse_goalie_date(date_str: str) -> Optional[datetime]:
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(str(date_str), fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _date_keys_for_goalies(date_str: str) -> tuple[str, list[str]]:
+    parsed = _parse_goalie_date(date_str)
+    if not parsed:
+        raw = str(date_str)
+        return raw, [raw]
+    return (
+        parsed.strftime("%Y-%m-%d"),
+        [
+            parsed.strftime("%Y-%m-%d"),
+            parsed.strftime("%m-%d-%Y"),
+            parsed.strftime("%m/%d/%Y"),
+        ],
+    )
+
+
+def _debug_goalies_summary(source: str, date_received: str, goalies: Dict[str, GoalieInfo]) -> None:
+    sample_keys = list(goalies.keys())[:5]
+    print(
+        "[nhl goalies] "
+        f"debug summary source={source} date_received={date_received} teams={len(goalies)} sample_keys={sample_keys}"
+    )
+
+
 def _cache_ttl_seconds() -> int:
     try:
         ttl_min = int(float(os.getenv("NHL_GOALIE_CACHE_TTL_MIN", str(DEFAULT_CACHE_TTL_MINUTES))))
@@ -178,16 +232,20 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
             team_raw = _coerce_string(node.get(team_key), fallback_keys=fallback_team_keys)
             goalie_raw = _coerce_string(node.get(goalie_key), fallback_keys=fallback_goalie_keys)
             goalie_name = _normalize_goalie_name(goalie_raw)
-            if not goalie_name:
-                continue
-            if len(goalie_name.split()) < 2:
+            if goalie_name and len(goalie_name.split()) < 2:
                 continue
             team = canon_team(team_raw or "") if team_raw else None
             if not team and team_raw:
                 team = team_raw.strip()
             if not team:
                 continue
-            results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status="UNKNOWN", source="dailyfaceoff")
+            results[team] = _build_goalie_info(
+                team,
+                goalie_raw=goalie_raw,
+                status_raw="UNKNOWN",
+                source="dailyfaceoff",
+                original_team=team_raw.strip() if team_raw else None,
+            )
 
     if results:
         return results
@@ -197,13 +255,19 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
         goalie_raw = card.select_one(".starting-goalies__goalie-name")
         status_raw = card.select_one(".starting-goalies__status")
         goalie_name = _normalize_goalie_name(goalie_raw.get_text(" ", strip=True) if goalie_raw else "")
-        if not goalie_name or len(goalie_name.split()) < 2:
+        if goalie_name and len(goalie_name.split()) < 2:
             continue
         team = canon_team(team_raw.get_text(" ", strip=True) if team_raw else "")
         if not team:
             continue
-        status = _normalize_status(status_raw.get_text(" ", strip=True) if status_raw else "")
-        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="dailyfaceoff")
+        status_text = status_raw.get_text(" ", strip=True) if status_raw else ""
+        results[team] = _build_goalie_info(
+            team,
+            goalie_raw=goalie_name,
+            status_raw=status_text,
+            source="dailyfaceoff",
+            original_team=team_raw.get_text(" ", strip=True) if team_raw else None,
+        )
 
     return results
 
@@ -222,17 +286,16 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
             goalie_raw = card.select_one(".goalie-name")
             status_raw = card.select_one(".status")
             goalie_name = _normalize_goalie_name(goalie_raw.get_text(" ", strip=True) if goalie_raw else "")
-            if not goalie_name or len(goalie_name.split()) < 2:
+            if goalie_name and len(goalie_name.split()) < 2:
                 continue
             team = canon_team(team_raw)
             if not team:
                 continue
-            status = _normalize_status(status_raw.get_text(" ", strip=True) if status_raw else "")
             original_team = team_raw if team_raw and team_raw != team else None
-            results[team] = GoalieInfo(
-                team=team,
-                goalie_name=goalie_name,
-                status=status,
+            results[team] = _build_goalie_info(
+                team,
+                goalie_raw=goalie_name,
+                status_raw=status_raw.get_text(" ", strip=True) if status_raw else "",
                 source="puckpedia",
                 original_team=original_team,
             )
@@ -251,17 +314,16 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
         goalie_raw = cells[1].get_text(" ", strip=True)
         status_raw = cells[2].get_text(" ", strip=True) if len(cells) > 2 else ""
         goalie_name = _normalize_goalie_name(goalie_raw)
-        if not goalie_name or len(goalie_name.split()) < 2:
+        if goalie_name and len(goalie_name.split()) < 2:
             continue
         team = canon_team(team_raw)
         if not team:
             continue
-        status = _normalize_status(status_raw)
         original_team = team_raw if team_raw and team_raw != team else None
-        results[team] = GoalieInfo(
-            team=team,
-            goalie_name=goalie_name,
-            status=status,
+        results[team] = _build_goalie_info(
+            team,
+            goalie_raw=goalie_name,
+            status_raw=status_raw,
             source="puckpedia",
             original_team=original_team,
         )
@@ -429,9 +491,13 @@ def _write_cached_goalies(
 
 
 def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
-    cache_path = os.path.join(GOALIE_CACHE_DIR, f"nhl_goalies_{date}.json")
+    date_received = str(date)
+    cache_key, date_keys = _date_keys_for_goalies(date_received)
+    cache_path = os.path.join(GOALIE_CACHE_DIR, f"nhl_goalies_{cache_key}.json")
     cached = _load_cached_goalies(cache_path)
     if cached:
+        if os.getenv("NHL_DEBUG_GOALIES") == "1":
+            _debug_goalies_summary("cache", date_received, cached)
         return cached
 
     debug = os.getenv("NHL_DEBUG_GOALIES") == "1"
@@ -448,10 +514,12 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
                 cache_path,
                 parsed,
                 source="puckpedia",
-                date_key=date,
+                date_key=cache_key,
                 http_status=meta.get("status"),
                 html_len=meta.get("html_len"),
             )
+            if debug:
+                _debug_goalies_summary("puckpedia", date_received, parsed)
             return parsed
         last_error = f"puckpedia returned {parsed_count} goalies"
         last_http_status = meta.get("status")
@@ -463,11 +531,9 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
         if debug:
             print(f"[nhl goalies] WARNING: failed to fetch puckpedia: {exc}")
 
-    daily_faceoff_date_url = f"{DAILY_FACEOFF_URL}/{date}"
-    providers = [
-        ("dailyfaceoff", daily_faceoff_date_url, _parse_daily_faceoff),
-        ("dailyfaceoff", DAILY_FACEOFF_URL, _parse_daily_faceoff),
-    ]
+    providers = [("dailyfaceoff", DAILY_FACEOFF_URL, _parse_daily_faceoff)]
+    for date_key in date_keys:
+        providers.insert(0, ("dailyfaceoff", f"{DAILY_FACEOFF_URL}/{date_key}", _parse_daily_faceoff))
     for name, url, parser in providers:
         try:
             html, status = _get_with_retry(url, headers={"Accept": "text/html"})
@@ -496,10 +562,12 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
                     cache_path,
                     parsed,
                     source=name,
-                    date_key=date,
+                    date_key=cache_key,
                     http_status=status,
                     html_len=len(html or ""),
                 )
+                if debug:
+                    _debug_goalies_summary(name, date_received, parsed)
                 return parsed
             last_error = f"{name} returned {len(parsed)} goalies"
             last_http_status = status
