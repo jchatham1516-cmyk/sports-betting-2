@@ -615,14 +615,34 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         pass
 
     debug_goalies = os.getenv("NHL_DEBUG_GOALIES") == "1"
+    goalies_map_raw: dict = {}
+    date_keys_tried: list[str] = []
     try:
-        goalies_map = get_starting_goalies(date_key)
-    except Exception as exc:
-        if debug_goalies:
-            print(f"[nhl goalies] WARNING: unable to load goalies: {exc}")
-        goalies_map = {}
+        dt = datetime.strptime(game_date_str, "%m/%d/%Y").date()
+        date_key_iso = dt.strftime("%Y-%m-%d")
+        date_key_mdy = dt.strftime("%m-%d-%Y")
+        date_key_slash = dt.strftime("%m/%d/%Y")
+        for dk in [date_key_iso, date_key_mdy, date_key_slash]:
+            date_keys_tried.append(dk)
+            try:
+                goalies_map_raw = get_starting_goalies(dk) or {}
+                if goalies_map_raw:
+                    break
+            except Exception as exc:
+                if debug_goalies:
+                    print(f"[nhl goalies] get_starting_goalies({dk}) failed: {exc}")
+                continue
+    except Exception:
+        date_key_iso = str(game_date_str)
+        date_keys_tried = [date_key_iso]
+        goalies_map_raw = get_starting_goalies(date_key_iso) or {}
+
     if debug_goalies:
-        print(f"[nhl goalies] date_key={date_key} goalies_map_size={len(goalies_map)}")
+        print(
+            "[nhl goalies] "
+            f"date_keys_tried={date_keys_tried} raw_size={len(goalies_map_raw)}"
+        )
+    goalies_map = goalies_map_raw
 
     def _get_goalie(team_canon: str, team_raw: str) -> tuple[GoalieInfo, list[str]]:
         keys_tried: list[str] = []
