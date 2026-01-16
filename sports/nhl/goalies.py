@@ -16,6 +16,7 @@ from sports.common.teams import canon_team
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 GOALIE_CACHE_DIR = "results/cache"
+CACHE_TTL_SECONDS = 2 * 60 * 60
 DAILY_FACEOFF_URL = "https://www.dailyfaceoff.com/starting-goalies"
 PUCKPEDIA_URL = "https://depth-charts.puckpedia.com/starting-goalies"
 PUCKPEDIA_PARAMS = {"dayCount": 1, "utm_medium": "embed", "utm_source": "puckpedia", "ads": "true"}
@@ -107,6 +108,17 @@ def _normalize_status(text: str) -> str:
     return "UNKNOWN"
 
 
+def _normalize_goalie_name(name: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+    cleaned = " ".join(str(name).strip().split())
+    if not cleaned:
+        return None
+    if cleaned.upper() in {"TBD", "UNKNOWN", "TBA"}:
+        return None
+    return cleaned
+
+
 def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
@@ -155,9 +167,9 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
             continue
         team_raw = _coerce_string(node.get(team_key), fallback_keys=fallback_team_keys)
         goalie_raw = _coerce_string(node.get(goalie_key), fallback_keys=fallback_goalie_keys)
-        if not goalie_raw:
+        goalie_name = _normalize_goalie_name(goalie_raw)
+        if not goalie_name:
             continue
-        goalie_name = goalie_raw.strip()
         if len(goalie_name.split()) < 2:
             continue
         team = canon_team(team_raw or "") if team_raw else None
@@ -189,7 +201,8 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
         team_raw = cells[0].get_text(" ", strip=True)
         goalie_raw = cells[1].get_text(" ", strip=True)
         status_raw = cells[2].get_text(" ", strip=True) if len(cells) > 2 else ""
-        if len(goalie_raw.split()) < 2:
+        goalie_name = _normalize_goalie_name(goalie_raw)
+        if not goalie_name or len(goalie_name.split()) < 2:
             continue
         team = canon_team(team_raw)
         if not team:
@@ -198,7 +211,7 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
         original_team = team_raw if team_raw and team_raw != team else None
         results[team] = GoalieInfo(
             team=team,
-            goalie_name=goalie_raw,
+            goalie_name=goalie_name,
             status=status,
             source="puckpedia",
             original_team=original_team,
@@ -208,7 +221,7 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
 
 
 def _fetch_goalies_puckpedia_with_meta(day_count: int = 1) -> tuple[Dict[str, GoalieInfo], dict]:
-    debug = os.getenv("NHL_GOALIES_DEBUG") == "1"
+    debug = os.getenv("NHL_DEBUG_GOALIES") == "1"
     html, status = _get_with_retry(
         PUCKPEDIA_URL,
         params={**PUCKPEDIA_PARAMS, "dayCount": int(day_count)},
@@ -269,6 +282,15 @@ def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             payload = json.load(f) or {}
+        fetched_at = payload.get("fetched_at_iso")
+        if fetched_at:
+            try:
+                fetched_dt = datetime.fromisoformat(str(fetched_at))
+                age_seconds = (datetime.now(timezone.utc) - fetched_dt).total_seconds()
+                if age_seconds > CACHE_TTL_SECONDS:
+                    return {}
+            except Exception:
+                pass
         results = {}
         for team, info in (payload.get("goalies") or {}).items():
             if not isinstance(info, dict):
@@ -277,9 +299,10 @@ def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
             team_canon = canon_team(stored_team)
             if not team_canon:
                 continue
+            goalie_name = _normalize_goalie_name(info.get("goalie_name"))
             results[team_canon] = GoalieInfo(
                 team=team_canon,
-                goalie_name=info.get("goalie_name"),
+                goalie_name=goalie_name,
                 status=info.get("status") or "UNKNOWN",
                 source=info.get("source") or "cache",
                 original_team=info.get("team_raw") or (stored_team if stored_team != team_canon else None),
@@ -362,7 +385,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     if cached:
         return cached
 
-    debug = os.getenv("NHL_GOALIES_DEBUG") == "1"
+    debug = os.getenv("NHL_DEBUG_GOALIES") == "1"
     last_error: Optional[str] = None
     last_http_status: Optional[int] = None
     last_html_len: Optional[int] = None
