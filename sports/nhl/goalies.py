@@ -113,55 +113,41 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     def _extract_goalies_from_json(data: object) -> None:
         if isinstance(data, dict):
             team_candidate = None
-            for key in ("team", "teamName", "team_name", "teamFullName", "team_full_name"):
-                value = data.get(key)
+            goalie_candidate = None
+            status_candidate = None
+            for key, value in data.items():
                 if isinstance(value, str):
-                    team_candidate = value
-                    break
-                if isinstance(value, dict):
+                    if key.lower() in {"team", "teamname", "team_name", "teamfullname", "team_full_name"}:
+                        team_candidate = value
+                    elif key.lower() in {
+                        "goalie",
+                        "goaliename",
+                        "goalie_name",
+                        "goaliefullname",
+                        "goalie_full_name",
+                        "player",
+                        "playername",
+                        "player_name",
+                        "name",
+                    }:
+                        goalie_candidate = value
+                    elif key.lower() in {"status", "goaliestatus", "confirmationstatus", "state"}:
+                        status_candidate = value
+                elif isinstance(value, dict):
                     nested_team = value.get("name") or value.get("fullName") or value.get("shortName")
                     if isinstance(nested_team, str):
-                        team_candidate = nested_team
-                        break
-
-            goalie_candidate = None
-            for key in (
-                "goalie",
-                "goalieName",
-                "goalie_name",
-                "goalieFullName",
-                "goalie_full_name",
-                "player",
-                "playerName",
-                "player_name",
-                "name",
-            ):
-                value = data.get(key)
-                if isinstance(value, str):
-                    goalie_candidate = value
-                    break
-                if isinstance(value, dict):
+                        team_candidate = team_candidate or nested_team
                     nested_goalie = value.get("name") or value.get("fullName")
                     if isinstance(nested_goalie, str):
-                        goalie_candidate = nested_goalie
-                        break
-
-            status_candidate = None
-            for key in ("status", "goalieStatus", "confirmationStatus", "state"):
-                value = data.get(key)
-                if isinstance(value, str):
-                    status_candidate = value
-                    break
-
+                        goalie_candidate = goalie_candidate or nested_goalie
+                elif isinstance(value, list):
+                    pass
             if team_candidate and goalie_candidate and _looks_like_player_name(goalie_candidate):
                 _add_row(team_candidate, goalie_candidate, status_candidate or "")
-
             for key, value in data.items():
-                if key in {"startingGoalies", "StartingGoalies", "goalies"}:
-                    _extract_goalies_from_json(value)
-                elif isinstance(key, str):
+                if isinstance(key, str) and isinstance(value, dict):
                     team_from_key = canon_team(key)
-                    if team_from_key and isinstance(value, dict):
+                    if team_from_key:
                         goalie_name = value.get("goalieName") or value.get("goalie") or value.get("name")
                         status_raw = value.get("status") or value.get("goalieStatus") or value.get("state")
                         if isinstance(goalie_name, str) and _looks_like_player_name(goalie_name):
@@ -177,7 +163,7 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
         script_text = script.string or script.get_text(" ", strip=True)
         if not script_text:
             continue
-        if not re.search(r"(startingGoalies|StartingGoalies|goalies)", script_text):
+        if not re.search(r"(startingGoalies|StartingGoalies|goalie)", script_text):
             continue
         for match in re.finditer(r"[\{\[]", script_text):
             try:
@@ -188,25 +174,25 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
         if results:
             return results
 
-    for anchor in soup.find_all("a"):
-        anchor_text = anchor.get_text(" ", strip=True)
-        if not anchor_text:
+    blocks = soup.find_all(["div", "li", "tr", "section", "article", "p"])
+    for block in blocks:
+        block_text = block.get_text(" ", strip=True)
+        if not block_text:
             continue
-        if not re.search(r"\b(Confirmed|Projected)\b", anchor_text, re.IGNORECASE):
+        team = _find_team_in_text(block_text)
+        if not team:
             continue
-        container = anchor.parent or anchor
-        container_text = container.get_text(" ", strip=True)
-        status = _normalize_status(anchor_text)
         goalie_match = re.search(
             r"\b[A-Z][a-zA-Z'’.-]+ [A-Z][a-zA-Z'’.-]+(?: [A-Z][a-zA-Z'’.-]+)?\b",
-            container_text,
+            block_text,
         )
         if not goalie_match:
             continue
         goalie_name = goalie_match.group(0)
-        team = _find_team_in_text(container_text)
-        if team and _looks_like_player_name(goalie_name):
-            _add_row(team, goalie_name, status)
+        if not _looks_like_player_name(goalie_name):
+            continue
+        status = _normalize_status(block_text)
+        _add_row(team, goalie_name, status)
 
     return results
 
