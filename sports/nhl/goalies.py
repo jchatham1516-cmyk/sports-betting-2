@@ -188,42 +188,56 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
             return False
         return True
 
-    def _goalie_from_container(container) -> Optional[str]:
-        if not container:
-            return None
-        for anchor in container.select("a[href]"):
+    def _status_near(anchor, container) -> str:
+        for node in [anchor, anchor.parent, anchor.find_parent(["div", "td", "li", "p", "span"])]:
+            status = _status_from_block(node)
+            if status != "UNKNOWN":
+                return status
+        return "UNKNOWN"
+
+    def _goalie_after_team(team_anchor, container) -> tuple[Optional[str], str]:
+        if not team_anchor or not container:
+            return (None, "UNKNOWN")
+        for anchor in team_anchor.find_all_next("a", href=True):
+            if container not in anchor.parents:
+                break
             if _is_goalie_anchor(anchor):
-                return _text_from(anchor)
-        return None
+                goalie_name = _text_from(anchor)
+                status = _status_near(anchor, container)
+                return (goalie_name, status)
+        return (None, "UNKNOWN")
 
-    def _find_team_container(team_anchor) -> Optional[object]:
-        if not team_anchor:
-            return None
-        parent = team_anchor.find_parent(["div", "section", "article", "li", "tr", "td"])
-        return parent or team_anchor.parent
+    def _find_matchup_containers() -> list:
+        containers: list = []
+        seen = set()
+        for team_anchor in soup.select("a[href*='/team/']"):
+            parent = team_anchor.parent
+            while parent and parent.name not in {"html", "body"}:
+                if len(parent.select("a[href*='/team/']")) >= 2:
+                    if id(parent) not in seen:
+                        containers.append(parent)
+                        seen.add(id(parent))
+                    break
+                parent = parent.parent
+        return containers
 
-    team_links = [a for a in soup.select("a[href]") if "/team/" in (a.get("href") or "")]
-    if team_links:
+    for container in _find_matchup_containers():
+        team_links = container.select("a[href*='/team/']")
+        if len(team_links) < 2:
+            continue
+        seen_teams = set()
         for team_anchor in team_links:
             href = team_anchor.get("href") or ""
             slug = _slug_from_href(href)
             team_guess = _team_from_slug(slug)
             team = canon_team(team_guess)
-            if not team:
+            if not team or team in seen_teams:
                 continue
-            container = _find_team_container(team_anchor) or soup
-            goalie_name = _goalie_from_container(container)
+            goalie_name, status = _goalie_after_team(team_anchor, container)
             if not goalie_name:
-                parent = container.find_parent(["div", "section", "article", "li", "tr", "td"]) if container else None
-                if parent and parent is not container:
-                    goalie_name = _goalie_from_container(parent)
-                    container = parent or container
-            status = _status_from_block(container)
-            if goalie_name and status == "UNKNOWN":
-                status = "PROJECTED"
-            if not goalie_name and status == "UNKNOWN":
                 continue
             results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
+            seen_teams.add(team)
 
     if results:
         return results
