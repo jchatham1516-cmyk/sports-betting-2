@@ -599,7 +599,8 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
 
     providers = [("dailyfaceoff", DAILY_FACEOFF_URL, _parse_daily_faceoff)]
     for date_key in date_keys:
-        if "/" in date_key:
+        # DailyFaceoff URL paths must be url-safe; avoid slash-formatted dates to prevent 404s.
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}|\d{2}-\d{2}-\d{4}", date_key or ""):
             continue
         providers.insert(0, ("dailyfaceoff", f"{DAILY_FACEOFF_URL}/{date_key}", _parse_daily_faceoff))
     for name, url, parser in providers:

@@ -1041,6 +1041,9 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
 def _run_goalie_regression_check(df: pd.DataFrame) -> None:
     if df is None or df.empty:
         return
+    if os.getenv("NHL_GOALIE_REGRESSION_TEST", "0") != "1":
+        # Default: keep production runs alive if goalie sources are missing.
+        return
     home_names = df.get("goalie_home_name")
     away_names = df.get("goalie_away_name")
     if home_names is None or away_names is None:
