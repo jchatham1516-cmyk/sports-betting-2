@@ -125,8 +125,8 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
 
 def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
+    links = soup.find_all("a", href=True)
     results: Dict[str, GoalieInfo] = {}
-    ignored_anchor_words = {"team", "lineup"}
     debug = os.getenv("NHL_GOALIES_DEBUG") == "1"
     manual_slug_map = {
         "st-louis-blues": "St. Louis Blues",
@@ -161,83 +161,57 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
                 return parts[idx + 1]
         return parts[-1] if parts else ""
 
-    def _text_from(node) -> str:
-        return node.get_text(" ", strip=True) if node else ""
+    used_goalies: set[str] = set()
+    current_team: Optional[str] = None
 
-    def _status_from_row(row) -> str:
-        if not row:
-            return "UNKNOWN"
-        text = _text_from(row).upper()
-        if "CONFIRMED" in text:
-            return "CONFIRMED"
-        if "PROJECTED" in text:
-            return "PROJECTED"
-        return "UNKNOWN"
-
-    def _is_goalie_anchor(anchor) -> bool:
-        href = anchor.get("href") or ""
+    for link in links:
+        href = link.get("href") or ""
         href_lower = href.lower()
         if "/team/" in href_lower:
-            return False
-        if "/player/" not in href_lower and "puckpedia.com/player/" not in href_lower:
-            return False
-        text_clean = _text_from(anchor).strip()
-        if not text_clean or len(text_clean.split()) < 2:
-            return False
-        lower_text = text_clean.lower()
-        if any(word in lower_text for word in ignored_anchor_words):
-            return False
-        return True
-
-    def _find_team_row(team_anchor):
-        for parent in team_anchor.parents:
-            if parent.name in {"li", "tr", "div", "section"} and parent.get("class"):
-                return parent
-        if team_anchor.parent and team_anchor.parent.parent:
-            return team_anchor.parent.parent
-        return team_anchor.parent
-
-    def _goalie_from_team_row(team_row) -> Optional[str]:
-        if not team_row:
-            return None
-        for anchor in team_row.select("a[href*='/player/'], a[href*='puckpedia.com/player/']"):
-            if _is_goalie_anchor(anchor):
-                return _text_from(anchor)
-        return None
-
-    used_goalies: set[str] = set()
-    duplicate_goalies: list[str] = []
-
-    for container in soup.find_all(["section", "article", "div"]):
-        team_links = container.select("a[href*='/team/']")
-        if len(team_links) != 2:
-            continue
-        for team_anchor in team_links:
-            href = team_anchor.get("href") or ""
             slug = _slug_from_href(href)
             team_guess = _team_from_slug(slug)
             team = canon_team(team_guess)
-            if not team or team in results:
-                continue
-            team_row = _find_team_row(team_anchor)
-            goalie_name = _goalie_from_team_row(team_row)
-            if not goalie_name:
+            if team and team not in results:
+                current_team = team
+            else:
+                current_team = None
+            continue
+
+        if current_team and ("/player/" in href_lower or "puckpedia.com/player/" in href_lower):
+            goalie_name = link.get_text(" ", strip=True)
+            if not goalie_name or len(goalie_name.split()) < 2:
                 continue
             if goalie_name in used_goalies:
-                duplicate_goalies.append(goalie_name)
                 continue
-            used_goalies.add(goalie_name)
-            status = _status_from_row(team_row)
-            results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
+            status = "PROJECTED"
+            parent_text = link.parent.get_text(" ", strip=True).upper() if link.parent else ""
+            if "CONFIRMED" in parent_text:
+                status = "CONFIRMED"
+            elif "PROJECTED" in parent_text:
+                status = "PROJECTED"
+            if current_team not in results:
+                results[current_team] = GoalieInfo(
+                    team=current_team,
+                    goalie_name=goalie_name,
+                    status=status,
+                    source="puckpedia",
+                )
+                used_goalies.add(goalie_name)
+            current_team = None
 
     if debug:
-        unique_goalies = {info.goalie_name for info in results.values() if info.goalie_name}
-        print(
-            "[nhl goalies] debug puckpedia parsed_teams="
-            f"{len(results)} unique_goalies={len(unique_goalies)}"
+        team_links_count = sum(1 for link in links if "/team/" in (link.get("href") or "").lower())
+        player_links_count = sum(
+            1
+            for link in links
+            if "/player/" in (link.get("href") or "").lower()
+            or "puckpedia.com/player/" in (link.get("href") or "").lower()
         )
-        if duplicate_goalies:
-            print(f"[nhl goalies] debug puckpedia duplicate_goalies={sorted(set(duplicate_goalies))}")
+        sample = [(team, info.goalie_name, info.status) for team, info in list(results.items())[:10]]
+        print(
+            "[nhl goalies] debug puckpedia team_links="
+            f"{team_links_count} player_links={player_links_count} parsed={len(results)} sample={sample}"
+        )
 
     if len(results) < 15:
         return {}
