@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from datetime import datetime, date, timedelta, timezone
 from typing import Dict, Optional, Tuple, Any
 
@@ -122,6 +123,46 @@ def _goalie_date_keys(game_date_str: str) -> list[str]:
         except Exception:
             continue
     return [str(game_date_str)]
+
+
+def _goalie_key_variants(team_key: Optional[str]) -> list[str]:
+    if not team_key:
+        return []
+    raw = " ".join(str(team_key).strip().split())
+    if not raw:
+        return []
+    seen: set[str] = set()
+    variants: list[str] = []
+
+    def _add(value: Optional[str]) -> None:
+        if not value:
+            return
+        cleaned = " ".join(str(value).strip().split())
+        if not cleaned or cleaned in seen:
+            return
+        seen.add(cleaned)
+        variants.append(cleaned)
+
+    _add(raw)
+    _add(raw.upper())
+    raw_no_punct = re.sub(r"[’'`\\.]", "", raw)
+    _add(raw_no_punct)
+    _add(raw_no_punct.upper())
+    raw_canon = canon_team(raw)
+    _add(raw_canon)
+    if raw_no_punct:
+        _add(canon_team(raw_no_punct))
+
+    simplified = raw_no_punct.strip()
+    if simplified:
+        upper_simplified = simplified.upper()
+        if upper_simplified.startswith("NY "):
+            _add(f"New York {simplified[3:].strip()}")
+        if upper_simplified.startswith("NEW YORK "):
+            _add(f"NY {simplified[9:].strip()}")
+        if upper_simplified.startswith("N Y "):
+            _add(f"New York {simplified[4:].strip()}")
+    return variants
 
 
 def _american_to_prob(ml: float) -> float:
@@ -654,12 +695,16 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     debug_goalies = os.getenv("NHL_DEBUG_GOALIES") == "1"
     goalies_map_raw: dict = {}
     date_keys_tried = _goalie_date_keys(game_date_str)
+    date_key_sizes: list[tuple[str, int]] = []
     for dk in date_keys_tried:
         try:
-            goalies_map_raw = get_starting_goalies(dk) or {}
-            if goalies_map_raw:
+            candidate = get_starting_goalies(dk) or {}
+            date_key_sizes.append((dk, len(candidate)))
+            if candidate:
+                goalies_map_raw = candidate
                 break
         except Exception as exc:
+            date_key_sizes.append((dk, 0))
             if debug_goalies:
                 print(f"[nhl goalies] get_starting_goalies({dk}) failed: {exc}")
             continue
@@ -667,34 +712,44 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     if debug_goalies:
         print(
             "[nhl goalies] "
-            f"date_keys_tried={date_keys_tried} raw_size={len(goalies_map_raw)}"
+            f"date_keys_tried={date_keys_tried} raw_size={len(goalies_map_raw)} "
+            f"date_key_sizes={date_key_sizes}"
         )
-    goalies_map: dict[str, GoalieInfo] = {}
+    if not goalies_map_raw:
+        print(
+            "[nhl goalies] WARNING: no starting goalies returned for any date format; "
+            "check goalie source availability."
+        )
+    goalies_map_norm: dict[str, GoalieInfo] = {}
     for key, info in (goalies_map_raw or {}).items():
-        if not key:
+        if not key and not info:
             continue
-        key_trim = str(key).strip()
-        if key_trim and key_trim not in goalies_map:
-            goalies_map[key_trim] = info
-        key_canon = canon_team(key_trim)
-        if key_canon and key_canon not in goalies_map:
-            goalies_map[key_canon] = info
+        for variant in _goalie_key_variants(key):
+            if variant not in goalies_map_norm:
+                goalies_map_norm[variant] = info
+        for variant in _goalie_key_variants(getattr(info, "team", None)):
+            if variant not in goalies_map_norm:
+                goalies_map_norm[variant] = info
+        for variant in _goalie_key_variants(getattr(info, "original_team", None)):
+            if variant not in goalies_map_norm:
+                goalies_map_norm[variant] = info
     if debug_goalies:
         print(
             "[nhl goalies] "
-            f"normalized_size={len(goalies_map)} raw_keys_sample={list(goalies_map_raw)[:5]}"
+            f"normalized_size={len(goalies_map_norm)} raw_keys_sample={list(goalies_map_raw)[:5]}"
         )
 
     def _get_goalie(team_canon: str, team_raw: str) -> tuple[GoalieInfo, list[str]]:
         keys_tried: list[str] = []
         seen: set[str] = set()
-        for k in [team_canon, canon_team(team_raw), (team_raw or "").strip(), canon_team(team_canon)]:
-            if not k or k in seen:
-                continue
-            seen.add(k)
-            keys_tried.append(k)
-            if k in goalies_map:
-                return goalies_map[k], keys_tried
+        for team_key in [team_canon, team_raw, canon_team(team_raw), canon_team(team_canon)]:
+            for k in _goalie_key_variants(team_key):
+                if not k or k in seen:
+                    continue
+                seen.add(k)
+                keys_tried.append(k)
+                if k in goalies_map_norm:
+                    return goalies_map_norm[k], keys_tried
         return GoalieInfo(team=team_canon, goalie_name=None, status="UNKNOWN", source=""), keys_tried
 
     rows: list[dict] = []
@@ -956,8 +1011,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 print(f"[NHL WARNING] {msg}")
 
     df = pd.DataFrame(rows)
-    if os.getenv("NHL_GOALIE_REGRESSION_TEST") == "1":
-        _run_goalie_regression_check(df)
+    _run_goalie_regression_check(df)
     return df
 
 
