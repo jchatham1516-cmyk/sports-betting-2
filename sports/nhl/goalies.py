@@ -127,7 +127,7 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
     status_re = re.compile(r"\b(CONFIRMED|PROJECTED)\b", re.IGNORECASE)
-    ignored_anchor_text = {"team", "lineup", "betting lines", "lines", "odds"}
+    ignored_anchor_words = {"team", "lineup"}
     manual_slug_map = {
         "st-louis-blues": "St. Louis Blues",
         "new-york-rangers": "New York Rangers",
@@ -164,92 +164,44 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
                 return parts[idx + 1]
         return parts[-1] if parts else ""
 
-    def _status_from_text(text: str) -> str:
-        status = _normalize_status(text)
-        if status != "UNKNOWN":
-            return status
+    def _status_from_block(block) -> str:
+        if not block:
+            return "UNKNOWN"
+        text = " ".join(block.stripped_strings)
+        match = status_re.search(text)
+        if match:
+            return _normalize_status(match.group(1))
         return "UNKNOWN"
 
-    def _guess_status(block) -> str:
-        status_node = block.select_one(".status, .goalie-status, [class*='status']")
-        status_text = _text_from(status_node)
-        if status_text:
-            return _status_from_text(status_text)
-        return _status_from_text(block.get_text(" ", strip=True))
-
-    def _guess_team(block) -> str:
-        for attr in ("data-team", "data-team-name"):
-            if block.has_attr(attr) and block.get(attr):
-                return str(block.get(attr))
-        selectors = [".team-name", ".team", "[class*='team-name']", "[class*='team']"]
-        for sel in selectors:
-            team_text = _text_from(block.select_one(sel))
-            if team_text:
-                return team_text
-        return ""
-
-    def _guess_goalie(block) -> Optional[str]:
-        selectors = [".goalie-name", ".player-name", "[class*='goalie-name']", "[class*='player-name']"]
-        for sel in selectors:
-            name_text = _text_from(block.select_one(sel))
-            if name_text:
-                return name_text
-        for sel in ("[class*='goalie']", "[class*='player']"):
-            name_text = _text_from(block.select_one(sel))
-            if name_text and _normalize_status(name_text) == "UNKNOWN":
-                return name_text
-        return None
-
-    def _is_goalie_block(tag) -> bool:
-        if not tag or not tag.has_attr("class"):
-            return False
-        classes = " ".join(tag.get("class", [])).lower()
-        return "goalie" in classes and any(k in classes for k in ("card", "block", "row", "item"))
-
     def _is_goalie_anchor(anchor) -> bool:
-        href = (anchor.get("href") or "").lower()
-        if "/team/" in href:
+        href = anchor.get("href") or ""
+        href_lower = href.lower()
+        if "/team/" in href_lower:
             return False
-        if "puckpedia.com" not in href:
+        if "/player/" not in href_lower and "puckpedia.com/player/" not in href_lower:
             return False
-        text = _text_from(anchor).lower()
-        if not text or text in ignored_anchor_text:
+        text = _text_from(anchor)
+        text_clean = text.strip()
+        if not text_clean or len(text_clean.split()) < 2:
             return False
-        if len(text.split()) < 2:
+        lower_text = text_clean.lower()
+        if any(word in lower_text for word in ignored_anchor_words):
             return False
         return True
 
-    def _status_near(node, container) -> str:
-        for scope in [node, getattr(node, "parent", None), container]:
-            if not scope:
-                continue
-            text = " ".join(scope.stripped_strings)
-            match = status_re.search(text)
-            if match:
-                return _normalize_status(match.group(1))
-        return "UNKNOWN"
+    def _goalie_from_container(container) -> Optional[str]:
+        if not container:
+            return None
+        for anchor in container.select("a[href]"):
+            if _is_goalie_anchor(anchor):
+                return _text_from(anchor)
+        return None
 
-    def _goalie_for_team(container, team_anchor) -> tuple[Optional[str], str]:
-        goalie_links = [a for a in container.select("a[href]") if _is_goalie_anchor(a)]
-        if not goalie_links:
-            return None, "UNKNOWN"
-        all_tags = [t for t in container.descendants if getattr(t, "name", None)]
-        index_map = {id(tag): idx for idx, tag in enumerate(all_tags)}
-        team_index = index_map.get(id(team_anchor))
-        candidates = []
-        for link in goalie_links:
-            idx = index_map.get(id(link), -1)
-            candidates.append((idx, link))
-        chosen = None
-        if team_index is not None:
-            after = [(idx, link) for idx, link in candidates if idx >= team_index]
-            chosen = min(after, key=lambda item: item[0]) if after else min(candidates, key=lambda item: abs(item[0] - team_index))
-        else:
-            chosen = candidates[0]
-        goalie_link = chosen[1] if chosen else None
-        goalie_name = _text_from(goalie_link) if goalie_link else None
-        status = _status_near(goalie_link, container) if goalie_link else "UNKNOWN"
-        return goalie_name, status
+    def _find_container(team_anchor) -> Optional[object]:
+        if not team_anchor:
+            return None
+        parent = team_anchor.find_parent(["div", "section", "article", "li", "tr", "td"])
+        return parent or team_anchor.parent
 
     team_links = [a for a in soup.select("a[href]") if "/team/" in (a.get("href") or "")]
     if team_links:
@@ -260,25 +212,12 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
             team = canon_team(team_guess)
             if not team:
                 continue
-            container = team_anchor.find_parent(["div", "section", "article", "li", "tr"]) or team_anchor.parent or soup
-            goalie_name, status = _goalie_for_team(container, team_anchor)
+            container = _find_container(team_anchor) or soup
+            goalie_name = _goalie_from_container(container)
+            status = _status_from_block(container)
+            if goalie_name and status == "UNKNOWN":
+                status = "PROJECTED"
             results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
-
-    if results:
-        return results
-
-    blocks = list(soup.find_all(_is_goalie_block))
-    if not blocks:
-        blocks = list(soup.select("[data-team], [data-team-name]"))
-
-    for block in blocks:
-        team_raw = _guess_team(block)
-        team = canon_team(team_raw)
-        if not team:
-            continue
-        goalie_name = _guess_goalie(block)
-        status = _guess_status(block)
-        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
 
     if results:
         return results
@@ -310,6 +249,15 @@ def _fetch_goalies_puckpedia_with_meta(day_count: int = 1) -> tuple[Dict[str, Go
     html_len = len(html or "")
     if debug:
         print(f"[nhl goalies] debug provider=puckpedia url={PUCKPEDIA_URL} status={status} html_len={html_len}")
+        os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
+        html_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.html")
+        text_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.txt")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html or "")
+        soup = BeautifulSoup(html or "", "html.parser")
+        cleaned_text = "\n".join(line for line in (soup.get_text("\n", strip=True) or "").splitlines() if line.strip())
+        with open(text_path, "w", encoding="utf-8") as f:
+            f.write(cleaned_text)
     parsed = _parse_puckpedia(html)
     if debug:
         _debug_parse_details("puckpedia", PUCKPEDIA_URL, status, html, parsed)
