@@ -112,17 +112,26 @@ def _parse_iso_date(s: str) -> Optional[date]:
 
 def _goalie_date_keys(game_date_str: str) -> list[str]:
     formats = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y")
+    parsed: Optional[date] = None
     for fmt in formats:
         try:
             parsed = datetime.strptime(str(game_date_str), fmt).date()
-            return [
-                parsed.strftime("%Y-%m-%d"),
-                parsed.strftime("%m-%d-%Y"),
-                parsed.strftime("%m/%d/%Y"),
-            ]
+            break
         except Exception:
             continue
-    return [str(game_date_str)]
+    if parsed is None:
+        try:
+            parsed_dt = datetime.fromisoformat(str(game_date_str).replace("Z", "+00:00"))
+            parsed = parsed_dt.date()
+        except Exception:
+            parsed = None
+    if parsed is None:
+        return [str(game_date_str)]
+    return [
+        parsed.strftime("%Y-%m-%d"),
+        parsed.strftime("%m-%d-%Y"),
+        parsed.strftime("%m/%d/%Y"),
+    ]
 
 
 def _goalie_key_variants(team_key: Optional[str]) -> list[str]:
@@ -481,7 +490,7 @@ def _goalie_status_weight(status: str) -> float:
     return 0.35
 
 
-def _goalie_game_status(home_name: str, away_name: str) -> str:
+def _goalie_game_status(home_name: Optional[str], away_name: Optional[str]) -> str:
     if home_name and away_name:
         return "OK"
     if home_name or away_name:
@@ -489,21 +498,21 @@ def _goalie_game_status(home_name: str, away_name: str) -> str:
     return "UNKNOWN"
 
 
-def _sanitize_goalie_name(name: Optional[str]) -> str:
+def _sanitize_goalie_name(name: Optional[str]) -> Optional[str]:
     if not name:
-        return ""
+        return None
     cleaned = " ".join(str(name).strip().split())
     if not cleaned:
-        return ""
+        return None
     if cleaned.upper() in {"TBD", "UNKNOWN", "TBA", "N/A"}:
-        return ""
+        return None
     return cleaned
 
 
 def _compute_goalie_adjustment(
     *,
-    goalie_home_name: str,
-    goalie_away_name: str,
+    goalie_home_name: Optional[str],
+    goalie_away_name: Optional[str],
     goalie_home_status: str,
     goalie_away_status: str,
     season_label: str,
@@ -724,7 +733,12 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
     for key, info in (goalies_map_raw or {}).items():
         if not key and not info:
             continue
-        for variant in _goalie_key_variants(key):
+        raw_key = " ".join(str(key).strip().split()) if key else ""
+        if raw_key:
+            for variant in {raw_key, canon_team(raw_key)}:
+                if variant and variant not in goalies_map_norm:
+                    goalies_map_norm[variant] = info
+        for variant in _goalie_key_variants(raw_key):
             if variant not in goalies_map_norm:
                 goalies_map_norm[variant] = info
         for variant in _goalie_key_variants(getattr(info, "team", None)):
