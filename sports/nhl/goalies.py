@@ -344,12 +344,11 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     if cached:
         return cached
 
-    min_required = 20
+    min_required = 5
     debug = os.getenv("NHL_GOALIES_DEBUG") == "1"
     last_error: Optional[str] = None
     last_http_status: Optional[int] = None
     last_html_len: Optional[int] = None
-    last_partial_goalies: Dict[str, GoalieInfo] = {}
 
     try:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
@@ -403,8 +402,6 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
             parsed = _canonicalize_goalies_map(parsed)
             if debug:
                 _debug_parse_details(name, url, status, html, parsed)
-            if parsed:
-                last_partial_goalies = parsed
             if len(parsed) >= min_required:
                 _write_cached_goalies(
                     cache_path,
@@ -427,8 +424,8 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
 
     _write_cached_goalies(
         cache_path,
-        last_partial_goalies,
-        source="none" if not last_partial_goalies else "partial",
+        {},
+        source="none",
         date_key=date,
         error=last_error or "no goalie providers succeeded",
         http_status=last_http_status,
