@@ -137,9 +137,6 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
         "utah": "Utah",
     }
 
-    def _text_from(node) -> str:
-        return node.get_text(" ", strip=True) if node else ""
-
     def _team_from_slug(slug: str) -> str:
         if not slug:
             return ""
@@ -164,6 +161,9 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
                 return parts[idx + 1]
         return parts[-1] if parts else ""
 
+    def _text_from(node) -> str:
+        return node.get_text(" ", strip=True) if node else ""
+
     def _status_from_block(block) -> str:
         if not block:
             return "UNKNOWN"
@@ -180,8 +180,7 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
             return False
         if "/player/" not in href_lower and "puckpedia.com/player/" not in href_lower:
             return False
-        text = _text_from(anchor)
-        text_clean = text.strip()
+        text_clean = _text_from(anchor).strip()
         if not text_clean or len(text_clean.split()) < 2:
             return False
         lower_text = text_clean.lower()
@@ -197,7 +196,7 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
                 return _text_from(anchor)
         return None
 
-    def _find_container(team_anchor) -> Optional[object]:
+    def _find_team_container(team_anchor) -> Optional[object]:
         if not team_anchor:
             return None
         parent = team_anchor.find_parent(["div", "section", "article", "li", "tr", "td"])
@@ -212,11 +211,18 @@ def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
             team = canon_team(team_guess)
             if not team:
                 continue
-            container = _find_container(team_anchor) or soup
+            container = _find_team_container(team_anchor) or soup
             goalie_name = _goalie_from_container(container)
+            if not goalie_name:
+                parent = container.find_parent(["div", "section", "article", "li", "tr", "td"]) if container else None
+                if parent and parent is not container:
+                    goalie_name = _goalie_from_container(parent)
+                    container = parent or container
             status = _status_from_block(container)
             if goalie_name and status == "UNKNOWN":
                 status = "PROJECTED"
+            if not goalie_name and status == "UNKNOWN":
+                continue
             results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
 
     if results:
