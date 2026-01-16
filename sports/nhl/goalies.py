@@ -386,6 +386,7 @@ def _canonicalize_goalies_map(goalies: Dict[str, GoalieInfo]) -> Dict[str, Goali
     canon_results: Dict[str, GoalieInfo] = {}
     failed_keys: list[str] = []
     debug = os.getenv("NHL_DEBUG_GOALIES") == "1"
+    before_count = len(goalies)
     for team_key, info in goalies.items():
         stripped_key = (team_key or "").strip()
         if not stripped_key:
@@ -394,9 +395,8 @@ def _canonicalize_goalies_map(goalies: Dict[str, GoalieInfo]) -> Dict[str, Goali
         if not team_canon:
             failed_keys.append(stripped_key)
         final_team = team_canon or stripped_key
-        original_team = info.original_team or info.team
-        if info.original_team is None and original_team and original_team != final_team:
-            info.original_team = original_team
+        if info.original_team is None:
+            info.original_team = info.team
         info.team = final_team
         keys_to_store = {final_team, stripped_key}
         if team_canon:
@@ -409,8 +409,8 @@ def _canonicalize_goalies_map(goalies: Dict[str, GoalieInfo]) -> Dict[str, Goali
     if debug:
         sample_failed = failed_keys[:5]
         print(
-            "[nhl goalies] debug canonicalize parsed_rows="
-            f"{len(goalies)} survived={len(canon_results)} failed_canon_sample={sample_failed}"
+            "[nhl goalies] debug canonicalize "
+            f"before={before_count} after={len(canon_results)} failed_canon_sample={sample_failed}"
         )
     return canon_results
 
