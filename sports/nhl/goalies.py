@@ -381,37 +381,30 @@ def fetch_goalies_puckpedia(day_count: int = 1) -> Dict[str, GoalieInfo]:
     parsed, _meta = _fetch_goalies_puckpedia_with_meta(day_count=day_count)
     return parsed
 
-
 def _canonicalize_goalies_map(goalies: Dict[str, GoalieInfo]) -> Dict[str, GoalieInfo]:
     canon_results: Dict[str, GoalieInfo] = {}
-    failed_keys: list[str] = []
-    debug = os.getenv("NHL_DEBUG_GOALIES") == "1"
-    before_count = len(goalies)
-    for team_key, info in goalies.items():
-        stripped_key = (team_key or "").strip()
-        if not stripped_key:
+
+    for team_key, info in (goalies or {}).items():
+        raw_key = (str(team_key) if team_key is not None else "").strip()
+        if not raw_key:
             continue
-        team_canon = canon_team(stripped_key)
-        if not team_canon:
-            failed_keys.append(stripped_key)
-        final_team = team_canon or stripped_key
-        if info.original_team is None:
+
+        team_canon = canon_team(raw_key)
+
+        # Preserve the original team label if we have it
+        if info.original_team is None and info.team and info.team != (team_canon or raw_key):
             info.original_team = info.team
-        info.team = final_team
-        keys_to_store = {final_team, stripped_key}
+
+        # Set info.team to canonical if available, else raw
+        info.team = team_canon or raw_key
+
+        # ALWAYS keep raw key so we never drop provider keys
+        canon_results[raw_key] = info
+
+        # ALSO store canonical key when available (helps model lookups)
         if team_canon:
-            keys_to_store.add(team_canon)
-        alias_key = re.sub(r"[\W_]+", "", stripped_key)
-        if alias_key:
-            keys_to_store.add(alias_key)
-        for key in keys_to_store:
-            canon_results[key] = info
-    if debug:
-        sample_failed = failed_keys[:5]
-        print(
-            "[nhl goalies] debug canonicalize "
-            f"before={before_count} after={len(canon_results)} failed_canon_sample={sample_failed}"
-        )
+            canon_results[team_canon] = info
+
     return canon_results
 
 
