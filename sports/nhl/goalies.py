@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -37,7 +38,14 @@ def _get_with_retry(
     headers: Optional[dict] = None,
 ) -> tuple[str, int]:
     last_exc: Optional[Exception] = None
-    req_headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
+    req_headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.dailyfaceoff.com/",
+        "Accept": "text/html",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+    }
     if headers:
         req_headers.update(headers)
     for attempt in range(1, max_retries + 1):
@@ -84,39 +92,121 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
         status = _normalize_status(status_raw)
         results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="dailyfaceoff")
 
-    tables = soup.select(
-        "table.starting-goalies__table, table.starting-goalies, table#starting-goalies, table[data-testid*='starting-goalies']"
-    )
-    for table in tables:
-        for row in table.select("tr"):
-            cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-            if len(cells) < 2:
-                continue
-            status_raw = cells[2] if len(cells) > 2 else ""
-            _add_row(cells[0], cells[1], status_raw)
+    def _looks_like_player_name(value: str) -> bool:
+        if not value:
+            return False
+        words = value.split()
+        if len(words) < 2:
+            return False
+        return all(word[0].isupper() for word in words if word)
 
-    if results:
-        return results
+    def _find_team_in_text(text: str) -> Optional[str]:
+        tokens = [t.strip(",/") for t in text.split()]
+        for size in range(4, 0, -1):
+            for i in range(0, len(tokens) - size + 1):
+                candidate = " ".join(tokens[i : i + size])
+                team = canon_team(candidate)
+                if team:
+                    return team
+        return None
 
-    for card in soup.select(
-        ".starting-goalies__goalie-card, .starting-goalies__goalie, .starting-goalies__row, .starting-goalies__item"
-    ):
-        team_node = card.select_one(
-            ".starting-goalies__team-name, .starting-goalies__team, .team-name"
-        )
-        goalie_node = card.select_one(
-            ".starting-goalies__goalie-name, .starting-goalies__goalie, .starting-goalies__player-name, .player-name"
-        )
-        status_node = card.select_one(
-            ".starting-goalies__status, .starting-goalies__status-text, .status"
-        )
-        if not team_node or not goalie_node:
+    def _extract_goalies_from_json(data: object) -> None:
+        if isinstance(data, dict):
+            team_candidate = None
+            for key in ("team", "teamName", "team_name", "teamFullName", "team_full_name"):
+                value = data.get(key)
+                if isinstance(value, str):
+                    team_candidate = value
+                    break
+                if isinstance(value, dict):
+                    nested_team = value.get("name") or value.get("fullName") or value.get("shortName")
+                    if isinstance(nested_team, str):
+                        team_candidate = nested_team
+                        break
+
+            goalie_candidate = None
+            for key in (
+                "goalie",
+                "goalieName",
+                "goalie_name",
+                "goalieFullName",
+                "goalie_full_name",
+                "player",
+                "playerName",
+                "player_name",
+                "name",
+            ):
+                value = data.get(key)
+                if isinstance(value, str):
+                    goalie_candidate = value
+                    break
+                if isinstance(value, dict):
+                    nested_goalie = value.get("name") or value.get("fullName")
+                    if isinstance(nested_goalie, str):
+                        goalie_candidate = nested_goalie
+                        break
+
+            status_candidate = None
+            for key in ("status", "goalieStatus", "confirmationStatus", "state"):
+                value = data.get(key)
+                if isinstance(value, str):
+                    status_candidate = value
+                    break
+
+            if team_candidate and goalie_candidate and _looks_like_player_name(goalie_candidate):
+                _add_row(team_candidate, goalie_candidate, status_candidate or "")
+
+            for key, value in data.items():
+                if key in {"startingGoalies", "StartingGoalies", "goalies"}:
+                    _extract_goalies_from_json(value)
+                elif isinstance(key, str):
+                    team_from_key = canon_team(key)
+                    if team_from_key and isinstance(value, dict):
+                        goalie_name = value.get("goalieName") or value.get("goalie") or value.get("name")
+                        status_raw = value.get("status") or value.get("goalieStatus") or value.get("state")
+                        if isinstance(goalie_name, str) and _looks_like_player_name(goalie_name):
+                            _add_row(team_from_key, goalie_name, status_raw or "")
+                if isinstance(value, (dict, list)):
+                    _extract_goalies_from_json(value)
+        elif isinstance(data, list):
+            for item in data:
+                _extract_goalies_from_json(item)
+
+    decoder = json.JSONDecoder()
+    for script in soup.find_all("script"):
+        script_text = script.string or script.get_text(" ", strip=True)
+        if not script_text:
             continue
-        _add_row(
-            team_node.get_text(" ", strip=True),
-            goalie_node.get_text(" ", strip=True),
-            status_node.get_text(" ", strip=True) if status_node else "",
+        if not re.search(r"(startingGoalies|StartingGoalies|goalies)", script_text):
+            continue
+        for match in re.finditer(r"[\{\[]", script_text):
+            try:
+                parsed, _ = decoder.raw_decode(script_text[match.start() :])
+            except json.JSONDecodeError:
+                continue
+            _extract_goalies_from_json(parsed)
+        if results:
+            return results
+
+    for anchor in soup.find_all("a"):
+        anchor_text = anchor.get_text(" ", strip=True)
+        if not anchor_text:
+            continue
+        if not re.search(r"\b(Confirmed|Projected)\b", anchor_text, re.IGNORECASE):
+            continue
+        container = anchor.parent or anchor
+        container_text = container.get_text(" ", strip=True)
+        status = _normalize_status(anchor_text)
+        goalie_match = re.search(
+            r"\b[A-Z][a-zA-Z'’.-]+ [A-Z][a-zA-Z'’.-]+(?: [A-Z][a-zA-Z'’.-]+)?\b",
+            container_text,
         )
+        if not goalie_match:
+            continue
+        goalie_name = goalie_match.group(0)
+        team = _find_team_in_text(container_text)
+        if team and _looks_like_player_name(goalie_name):
+            _add_row(team, goalie_name, status)
 
     return results
 
@@ -195,8 +285,6 @@ def _fetch_goalies_puckpedia_with_meta(day_count: int = 1) -> tuple[Dict[str, Go
     print("[PuckPedia] player_links=", player_links_count)
     if debug:
         print(f"[nhl goalies] debug puckpedia team_links={team_links_count} player_links={player_links_count}")
-    if team_links_count < 10 or player_links_count < 10:
-        return {}, {"status": status, "html_len": html_len, "html": html}
     parsed = _parse_puckpedia(html)
     print("[PuckPedia] parsed_goalies=", len(parsed))
     print("[PuckPedia] sample=", list(parsed.items())[:5])
@@ -292,7 +380,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     try:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
         parsed_count = len(parsed)
-        if parsed_count >= 20:
+        if parsed_count >= 10:
             _write_cached_goalies(
                 cache_path,
                 parsed,
@@ -320,12 +408,16 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     for name, url, parser in providers:
         try:
             html, status = _get_with_retry(url, headers={"Accept": "text/html"})
+            os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
+            debug_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_goalies_debug.html")
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(html or "")
             if debug:
                 print(f"[nhl goalies] debug provider={name} url={url} status={status} html_len={len(html or '')}")
             parsed = parser(html)
             if debug:
                 _debug_parse_details(name, url, status, html, parsed)
-            if parsed:
+            if len(parsed) >= 10:
                 _write_cached_goalies(
                     cache_path,
                     parsed,
@@ -335,7 +427,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
                     html_len=len(html or ""),
                 )
                 return parsed
-            last_error = f"{name} returned zero goalies"
+            last_error = f"{name} returned {len(parsed)} goalies"
             last_http_status = status
             last_html_len = len(html or "")
             if debug:
