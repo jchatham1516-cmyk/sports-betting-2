@@ -3,7 +3,7 @@ from pathlib import Path
 
 from sports.nhl import goalies as goalies_module
 from sports.nhl import goalie_ratings
-from sports.nhl.model import GOALIE_PROB_PER_RATING, _goalie_adjustment
+from sports.nhl.model import GOALIE_PROB_PER_RATING, _compute_goalie_adjustment, _goalie_adjustment
 
 
 def test_goalie_provider_parses_daily_faceoff_table(monkeypatch, tmp_path):
@@ -80,3 +80,60 @@ def test_goalie_adjustment_returns_raw_direction():
     expected = diff * GOALIE_PROB_PER_RATING
     assert _goalie_adjustment(30.0, -30.0) == expected
     assert _goalie_adjustment(-30.0, 30.0) == -expected
+
+
+def test_goalie_adj_non_zero_when_both_goalies_found(monkeypatch):
+    def _rating(name, _season):
+        return (20.0, True) if "Home" in name else (-10.0, True)
+
+    monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", _rating)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 0.5)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_ADJ", 0.08)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_UNKNOWN_PENALTY", 0.01)
+
+    adj, _, _, _, reason = _compute_goalie_adjustment(
+        goalie_home_name="Home Goalie",
+        goalie_away_name="Away Goalie",
+        goalie_home_status="CONFIRMED",
+        goalie_away_status="CONFIRMED",
+        season_label="2024",
+    )
+
+    assert adj != 0.0
+    assert reason == "goalie_rating_applied"
+
+
+def test_goalie_adj_neutral_when_one_goalie_missing(monkeypatch):
+    monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", lambda name, _season: (12.0, True))
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 0.5)
+
+    adj, _, _, _, reason = _compute_goalie_adjustment(
+        goalie_home_name="Home Goalie",
+        goalie_away_name="",
+        goalie_home_status="CONFIRMED",
+        goalie_away_status="UNKNOWN",
+        season_label="2024",
+    )
+
+    assert abs(adj) <= 0.0
+    assert reason == "goalie_missing_opponent"
+
+
+def test_goalie_adj_clamped_to_max(monkeypatch):
+    def _rating(name, _season):
+        return (50.0, True) if "Home" in name else (-50.0, True)
+
+    monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", _rating)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 1.0)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_ADJ", 0.02)
+    monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_UNKNOWN_PENALTY", 0.01)
+
+    adj, _, _, _, _ = _compute_goalie_adjustment(
+        goalie_home_name="Home Goalie",
+        goalie_away_name="Away Goalie",
+        goalie_home_status="CONFIRMED",
+        goalie_away_status="CONFIRMED",
+        season_label="2024",
+    )
+
+    assert abs(adj) <= 0.02
