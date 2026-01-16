@@ -81,27 +81,6 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
 
-    os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
-    debug_html_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_goalies_debug.html")
-    with open(debug_html_path, "w", encoding="utf-8") as f:
-        f.write(html or "")
-
-    def _add_row(team_raw: str, goalie_raw: str, status_raw: str, confirmed: bool) -> None:
-        team = canon_team(team_raw)
-        if not team:
-            return
-        goalie_name = goalie_raw.strip() if goalie_raw and goalie_raw.strip() else None
-        if not goalie_name:
-            return
-        status_text = (status_raw or "").upper()
-        if confirmed or "CONF" in status_text:
-            status = "CONFIRMED"
-        elif "PROJ" in status_text:
-            status = "PROJECTED"
-        else:
-            status = "PROJECTED"
-        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="dailyfaceoff")
-
     def _walk(obj: object):
         yield obj
         if isinstance(obj, dict):
@@ -111,24 +90,31 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
             for value in obj:
                 yield from _walk(value)
 
+    def _coerce_string(value: object, *, fallback_keys: tuple[str, ...]) -> Optional[str]:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in fallback_keys:
+                candidate = value.get(key)
+                if isinstance(candidate, str):
+                    return candidate
+        return None
+
     next_data = soup.find("script", {"id": "__NEXT_DATA__"})
     if not next_data:
-        return results
-    script_text = next_data.string
+        return {}
+    script_text = next_data.string or next_data.get_text()
     if not script_text:
-        return results
+        return {}
     try:
         parsed = json.loads(script_text)
     except json.JSONDecodeError:
-        return results
-
-    debug_json_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_next_data.json")
-    with open(debug_json_path, "w", encoding="utf-8") as f:
-        json.dump(parsed, f, indent=2, sort_keys=True)
+        return {}
 
     team_keys = ("teamName", "team", "teamAbbrev", "abbrev", "shortName")
     goalie_keys = ("goalieName", "goalie", "starter", "startingGoalie", "goalieFullName")
-    status_keys = ("status", "confirmed", "projection")
+    fallback_team_keys = ("teamName", "team", "teamAbbrev", "abbrev", "shortName", "name")
+    fallback_goalie_keys = ("goalieName", "goalie", "starter", "startingGoalie", "goalieFullName", "name")
 
     for node in _walk(parsed):
         if not isinstance(node, dict):
@@ -137,14 +123,19 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
         goalie_key = next((key for key in goalie_keys if key in node), None)
         if not team_key or not goalie_key:
             continue
-        status_key = next((key for key in status_keys if key in node), None)
-        team_raw = node.get(team_key)
-        goalie_raw = node.get(goalie_key)
-        status_raw = ""
-        confirmed = bool(node.get("confirmed"))
-        if status_key:
-            status_raw = str(node.get(status_key, ""))
-        _add_row(str(team_raw or ""), str(goalie_raw or ""), status_raw, confirmed)
+        team_raw = _coerce_string(node.get(team_key), fallback_keys=fallback_team_keys)
+        goalie_raw = _coerce_string(node.get(goalie_key), fallback_keys=fallback_goalie_keys)
+        if not goalie_raw:
+            continue
+        goalie_name = goalie_raw.strip()
+        if len(goalie_name.split()) < 2:
+            continue
+        team = canon_team(team_raw or "") if team_raw else None
+        if not team and team_raw:
+            team = team_raw.strip()
+        if not team:
+            continue
+        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status="UNKNOWN", source="dailyfaceoff")
 
     return results
 
@@ -314,6 +305,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     last_error: Optional[str] = None
     last_http_status: Optional[int] = None
     last_html_len: Optional[int] = None
+    last_partial_goalies: Dict[str, GoalieInfo] = {}
 
     try:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
@@ -347,15 +339,27 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
         try:
             html, status = _get_with_retry(url, headers={"Accept": "text/html"})
             os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
-            debug_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_goalies_debug.html")
-            with open(debug_path, "w", encoding="utf-8") as f:
+            debug_html_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_goalies_debug.html")
+            with open(debug_html_path, "w", encoding="utf-8") as f:
                 f.write(html or "")
+            soup = BeautifulSoup(html or "", "html.parser")
+            next_data = soup.find("script", {"id": "__NEXT_DATA__"})
+            next_data_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_next_data.json")
+            if next_data and (next_data.string or next_data.get_text()):
+                with open(next_data_path, "w", encoding="utf-8") as f:
+                    f.write(next_data.string or next_data.get_text())
+            else:
+                missing_path = os.path.join(GOALIE_CACHE_DIR, "dailyfaceoff_next_data_missing.txt")
+                with open(missing_path, "w", encoding="utf-8") as f:
+                    f.write((html or "")[:500])
             if debug:
                 print(f"[nhl goalies] debug provider={name} url={url} status={status} html_len={len(html or '')}")
             parsed = parser(html)
             if debug:
                 _debug_parse_details(name, url, status, html, parsed)
-            if len(parsed) >= 10:
+            if parsed:
+                last_partial_goalies = parsed
+            if len(parsed) >= 5:
                 _write_cached_goalies(
                     cache_path,
                     parsed,
@@ -377,8 +381,8 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
 
     _write_cached_goalies(
         cache_path,
-        {},
-        source="none",
+        last_partial_goalies,
+        source="none" if not last_partial_goalies else "partial",
         date_key=date,
         error=last_error or "no goalie providers succeeded",
         http_status=last_http_status,
