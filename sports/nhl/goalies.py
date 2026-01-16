@@ -4,7 +4,7 @@ import gzip
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as date_type
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -142,12 +142,20 @@ def _build_goalie_info(
 
 
 def _parse_goalie_date(date_str: str) -> Optional[datetime]:
+    if isinstance(date_str, datetime):
+        return date_str
+    if isinstance(date_str, date_type):
+        return datetime.combine(date_str, datetime.min.time())
+    raw = str(date_str)
     for fmt in DATE_FORMATS:
         try:
-            return datetime.strptime(str(date_str), fmt)
+            return datetime.strptime(raw, fmt)
         except Exception:
             continue
-    return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _date_keys_for_goalies(date_str: str) -> tuple[str, list[str]]:
