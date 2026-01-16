@@ -1080,28 +1080,27 @@ def _run_goalie_regression_check(df: pd.DataFrame) -> None:
         raise RuntimeError("goalie_adj column missing during regression check")
     goalie_home_found = df.get("goalie_home_found")
     goalie_away_found = df.get("goalie_away_found")
-    any_both_found = False
     if goalie_home_found is not None and goalie_away_found is not None:
         both_found_series = (
             goalie_home_found.fillna(False).astype(bool)
             & goalie_away_found.fillna(False).astype(bool)
         )
-        any_both_found = bool(both_found_series.any())
+        games_with_both_found = int(both_found_series.sum())
+    else:
+        games_with_both_found = 0
     any_non_zero = bool(goalie_adj.fillna(0.0).astype(float).ne(0.0).any())
-    if any_both_found and not any_non_zero:
+    games_with_both_names = int((home_found & away_found).sum())
+    any_non_zero_adj = bool(any_non_zero)
+    if not any_non_zero_adj:
         msg = (
-            "goalie_adj was zero for all games despite goalie names present; "
-            "inspect goalie_home_name/goalie_away_name, goalie_home_status/goalie_away_status, "
-            "goalie_home_found/goalie_away_found, goalie_confidence_weight, goalie_prob_shift, goalie_reason"
+            "goalie_adj was zero for all games; "
+            f"games_with_both_names={games_with_both_names} "
+            f"games_with_both_found={games_with_both_found} "
+            f"any_non_zero_adj={any_non_zero_adj}"
         )
         if STRICT_SANITY:
             raise RuntimeError(msg)
         print(f"[NHL WARNING] {msg}")
-    if not any_non_zero:
-        print(
-            "[NHL WARNING] goalie_adj was zero for all games; goalie names or ratings missing "
-            "for some matchups, continuing without goalie adjustments."
-        )
 
 
 def run_daily_probs_for_date(
