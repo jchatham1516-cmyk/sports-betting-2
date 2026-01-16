@@ -173,46 +173,35 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
 def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     results: Dict[str, GoalieInfo] = {}
-    used_goalies: set[str] = set()
-    duplicate_goalies: set[str] = set()
+    tables = soup.find_all("table")
+    if not tables:
+        return results
 
-    for block in soup.select("div, li, tr, section, article"):
-        team_links = [
-            link
-            for link in block.find_all("a", href=True)
-            if "/team/" in str(link.get("href") or "")
-        ]
-        player_links = [
-            link
-            for link in block.find_all("a", href=True)
-            if "/player/" in str(link.get("href") or "") or "puckpedia.com/player/" in str(link.get("href") or "")
-        ]
-        if len(team_links) != 1 or len(player_links) < 1:
+    def _row_count(table) -> int:
+        return len(table.find_all("tr"))
+
+    largest_table = max(tables, key=_row_count)
+
+    for row in largest_table.find_all("tr"):
+        cells = row.find_all(["td", "th"])
+        if len(cells) < 2:
             continue
-
-        team_href = str(team_links[0].get("href") or "")
-        slug = team_href.split("/team/")[-1].split("/")[0]
-        guess = slug.replace("-", " ").title()
-        team = canon_team(guess)
-        if not team or team in results:
+        team_raw = cells[0].get_text(" ", strip=True)
+        goalie_raw = cells[1].get_text(" ", strip=True)
+        status_raw = cells[2].get_text(" ", strip=True) if len(cells) > 2 else ""
+        if len(goalie_raw.split()) < 2:
             continue
-
-        goalie_name = player_links[0].get_text(" ", strip=True).strip()
-        if len(goalie_name.split()) < 2:
+        team = canon_team(team_raw)
+        if not team:
             continue
-        if goalie_name in used_goalies:
-            duplicate_goalies.add(goalie_name)
-            continue
-        used_goalies.add(goalie_name)
-
-        status = _normalize_status(block.get_text(" ", strip=True))
-        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
-
-    if os.getenv("NHL_GOALIES_DEBUG") == "1":
-        sample = list(results.items())[:5]
-        print(
-            "[nhl goalies] debug puckpedia parsed_team_count="
-            f"{len(results)} unique_goalies={len(used_goalies)} duplicates={sorted(duplicate_goalies)} sample={sample}"
+        status = _normalize_status(status_raw)
+        original_team = team_raw if team_raw and team_raw != team else None
+        results[team] = GoalieInfo(
+            team=team,
+            goalie_name=goalie_raw,
+            status=status,
+            source="puckpedia",
+            original_team=original_team,
         )
 
     return results
@@ -231,11 +220,14 @@ def _fetch_goalies_puckpedia_with_meta(day_count: int = 1) -> tuple[Dict[str, Go
     os.makedirs(GOALIE_CACHE_DIR, exist_ok=True)
     html_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.html")
     text_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug.txt")
+    meta_path = os.path.join(GOALIE_CACHE_DIR, "puckpedia_goalies_debug_meta.json")
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html or "")
     soup = BeautifulSoup(html or "", "html.parser")
     with open(text_path, "w", encoding="utf-8") as f:
         f.write(soup.get_text())
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump({"status": status, "html_len": html_len}, f, indent=2, sort_keys=True)
     team_links_count = len(soup.find_all("a", href=lambda h: h and "/team/" in h))
     player_links_count = len(
         soup.find_all("a", href=lambda h: h and ("/player/" in h or "puckpedia.com/player/" in h))
@@ -352,6 +344,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     if cached:
         return cached
 
+    min_required = 20
     debug = os.getenv("NHL_GOALIES_DEBUG") == "1"
     last_error: Optional[str] = None
     last_http_status: Optional[int] = None
@@ -362,7 +355,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
         parsed = _canonicalize_goalies_map(parsed)
         parsed_count = len(parsed)
-        if parsed_count >= 5:
+        if parsed_count >= min_required:
             _write_cached_goalies(
                 cache_path,
                 parsed,
@@ -412,7 +405,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
                 _debug_parse_details(name, url, status, html, parsed)
             if parsed:
                 last_partial_goalies = parsed
-            if len(parsed) >= 5:
+            if len(parsed) >= min_required:
                 _write_cached_goalies(
                     cache_path,
                     parsed,
