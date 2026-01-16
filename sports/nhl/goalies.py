@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, Optional
-from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -126,95 +124,45 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
 def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
     links = soup.find_all("a", href=True)
-    results: Dict[str, GoalieInfo] = {}
-    debug = os.getenv("NHL_GOALIES_DEBUG") == "1"
-    manual_slug_map = {
-        "st-louis-blues": "St. Louis Blues",
-        "new-york-rangers": "New York Rangers",
-        "new-york-islanders": "New York Islanders",
-        "new-jersey-devils": "New Jersey Devils",
-        "utah-hockey-club": "Utah",
-        "utah": "Utah",
-    }
+    results = {}
+    used_goalies = set()
+    current_team = None
 
-    def _team_from_slug(slug: str) -> str:
-        if not slug:
-            return ""
-        if slug in manual_slug_map:
-            return manual_slug_map[slug]
-        name = slug.replace("-", " ").title()
-        name = name.replace("St Louis", "St. Louis")
-        name = name.replace("Ny Rangers", "NY Rangers")
-        name = name.replace("Ny Islanders", "NY Islanders")
-        name = name.replace("Ny Devils", "NY Devils")
-        return name
+    for a in links:
+        href = str(a.get("href") or "")
+        txt = a.get_text(" ", strip=True)
 
-    def _slug_from_href(href: str) -> str:
-        try:
-            path = urlparse(href).path or ""
-        except Exception:
-            path = href
-        parts = [p for p in path.split("/") if p]
-        if "team" in parts:
-            idx = parts.index("team")
-            if idx + 1 < len(parts):
-                return parts[idx + 1]
-        return parts[-1] if parts else ""
-
-    used_goalies: set[str] = set()
-    current_team: Optional[str] = None
-
-    for link in links:
-        href = link.get("href") or ""
-        href_lower = href.lower()
-        if "/team/" in href_lower:
-            slug = _slug_from_href(href)
-            team_guess = _team_from_slug(slug)
-            team = canon_team(team_guess)
-            if team and team not in results:
+        if "/team/" in href:
+            slug = href.split("/team/")[-1].split("/")[0]
+            guess = slug.replace("-", " ").title()
+            team = canon_team(guess)
+            if team:
                 current_team = team
-            else:
-                current_team = None
             continue
 
-        if current_team and ("/player/" in href_lower or "puckpedia.com/player/" in href_lower):
-            goalie_name = link.get_text(" ", strip=True)
-            if not goalie_name or len(goalie_name.split()) < 2:
+        if current_team and ("/player/" in href or "puckpedia.com/player/" in href):
+            name = txt.strip()
+            if len(name.split()) < 2:
                 continue
-            if goalie_name in used_goalies:
+            if name in used_goalies:
                 continue
+            used_goalies.add(name)
+
+            parent_text = ""
+            try:
+                parent_text = a.parent.get_text(" ", strip=True).upper()
+            except Exception:
+                parent_text = ""
+
             status = "PROJECTED"
-            parent_text = link.parent.get_text(" ", strip=True).upper() if link.parent else ""
             if "CONFIRMED" in parent_text:
                 status = "CONFIRMED"
             elif "PROJECTED" in parent_text:
                 status = "PROJECTED"
-            if current_team not in results:
-                results[current_team] = GoalieInfo(
-                    team=current_team,
-                    goalie_name=goalie_name,
-                    status=status,
-                    source="puckpedia",
-                )
-                used_goalies.add(goalie_name)
+
+            results[current_team] = GoalieInfo(team=current_team, goalie_name=name, status=status, source="puckpedia")
             current_team = None
 
-    if debug:
-        team_links_count = sum(1 for link in links if "/team/" in (link.get("href") or "").lower())
-        player_links_count = sum(
-            1
-            for link in links
-            if "/player/" in (link.get("href") or "").lower()
-            or "puckpedia.com/player/" in (link.get("href") or "").lower()
-        )
-        sample = [(team, info.goalie_name, info.status) for team, info in list(results.items())[:10]]
-        print(
-            "[nhl goalies] debug puckpedia team_links="
-            f"{team_links_count} player_links={player_links_count} parsed={len(results)} sample={sample}"
-        )
-
-    if len(results) < 15:
-        return {}
     return results
 
 
@@ -236,13 +184,19 @@ def _fetch_goalies_puckpedia_with_meta(day_count: int = 1) -> tuple[Dict[str, Go
     soup = BeautifulSoup(html or "", "html.parser")
     with open(text_path, "w", encoding="utf-8") as f:
         f.write(soup.get_text())
-    team_links_count = len(soup.select("a[href*='/team/']"))
-    player_links_count = len(soup.select("a[href*='/player/'], a[href*='puckpedia.com/player/']"))
+    team_links_count = len(soup.find_all("a", href=lambda h: h and "/team/" in h))
+    player_links_count = len(
+        soup.find_all("a", href=lambda h: h and ("/player/" in h or "puckpedia.com/player/" in h))
+    )
+    print("[PuckPedia] team_links=", team_links_count)
+    print("[PuckPedia] player_links=", player_links_count)
     if debug:
         print(f"[nhl goalies] debug puckpedia team_links={team_links_count} player_links={player_links_count}")
     if team_links_count < 10 or player_links_count < 10:
         return {}, {"status": status, "html_len": html_len, "html": html}
     parsed = _parse_puckpedia(html)
+    print("[PuckPedia] parsed_goalies=", len(parsed))
+    print("[PuckPedia] sample=", list(parsed.items())[:5])
     if debug:
         _debug_parse_details("puckpedia", PUCKPEDIA_URL, status, html, parsed)
     return parsed, {"status": status, "html_len": html_len, "html": html}
@@ -335,7 +289,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     try:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
         parsed_count = len(parsed)
-        if parsed_count >= 15:
+        if parsed_count >= 10:
             _write_cached_goalies(
                 cache_path,
                 parsed,
@@ -348,18 +302,8 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
         last_error = f"puckpedia returned {parsed_count} goalies"
         last_http_status = meta.get("status")
         last_html_len = meta.get("html_len")
-        _write_cached_goalies(
-            cache_path,
-            {},
-            source="puckpedia",
-            date_key=date,
-            error=last_error,
-            http_status=last_http_status,
-            html_len=last_html_len,
-        )
         if debug:
             print(f"[nhl goalies] WARNING: empty puckpedia parse status={last_http_status} html_len={last_html_len}")
-        return {}
     except Exception as exc:
         last_error = f"puckpedia fetch failed: {exc}"
         if debug:
