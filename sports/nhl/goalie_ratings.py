@@ -99,8 +99,8 @@ def _fetch_goalie_stats(season: str) -> dict:
         payload = _get_with_retry(NHL_STATS_BASE, params=params)
     except Exception as exc:
         print(f"[nhl goalie ratings] WARNING: stats fetch failed: {exc}")
-        _write_cached_stats(cache_path, {})
-        return {}
+        # Do not overwrite good cached data when the stats endpoint blips.
+        return cached or {}
 
     _write_cached_stats(cache_path, payload)
     return payload
