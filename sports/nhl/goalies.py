@@ -123,45 +123,48 @@ def _parse_daily_faceoff(html: str) -> Dict[str, GoalieInfo]:
 
 def _parse_puckpedia(html: str) -> Dict[str, GoalieInfo]:
     soup = BeautifulSoup(html, "html.parser")
-    links = soup.find_all("a", href=True)
-    results = {}
-    used_goalies = set()
-    current_team = None
+    results: Dict[str, GoalieInfo] = {}
+    used_goalies: set[str] = set()
+    duplicate_goalies: set[str] = set()
 
-    for a in links:
-        href = str(a.get("href") or "")
-        txt = a.get_text(" ", strip=True)
-
-        if "/team/" in href:
-            slug = href.split("/team/")[-1].split("/")[0]
-            guess = slug.replace("-", " ").title()
-            team = canon_team(guess)
-            if team:
-                current_team = team
+    for block in soup.select("div, li, tr, section, article"):
+        team_links = [
+            link
+            for link in block.find_all("a", href=True)
+            if "/team/" in str(link.get("href") or "")
+        ]
+        player_links = [
+            link
+            for link in block.find_all("a", href=True)
+            if "/player/" in str(link.get("href") or "") or "puckpedia.com/player/" in str(link.get("href") or "")
+        ]
+        if len(team_links) != 1 or len(player_links) < 1:
             continue
 
-        if current_team and ("/player/" in href or "puckpedia.com/player/" in href):
-            name = txt.strip()
-            if len(name.split()) < 2:
-                continue
-            if name in used_goalies:
-                continue
-            used_goalies.add(name)
+        team_href = str(team_links[0].get("href") or "")
+        slug = team_href.split("/team/")[-1].split("/")[0]
+        guess = slug.replace("-", " ").title()
+        team = canon_team(guess)
+        if not team or team in results:
+            continue
 
-            parent_text = ""
-            try:
-                parent_text = a.parent.get_text(" ", strip=True).upper()
-            except Exception:
-                parent_text = ""
+        goalie_name = player_links[0].get_text(" ", strip=True).strip()
+        if len(goalie_name.split()) < 2:
+            continue
+        if goalie_name in used_goalies:
+            duplicate_goalies.add(goalie_name)
+            continue
+        used_goalies.add(goalie_name)
 
-            status = "PROJECTED"
-            if "CONFIRMED" in parent_text:
-                status = "CONFIRMED"
-            elif "PROJECTED" in parent_text:
-                status = "PROJECTED"
+        status = _normalize_status(block.get_text(" ", strip=True))
+        results[team] = GoalieInfo(team=team, goalie_name=goalie_name, status=status, source="puckpedia")
 
-            results[current_team] = GoalieInfo(team=current_team, goalie_name=name, status=status, source="puckpedia")
-            current_team = None
+    if os.getenv("NHL_GOALIES_DEBUG") == "1":
+        sample = list(results.items())[:5]
+        print(
+            "[nhl goalies] debug puckpedia parsed_team_count="
+            f"{len(results)} unique_goalies={len(used_goalies)} duplicates={sorted(duplicate_goalies)} sample={sample}"
+        )
 
     return results
 
@@ -289,7 +292,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     try:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
         parsed_count = len(parsed)
-        if parsed_count >= 10:
+        if parsed_count >= 20:
             _write_cached_goalies(
                 cache_path,
                 parsed,
