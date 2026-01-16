@@ -19,16 +19,31 @@ _GOALIE_LOOKUP_CACHE: dict[str, dict[str, dict]] = {}
 _GOALIE_LEAGUE_STATS_CACHE: dict[str, tuple[float, float, float]] = {}
 
 
-def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 20, max_retries: int = 3) -> dict:
+def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 30, max_retries: int = 3) -> dict:
     last_exc: Optional[Exception] = None
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
     for attempt in range(1, max_retries + 1):
         try:
-            resp = requests.get(url, params=params, timeout=timeout)
+            resp = requests.get(url, params=params, timeout=timeout, headers=headers)
+            if resp.status_code in {429, 403}:
+                raise RuntimeError(f"throttled status {resp.status_code}")
             if resp.status_code >= 500:
                 raise RuntimeError(f"server error {resp.status_code}")
             if resp.status_code != 200:
                 raise RuntimeError(f"unexpected status {resp.status_code}")
-            return resp.json()
+            try:
+                payload = resp.json()
+            except Exception as exc:
+                raise RuntimeError("non-json response") from exc
+            return payload
         except Exception as exc:
             last_exc = exc
             if attempt < max_retries:
@@ -74,6 +89,14 @@ def _load_cached_stats(cache_path: str) -> dict:
         return {}
 
 
+def _payload_rows_count(payload: object) -> int:
+    if isinstance(payload, dict):
+        data = payload.get("data", [])
+        if isinstance(data, list):
+            return len(data)
+    return 0
+
+
 def _write_cached_stats(cache_path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     with open(cache_path, "w", encoding="utf-8") as f:
@@ -105,12 +128,21 @@ def _fetch_goalie_stats(season: str) -> dict:
             cached = _load_cached_stats(cache_path)
             if cached:
                 if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
-                    print(f"[nhl goalie ratings] using cached stats fallback for season {season}")
+                    rows = _payload_rows_count(cached)
+                    print(
+                        f"[nhl goalie ratings] live fetch FAILED season={season} using cache rows={rows}"
+                    )
                 return cached
+            if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
+                print(f"[nhl goalie ratings] live fetch FAILED season={season} no cache")
+            return {}
+        if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
+            print(f"[nhl goalie ratings] live fetch FAILED season={season} no cache")
         return {}
 
     if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
-        print(f"[nhl goalie ratings] using live stats for season {season}")
+        rows = _payload_rows_count(payload)
+        print(f"[nhl goalie ratings] live fetch OK season={season} rows={rows}")
     _write_cached_stats(cache_path, payload)
     return payload
 
