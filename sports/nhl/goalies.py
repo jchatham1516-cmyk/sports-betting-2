@@ -289,6 +289,24 @@ def _load_cached_goalies(cache_path: str) -> Dict[str, GoalieInfo]:
         return {}
 
 
+def _load_most_recent_cached_goalies() -> Dict[str, GoalieInfo]:
+    if not os.path.isdir(GOALIE_CACHE_DIR):
+        return {}
+    candidate_files = [
+        os.path.join(GOALIE_CACHE_DIR, filename)
+        for filename in os.listdir(GOALIE_CACHE_DIR)
+        if filename.startswith("nhl_goalies_") and filename.endswith(".json")
+    ]
+    candidate_files.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    for cache_path in candidate_files:
+        cached = _load_cached_goalies(cache_path)
+        if cached:
+            for info in cached.values():
+                info.source = "cache_fallback"
+            return cached
+    return {}
+
+
 def _debug_parse_details(provider: str, url: str, status: int, html: str, parsed: Dict[str, GoalieInfo]) -> None:
     html_len = len(html or "")
     sample = [(t, g.goalie_name, g.status) for t, g in list(parsed.items())[:5]]
@@ -344,7 +362,6 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
     if cached:
         return cached
 
-    min_required = 5
     debug = os.getenv("NHL_GOALIES_DEBUG") == "1"
     last_error: Optional[str] = None
     last_http_status: Optional[int] = None
@@ -354,7 +371,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
         parsed, meta = _fetch_goalies_puckpedia_with_meta(day_count=1)
         parsed = _canonicalize_goalies_map(parsed)
         parsed_count = len(parsed)
-        if parsed_count >= min_required:
+        if parsed_count >= 1:
             _write_cached_goalies(
                 cache_path,
                 parsed,
@@ -402,7 +419,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
             parsed = _canonicalize_goalies_map(parsed)
             if debug:
                 _debug_parse_details(name, url, status, html, parsed)
-            if len(parsed) >= min_required:
+            if len(parsed) >= 1:
                 _write_cached_goalies(
                     cache_path,
                     parsed,
@@ -422,13 +439,7 @@ def get_starting_goalies(date: str) -> Dict[str, GoalieInfo]:
             if debug:
                 print(f"[nhl goalies] WARNING: failed to fetch {url}: {exc}")
 
-    _write_cached_goalies(
-        cache_path,
-        {},
-        source="none",
-        date_key=date,
-        error=last_error or "no goalie providers succeeded",
-        http_status=last_http_status,
-        html_len=last_html_len,
-    )
-    return {}
+    fallback = _load_most_recent_cached_goalies()
+    if fallback:
+        return fallback
+    raise RuntimeError(last_error or "No goalie providers returned data")
