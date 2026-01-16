@@ -3,7 +3,7 @@ from pathlib import Path
 
 from sports.nhl import goalies as goalies_module
 from sports.nhl import goalie_ratings
-from sports.nhl.model import _goalie_adjustment
+from sports.nhl.model import GOALIE_PROB_PER_RATING, _goalie_adjustment
 
 
 def test_goalie_provider_parses_daily_faceoff_table(monkeypatch, tmp_path):
@@ -75,6 +75,8 @@ def test_goalie_rating_known_and_unknown(monkeypatch):
     assert missing == 0.0
 
 
-def test_goalie_adjustment_clamps_and_direction():
-    assert _goalie_adjustment(30.0, -30.0) == 0.06
-    assert _goalie_adjustment(-30.0, 30.0) == -0.06
+def test_goalie_adjustment_returns_raw_direction():
+    diff = 30.0 - (-30.0)
+    expected = diff * GOALIE_PROB_PER_RATING
+    assert _goalie_adjustment(30.0, -30.0) == expected
+    assert _goalie_adjustment(-30.0, 30.0) == -expected

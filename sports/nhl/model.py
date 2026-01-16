@@ -409,7 +409,7 @@ def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd
 
 def _goalie_adjustment(home_rating: float, away_rating: float) -> float:
     rating_diff = float(home_rating) - float(away_rating)
-    return float(_clamp(rating_diff * GOALIE_PROB_PER_RATING, -0.06, 0.06))
+    return float(rating_diff * GOALIE_PROB_PER_RATING)
 
 
 def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
@@ -543,24 +543,31 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
         goalie_home_rating = 0.0
         goalie_away_rating = 0.0
         goalie_adj = 0.0
-
-        home_known = bool(goalie_home_name) and goalie_home_status != "UNKNOWN"
-        away_known = bool(goalie_away_name) and goalie_away_status != "UNKNOWN"
-
-        if home_known:
+        if goalie_home_name and goalie_away_name:
             goalie_home_rating = float(get_goalie_rating(goalie_home_name, season_label))
-        if away_known:
             goalie_away_rating = float(get_goalie_rating(goalie_away_name, season_label))
-
-        if home_known or away_known:
-            goalie_adj = _goalie_adjustment(goalie_home_rating, goalie_away_rating)
-            if not (home_known and away_known):
-                goalie_adj *= 0.5
-                goalie_reason = "goalie_rating_partial"
+            raw_adj = _goalie_adjustment(goalie_home_rating, goalie_away_rating)
+            if goalie_home_status == "CONFIRMED" and goalie_away_status == "CONFIRMED":
+                weight = 1.0
+                goalie_status = "CONFIRMED"
+            elif goalie_home_status == "PROJECTED" or goalie_away_status == "PROJECTED":
+                weight = 0.6
                 goalie_status = "PROJECTED"
             else:
-                goalie_reason = "goalie_rating_applied"
-                goalie_status = "CONFIRMED" if goalie_home_status == "CONFIRMED" and goalie_away_status == "CONFIRMED" else "PROJECTED"
+                weight = 0.35
+                goalie_status = "UNKNOWN"
+            goalie_adj = float(_clamp(raw_adj * weight, -0.06, 0.06))
+            goalie_reason = "goalie_rating_applied"
+        else:
+            goalie_adj = 0.0
+            goalie_reason = "goalie_missing"
+        if debug_goalies:
+            print(
+                "[nhl goalies] game "
+                f"{away} @ {home} home_goalie={goalie_home_name} ({goalie_home_status}) "
+                f"away_goalie={goalie_away_name} ({goalie_away_status}) "
+                f"home_rating={goalie_home_rating:.3f} away_rating={goalie_away_rating:.3f} adj={goalie_adj:.4f}"
+            )
 
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_raw = float(_clamp(p_raw + goalie_adj, 0.01, 0.99))
