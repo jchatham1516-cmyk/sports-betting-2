@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-import brotli
 import requests
 from bs4 import BeautifulSoup
 
@@ -76,9 +75,13 @@ def _get_with_retry(
                     decompressed = None
             else:
                 try:
+                    import brotli
+
                     decompressed = brotli.decompress(raw)
-                except brotli.error:
-                    decompressed = None
+                except ImportError:
+                    pass
+                except Exception:
+                    pass
 
             if decompressed:
                 try:
