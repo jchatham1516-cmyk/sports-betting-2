@@ -84,6 +84,8 @@ def _fetch_goalie_stats(season: str) -> dict:
     cache_path = os.path.join(STATS_CACHE_DIR, f"nhl_goalie_stats_{season}.json")
     cached = _load_cached_stats(cache_path)
     if cached:
+        if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
+            print(f"[nhl goalie ratings] using cached stats for season {season}")
         return cached
 
     params = {
@@ -99,9 +101,15 @@ def _fetch_goalie_stats(season: str) -> dict:
         payload = _get_with_retry(NHL_STATS_BASE, params=params)
     except Exception as exc:
         print(f"[nhl goalie ratings] WARNING: stats fetch failed: {exc}")
-        # Do not overwrite good cached data when the stats endpoint blips.
-        return cached or {}
+        cached = _load_cached_stats(cache_path)
+        if cached:
+            if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
+                print(f"[nhl goalie ratings] using cached stats fallback for season {season}")
+            return cached
+        return {}
 
+    if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
+        print(f"[nhl goalie ratings] using live stats for season {season}")
     _write_cached_stats(cache_path, payload)
     return payload
 
