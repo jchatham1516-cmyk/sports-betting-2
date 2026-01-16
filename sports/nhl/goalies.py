@@ -21,7 +21,8 @@ DEFAULT_CACHE_TTL_MINUTES = 120
 DAILY_FACEOFF_URL = "https://www.dailyfaceoff.com/starting-goalies"
 PUCKPEDIA_URL = "https://depth-charts.puckpedia.com/starting-goalies"
 PUCKPEDIA_PARAMS = {"dayCount": 1, "utm_medium": "embed", "utm_source": "puckpedia", "ads": "true"}
-DATE_FORMATS = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y")
+DATE_FORMATS = ("%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y")  # keep parsing formats
+DATE_URL_FORMATS = ("%Y-%m-%d", "%m-%d-%Y")          # ONLY formats safe for URL paths
 
 
 @dataclass
@@ -164,11 +165,14 @@ def _date_keys_for_goalies(date_str: str) -> tuple[str, list[str]]:
     if not parsed:
         raw = str(date_str)
         safe_raw = raw.replace("/", "-")
-        return safe_raw, [safe_raw]
-    date_keys = [
+        return (
+    parsed.strftime("%Y-%m-%d"),
+    [
         parsed.strftime("%Y-%m-%d"),
         parsed.strftime("%m-%d-%Y"),
-    ]
+        # IMPORTANT: never include %m/%d/%Y here because DailyFaceoff URL breaks with slashes
+    ],
+)
     date_keys = [key for key in date_keys if "/" not in key]
     return parsed.strftime("%Y-%m-%d"), date_keys
 
