@@ -221,6 +221,27 @@ def main(argv=None):
         results_df = run_daily_nfl(game_date, odds_dict=odds_dict)
 
     elif args.sport == "nhl":
+        before_count = len(odds_dict)
+        filtered_odds = {}
+        try:
+            target_date = datetime.strptime(game_date, "%m/%d/%Y").date()
+        except Exception:
+            target_date = datetime.utcnow().date()
+        for matchup, info in (odds_dict or {}).items():
+            commence_time = (info or {}).get("commence_time")
+            if not commence_time:
+                continue
+            try:
+                commence_date = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00")).date()
+            except Exception:
+                continue
+            if commence_date == target_date:
+                filtered_odds[matchup] = info
+        odds_dict = filtered_odds
+        print(
+            "[nhl odds] filtered games: "
+            f"before={before_count} after={len(odds_dict)} target_date={target_date.isoformat()}"
+        )
         results_df = run_daily_nhl(game_date, odds_dict=odds_dict)
 
     else:
