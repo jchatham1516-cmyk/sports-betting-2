@@ -101,6 +101,30 @@ def _normalize_name(name: str) -> str:
     return normalize_goalie_name(name)
 
 
+def _name_tokens(name: str) -> list[str]:
+    normalized = normalize_goalie_name(name)
+    if not normalized:
+        return []
+    return [token for token in normalized.split() if token]
+
+
+def _best_goalie_by_games(lookup: dict[str, dict], candidates: list[str]) -> Optional[dict]:
+    best = None
+    best_games = -1
+    for candidate in candidates:
+        row = lookup.get(candidate)
+        if not row:
+            continue
+        try:
+            games = int(row.get("gamesPlayed") or 0)
+        except Exception:
+            games = 0
+        if best is None or games > best_games:
+            best = row
+            best_games = games
+    return best
+
+
 def _load_cached_stats(cache_path: str) -> dict:
     if not os.path.exists(cache_path):
         return {}
@@ -290,18 +314,13 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
     best = lookup.get(name_norm)
     if best is None and name_norm:
         alias_maps = _goalie_alias_maps(season)
-        parts = name_norm.split()
+        parts = _name_tokens(name_norm)
         if parts:
             last = parts[-1]
-            first = parts[0]
-            if last and first:
-                candidates = alias_maps.get("last_initial", {}).get(f"{last}|{first[0]}", [])
-                if len(candidates) == 1:
-                    best = lookup.get(candidates[0])
-            if best is None and last:
+            if last:
                 candidates = alias_maps.get("last", {}).get(last, [])
-                if len(candidates) == 1:
-                    best = lookup.get(candidates[0])
+                if candidates:
+                    best = _best_goalie_by_games(lookup, candidates)
     if best is None:
         if os.getenv("NHL_GOALIES_DEBUG") == "1":
             print(f"[goalie_rating] missing rating for: {goalie_name} season={season}")
