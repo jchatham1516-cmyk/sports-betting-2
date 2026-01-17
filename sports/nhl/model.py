@@ -541,6 +541,21 @@ def _compute_goalie_adjustment(
     if goalie_away_name:
         goalie_away_rating, away_found = get_goalie_rating_with_meta(goalie_away_name, season_label)
 
+    if not home_found and not away_found:
+        goalie_reason = "goalie_ratings_unavailable"
+        return (
+            0.0,
+            goalie_home_rating,
+            goalie_away_rating,
+            goalie_rating_diff,
+            0.0,
+            goalie_status,
+            goalie_reason,
+            conf_w,
+            home_found,
+            away_found,
+        )
+
     if not goalie_home_name and not goalie_away_name:
         return (
             0.0,
