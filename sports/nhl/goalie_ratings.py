@@ -18,6 +18,7 @@ DEFAULT_LEAGUE_AVG_SV = 0.903
 _GOALIE_LOOKUP_CACHE: dict[str, dict[str, dict]] = {}
 _GOALIE_ALIAS_CACHE: dict[str, dict[str, dict[str, list[str]]]] = {}
 _GOALIE_LEAGUE_STATS_CACHE: dict[str, tuple[float, float, float]] = {}
+_GOALIE_LOOKUP_EMPTY_WARNED = False
 
 
 def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 30, max_retries: int = 4) -> dict:
@@ -308,6 +309,11 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
 
     lookup = _goalie_lookup_for_season(season)
     if not lookup:
+        debug_enabled = os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1"
+        global _GOALIE_LOOKUP_EMPTY_WARNED
+        if debug_enabled and not _GOALIE_LOOKUP_EMPTY_WARNED:
+            print(f"[nhl goalie ratings] WARNING: empty lookup for season={season}")
+            _GOALIE_LOOKUP_EMPTY_WARNED = True
         return (0.0, False)
 
     name_norm = normalize_goalie_name(goalie_name)
@@ -317,7 +323,12 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
         parts = _name_tokens(name_norm)
         if parts:
             last = parts[-1]
-            if last:
+            first_initial = parts[0][0] if parts[0] else ""
+            if last and first_initial:
+                candidates = alias_maps.get("last_initial", {}).get(f"{last}|{first_initial}", [])
+                if len(candidates) == 1:
+                    best = lookup.get(candidates[0])
+            if best is None and last:
                 candidates = alias_maps.get("last", {}).get(last, [])
                 if candidates:
                     best = _best_goalie_by_games(lookup, candidates)
