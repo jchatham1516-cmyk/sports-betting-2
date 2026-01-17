@@ -16,6 +16,7 @@ NHL_STATS_BASE = "https://api.nhle.com/stats/rest/en/goalie"
 NHL_STATS_LIMIT = 300
 DEFAULT_LEAGUE_AVG_SV = 0.903
 _GOALIE_LOOKUP_CACHE: dict[str, dict[str, dict]] = {}
+_GOALIE_ALIAS_CACHE: dict[str, dict[str, dict[str, list[str]]]] = {}
 _GOALIE_LEAGUE_STATS_CACHE: dict[str, tuple[float, float, float]] = {}
 
 
@@ -61,18 +62,31 @@ def normalize_goalie_name(name: str) -> str:
         return ""
     cleaned = unicodedata.normalize("NFKD", str(name))
     cleaned = cleaned.encode("ascii", "ignore").decode("ascii")
-    cleaned = cleaned.replace(".", " ").replace("-", " ").replace("’", "'")
+    cleaned = cleaned.replace("’", "'")
     cleaned = re.sub(r"\(.*?\)", " ", cleaned)
     cleaned = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = cleaned.replace(",", " , ")
-    cleaned = re.sub(r"[^\w\s,']", " ", cleaned)
     cleaned = " ".join(cleaned.strip().split())
     if "," in cleaned:
         last, first = [p.strip() for p in cleaned.split(",", 1)]
         if first and last:
             cleaned = f"{first} {last}"
-    tokens = [t for t in cleaned.lower().split() if len(t) > 1]
-    return " ".join(tokens)
+    cleaned = re.sub(r"[^\w\s]", " ", cleaned)
+    cleaned = cleaned.replace("_", " ")
+    cleaned = " ".join(cleaned.strip().split())
+    return cleaned.lower()
+
+
+def _season_id_from_label(season: str) -> str:
+    if not season:
+        return ""
+    digits = re.findall(r"\d{4}", str(season))
+    if len(digits) >= 2:
+        return f"{digits[0]}{digits[1]}"
+    if len(digits) == 1:
+        start = int(digits[0])
+        end = start + 1
+        return f"{start}{end}"
+    return str(season).strip()
 
 
 def _normalize_name(name: str) -> str:
@@ -106,11 +120,12 @@ def _write_cached_stats(cache_path: str, payload: dict) -> None:
 def _fetch_goalie_stats(season: str) -> dict:
     cache_path = os.path.join(STATS_CACHE_DIR, f"nhl_goalie_stats_{season}.json")
     cached = _load_cached_stats(cache_path)
-    if cached:
+    if cached and _payload_rows_count(cached) > 0:
         if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
             print(f"[nhl goalie ratings] using cached stats for season {season}")
         return cached
 
+    season_id = _season_id_from_label(season)
     params = {
         "isAggregate": "false",
         "isGame": "false",
@@ -118,24 +133,20 @@ def _fetch_goalie_stats(season: str) -> dict:
         "start": 0,
         "limit": NHL_STATS_LIMIT,
         "factCayenneExp": "gamesPlayed>=5",
-        "cayenneExp": f"seasonId={season}{int(season) + 1}",
+        "cayenneExp": f"seasonId={season_id}",
     }
     try:
         payload = _get_with_retry(NHL_STATS_BASE, params=params)
     except Exception as exc:
         print(f"[nhl goalie ratings] WARNING: stats fetch failed: {exc}")
-        if os.path.exists(cache_path):
-            cached = _load_cached_stats(cache_path)
-            if cached:
-                if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
-                    rows = _payload_rows_count(cached)
-                    print(
-                        f"[nhl goalie ratings] live fetch FAILED season={season} using cache rows={rows}"
-                    )
-                return cached
+        cached = _load_cached_stats(cache_path)
+        if cached and _payload_rows_count(cached) > 0:
             if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
-                print(f"[nhl goalie ratings] live fetch FAILED season={season} no cache")
-            return {}
+                rows = _payload_rows_count(cached)
+                print(
+                    f"[nhl goalie ratings] live fetch FAILED season={season} using cache rows={rows}"
+                )
+            return cached
         if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
             print(f"[nhl goalie ratings] live fetch FAILED season={season} no cache")
         return {}
@@ -175,6 +186,27 @@ def _goalie_lookup_for_season(season: str) -> dict[str, dict]:
             lookup[name_norm] = row
     _GOALIE_LOOKUP_CACHE[season] = lookup
     return lookup
+
+
+def _goalie_alias_maps(season: str) -> dict[str, dict[str, list[str]]]:
+    cached = _GOALIE_ALIAS_CACHE.get(season)
+    if cached is not None:
+        return cached
+    lookup = _goalie_lookup_for_season(season)
+    last_map: dict[str, list[str]] = {}
+    last_initial_map: dict[str, list[str]] = {}
+    for name_key in lookup.keys():
+        parts = name_key.split()
+        if not parts:
+            continue
+        last = parts[-1]
+        first = parts[0]
+        last_map.setdefault(last, []).append(name_key)
+        if first:
+            last_initial_map.setdefault(f"{last}|{first[0]}", []).append(name_key)
+    cached = {"last": last_map, "last_initial": last_initial_map}
+    _GOALIE_ALIAS_CACHE[season] = cached
+    return cached
 
 
 def _league_goalie_stats(season: str) -> tuple[float, float, float]:
@@ -225,6 +257,20 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
 
     name_norm = normalize_goalie_name(goalie_name)
     best = lookup.get(name_norm)
+    if best is None and name_norm:
+        alias_maps = _goalie_alias_maps(season)
+        parts = name_norm.split()
+        if parts:
+            last = parts[-1]
+            first = parts[0]
+            if last and first:
+                candidates = alias_maps.get("last_initial", {}).get(f"{last}|{first[0]}", [])
+                if len(candidates) == 1:
+                    best = lookup.get(candidates[0])
+            if best is None and last:
+                candidates = alias_maps.get("last", {}).get(last, [])
+                if len(candidates) == 1:
+                    best = lookup.get(candidates[0])
     if best is None:
         if os.getenv("NHL_GOALIES_DEBUG") == "1":
             print(f"[goalie_rating] missing rating for: {goalie_name} season={season}")

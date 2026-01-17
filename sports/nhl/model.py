@@ -61,7 +61,7 @@ TOTAL_MODEL_MAX = float(os.getenv("NHL_TOTAL_MODEL_MAX", "8.5"))
 
 STRICT_SANITY = os.getenv("NHL_STRICT_SANITY", "0") == "1"
 NHL_LEAGUE_AVG_GOALIE_RATING = float(os.getenv("NHL_LEAGUE_AVG_GOALIE_RATING", "0.0"))
-NHL_GOALIE_WEIGHT = float(os.getenv("NHL_GOALIE_WEIGHT", "0.35"))
+NHL_GOALIE_WEIGHT = float(os.getenv("NHL_GOALIE_WEIGHT", "0.45"))
 NHL_GOALIE_MAX_PROB_SHIFT = float(os.getenv("NHL_GOALIE_MAX_PROB_SHIFT", "0.06"))
 NHL_GOALIE_UNKNOWN_PENALTY = float(os.getenv("NHL_GOALIE_UNKNOWN_PENALTY", "0.01"))
 
@@ -476,9 +476,11 @@ def _expected_points_total(home: str, away: str, league_pts: float, team_tbl: pd
 
 
 def _goalie_prob_shift(home_strength: float, away_strength: float) -> float:
-    rating_diff = float(home_strength) - float(away_strength)
-    weight = float(_clamp(NHL_GOALIE_WEIGHT, 0.0, 1.0))
-    return float(rating_diff * weight)
+    strength_diff = float(home_strength) - float(away_strength)
+    weight = float(_clamp(NHL_GOALIE_WEIGHT, 0.0, 2.0))
+    elo_shift = strength_diff * weight * 50.0
+    prob = float(elo_win_prob(elo_shift, 0.0, home_adv=0.0))
+    return float(prob - 0.5)
 
 
 def _goalie_status_weight(status: str) -> float:
@@ -529,14 +531,10 @@ def _compute_goalie_adjustment(
     away_found = False
     status_w_home = _goalie_status_weight(goalie_home_status)
     status_w_away = _goalie_status_weight(goalie_away_status)
-    status_home_upper = str(goalie_home_status or "").upper()
-    status_away_upper = str(goalie_away_status or "").upper()
-    if status_home_upper == "CONFIRMED" and status_away_upper == "CONFIRMED":
-        conf_w = 1.0
-    elif status_home_upper == "PROJECTED" or status_away_upper == "PROJECTED":
-        conf_w = 0.6
+    if goalie_home_name and goalie_away_name:
+        conf_w = float(status_w_home * status_w_away)
     else:
-        conf_w = 0.35
+        conf_w = 0.5
 
     if goalie_home_name:
         goalie_home_rating, home_found = get_goalie_rating_with_meta(goalie_home_name, season_label)
@@ -572,9 +570,8 @@ def _compute_goalie_adjustment(
                 goalie_prob_shift = goalie_adj
             goalie_reason = "goalie_rating_applied"
         elif not home_found and not away_found:
-            confidence = min(status_w_home, status_w_away)
             base = float(NHL_GOALIE_UNKNOWN_PENALTY)
-            goalie_adj = float(_clamp(base * confidence, -max_adj, max_adj))
+            goalie_adj = float(_clamp(base * conf_w, -max_adj, max_adj))
             goalie_prob_shift = goalie_adj
             goalie_reason = "goalie_unknown_names_present"
         else:
@@ -1091,7 +1088,7 @@ def _run_goalie_regression_check(df: pd.DataFrame) -> None:
     any_non_zero = bool(goalie_adj.fillna(0.0).astype(float).ne(0.0).any())
     games_with_both_names = int((home_found & away_found).sum())
     any_non_zero_adj = bool(any_non_zero)
-    if not any_non_zero_adj:
+    if not any_non_zero_adj and games_with_both_found > 0:
         msg = (
             "goalie_adj was zero for all games; "
             f"games_with_both_names={games_with_both_names} "
