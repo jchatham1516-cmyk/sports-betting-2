@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -227,20 +227,25 @@ def main(argv=None):
             target_date = datetime.strptime(game_date, "%m/%d/%Y").date()
         except Exception:
             target_date = datetime.utcnow().date()
+        window_start = datetime(
+            target_date.year, target_date.month, target_date.day, 5, 0, 0, tzinfo=timezone.utc
+        )
+        window_end = window_start + timedelta(days=1)
         for matchup, info in (odds_dict or {}).items():
             commence_time = (info or {}).get("commence_time")
             if not commence_time:
                 continue
             try:
-                commence_date = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00")).date()
+                commence_dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
             except Exception:
                 continue
-            if commence_date == target_date:
+            if window_start <= commence_dt < window_end:
                 filtered_odds[matchup] = info
         odds_dict = filtered_odds
         print(
             "[nhl odds] filtered games: "
-            f"before={before_count} after={len(odds_dict)} target_date={target_date.isoformat()}"
+            f"before={before_count} after={len(odds_dict)} "
+            f"window_start={window_start.isoformat()} window_end={window_end.isoformat()}"
         )
         results_df = run_daily_nhl(game_date, odds_dict=odds_dict)
 
