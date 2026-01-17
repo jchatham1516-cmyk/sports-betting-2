@@ -552,20 +552,32 @@ def _compute_goalie_adjustment(
     if goalie_home_name and goalie_away_name:
         goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
         max_shift = float(max(0.0, GOALIE_MAX_SHIFT))
+        raw_shift = float(_clamp(goalie_rating_diff * GOALIE_STRENGTH_WEIGHT, -max_shift, max_shift))
+        scaled_shift = float(raw_shift * conf_w * NHL_GOALIE_WEIGHT)
         if home_found and away_found:
-            goalie_prob_shift = float(
-                _clamp(goalie_rating_diff * GOALIE_STRENGTH_WEIGHT, -max_shift, max_shift)
-            )
-            goalie_adj = float(abs(goalie_prob_shift))
             goalie_reason = "goalie_found"
         elif home_found or away_found:
-            goalie_prob_shift = float(
-                _clamp(goalie_rating_diff * GOALIE_STRENGTH_WEIGHT * 0.5, -max_shift, max_shift)
-            )
-            goalie_adj = float(abs(goalie_prob_shift))
+            penalty = float(NHL_GOALIE_UNKNOWN_PENALTY * conf_w * NHL_GOALIE_WEIGHT)
+            if home_found and not away_found:
+                scaled_shift = float(_clamp(scaled_shift + penalty, -max_shift, max_shift))
+            elif away_found and not home_found:
+                scaled_shift = float(_clamp(scaled_shift - penalty, -max_shift, max_shift))
             goalie_reason = "partial_found"
         else:
-            goalie_reason = "goalie_not_found"
+            raw_shift = 0.0
+            scaled_shift = 0.0
+            goalie_reason = "goalie_rating_fallback"
+        goalie_prob_shift = float(scaled_shift)
+        goalie_adj = float(abs(scaled_shift))
+        if os.getenv("NHL_DEBUG_GOALIES") == "1":
+            print(
+                "[nhl goalies] adjustment "
+                f"home_goalie={goalie_home_name} away_goalie={goalie_away_name} "
+                f"home_found={home_found} away_found={away_found} "
+                f"raw_shift={raw_shift:.4f} scaled_shift={scaled_shift:.4f} "
+                f"conf_w={conf_w:.3f} weight={NHL_GOALIE_WEIGHT:.3f} "
+                f"strength_weight={GOALIE_STRENGTH_WEIGHT:.4f}"
+            )
         return (
             goalie_adj,
             goalie_home_rating,
