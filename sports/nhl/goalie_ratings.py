@@ -37,16 +37,26 @@ def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 3
         retryable = False
         try:
             resp = requests.get(url, params=params, timeout=timeout, headers=headers)
+            text_snippet = resp.text[:200].strip().replace("\n", " ")
             if resp.status_code in {403, 429} or 500 <= resp.status_code <= 599:
                 retryable = True
-                raise RuntimeError(f"retryable status {resp.status_code}")
+                raise RuntimeError(
+                    "retryable status "
+                    f"{resp.status_code} body={text_snippet}"
+                )
             if resp.status_code != 200:
-                raise RuntimeError(f"unexpected status {resp.status_code}")
+                raise RuntimeError(
+                    "unexpected status "
+                    f"{resp.status_code} body={text_snippet}"
+                )
             try:
                 payload = resp.json()
             except Exception as exc:
                 retryable = True
-                raise RuntimeError("non-json response") from exc
+                raise RuntimeError(
+                    "non-json response "
+                    f"status={resp.status_code} body={text_snippet}"
+                ) from exc
             return payload
         except requests.RequestException as exc:
             last_exc = exc
@@ -152,12 +162,17 @@ def _write_cached_stats(cache_path: str, payload: dict) -> None:
 
 def _fetch_goalie_stats(season: str) -> dict:
     cache_path = os.path.join(STATS_CACHE_DIR, f"nhl_goalie_stats_{season}.json")
+    cache_exists = os.path.exists(cache_path)
     cached = _load_cached_stats(cache_path)
     cached_rows = _payload_rows_count(cached)
     cached_valid = cached_rows > 0
     debug_enabled = os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1"
     if cached_valid:
         if debug_enabled:
+            print(
+                "[nhl goalie ratings] debug season="
+                f"{season} cache_used=True live_ok=False rows={cached_rows}"
+            )
             print(
                 "[nhl goalie ratings] season="
                 f"{season} status=cached rows={cached_rows} cache=hit"
@@ -177,8 +192,13 @@ def _fetch_goalie_stats(season: str) -> dict:
     try:
         payload = _get_with_retry(NHL_STATS_BASE, params=params)
     except Exception as exc:
+        if debug_enabled:
+            print(
+                "[nhl goalie ratings] debug season="
+                f"{season} cache_used={cache_exists} live_ok=False error={exc}"
+            )
         print(f"[nhl goalie ratings] WARNING: stats fetch failed: {exc}")
-        if cached_valid:
+        if cache_exists:
             if debug_enabled:
                 print(
                     "[nhl goalie ratings] season="
@@ -195,6 +215,11 @@ def _fetch_goalie_stats(season: str) -> dict:
     rows = _payload_rows_count(payload)
     if rows == 0:
         if debug_enabled:
+            print(
+                "[nhl goalie ratings] debug season="
+                f"{season} cache_used={cache_exists} live_ok=False rows=0"
+            )
+        if debug_enabled:
             cache_status = "hit" if cached_valid else "miss"
             print(
                 "[nhl goalie ratings] season="
@@ -205,6 +230,10 @@ def _fetch_goalie_stats(season: str) -> dict:
         return {}
 
     if debug_enabled:
+        print(
+            "[nhl goalie ratings] debug season="
+            f"{season} cache_used={cache_exists} live_ok=True rows={rows}"
+        )
         cache_status = "hit" if cached_valid else "miss"
         print(
             "[nhl goalie ratings] season="
@@ -388,3 +417,8 @@ def get_goalie_rating(goalie_name: str, season: str) -> float:
 
 def current_season_label() -> str:
     return _season_for_date(datetime.utcnow().date())
+
+
+# CLI sanity check:
+# from sports.nhl.goalie_ratings import current_season_label, get_goalie_rating_with_meta
+# print(get_goalie_rating_with_meta("Jake Oettinger", current_season_label()))
