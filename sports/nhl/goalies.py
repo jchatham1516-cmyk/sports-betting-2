@@ -13,6 +13,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from sports.common.teams import canon_team
+from sports.nhl.goalie_ratings import current_season_label, get_goalie_save_pct
 
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
@@ -187,10 +188,19 @@ def _date_keys_for_goalies(date_str: str) -> tuple[str, list[str]]:
 
 
 def _debug_goalies_summary(source: str, date_received: str, goalies: Dict[str, GoalieInfo]) -> None:
-    sample_keys = list(goalies.keys())[:5]
+    sample_items = list(goalies.items())[:5]
+    sample_keys = [team for team, _ in sample_items]
+    save_pct_samples: list[str] = []
+    season = current_season_label()
+    for team, info in sample_items:
+        goalie_name = info.goalie_name if info else None
+        sv_pct, found = get_goalie_save_pct(goalie_name or "", season)
+        sv_text = f"{sv_pct:.4f}" if sv_pct is not None else "n/a"
+        save_pct_samples.append(f"{team}:{goalie_name or 'n/a'} sv={sv_text} found={found}")
     print(
         "[nhl goalies] "
-        f"debug summary source={source} date_received={date_received} teams={len(goalies)} sample_keys={sample_keys}"
+        f"debug summary source={source} date_received={date_received} teams={len(goalies)} "
+        f"sample_keys={sample_keys} savePct_samples={save_pct_samples}"
     )
 
 

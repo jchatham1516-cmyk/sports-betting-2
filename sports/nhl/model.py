@@ -23,6 +23,7 @@ from sports.nhl.goalie_ratings import (
     current_season_label,
     get_goalie_rating_with_meta,
     get_goalie_save_pct,
+    get_goalie_save_pct_meta,
 )
 from sports.nhl.results_source import fetch_nhl_completed_games
 
@@ -570,11 +571,14 @@ def _compute_goalie_adjustment(
             )
 
     goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
-    base_shift = _clamp(
-        goalie_rating_diff * GOALIE_SHIFT_SCALE,
-        -NHL_GOALIE_MAX_PROB_SHIFT,
-        NHL_GOALIE_MAX_PROB_SHIFT,
-    )
+    if abs(goalie_rating_diff) < 1e-6:
+        base_shift = 0.0
+    else:
+        base_shift = _clamp(
+            goalie_rating_diff * GOALIE_SHIFT_SCALE,
+            -NHL_GOALIE_MAX_PROB_SHIFT,
+            NHL_GOALIE_MAX_PROB_SHIFT,
+        )
     partial_factor = 0.65 if partial_found else 1.0
     goalie_prob_shift = float(base_shift * NHL_GOALIE_WEIGHT * conf_w * partial_factor)
     goalie_adj = float(abs(goalie_prob_shift))
@@ -819,9 +823,31 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 f"rating_diff={goalie_rating_diff:.3f} conf_w={goalie_confidence_weight:.2f} "
                 f"prob_shift={goalie_prob_shift:.4f} adj={goalie_adj:.4f}"
             )
+            home_sv, home_sv_found, home_gp, home_sv_source, home_sv_raw = get_goalie_save_pct_meta(
+                goalie_home_name or "",
+                season_label,
+            )
+            away_sv, away_sv_found, away_gp, away_sv_source, away_sv_raw = get_goalie_save_pct_meta(
+                goalie_away_name or "",
+                season_label,
+            )
+            home_sv_text = f"{home_sv:.4f}" if home_sv is not None else "n/a"
+            away_sv_text = f"{away_sv:.4f}" if away_sv is not None else "n/a"
+            print(
+                "[nhl goalies] debug goalie_save_pct "
+                f"home_goalie={goalie_home_name} savePct={home_sv_text} gamesPlayed={home_gp} "
+                f"rating_strength={goalie_home_rating:.4f} found={home_sv_found} "
+                f"away_goalie={goalie_away_name} savePct={away_sv_text} gamesPlayed={away_gp} "
+                f"rating_strength={goalie_away_rating:.4f} found={away_sv_found}"
+            )
+            print(
+                "[nhl goalies] debug goalie_save_pct_source "
+                f"home_source={home_sv_source} home_raw={home_sv_raw} "
+                f"away_source={away_sv_source} away_raw={away_sv_raw}"
+            )
         if goalie_home_name and goalie_away_name and abs(goalie_rating_diff) < 1e-6:
-            home_sv = get_goalie_save_pct(goalie_home_name, season_label)
-            away_sv = get_goalie_save_pct(goalie_away_name, season_label)
+            home_sv, _ = get_goalie_save_pct(goalie_home_name, season_label)
+            away_sv, _ = get_goalie_save_pct(goalie_away_name, season_label)
             home_sv_text = f"{home_sv:.4f}" if home_sv is not None else "n/a"
             away_sv_text = f"{away_sv:.4f}" if away_sv is not None else "n/a"
             print(
