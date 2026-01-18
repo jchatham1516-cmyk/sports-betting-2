@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 
 
 STATS_CACHE_DIR = "results/cache"
-NHL_STATS_BASE = "https://api.nhle.com/stats/rest/en/goalie"
+NHL_STATS_BASE = "https://api.nhle.com/stats/rest/en/goalie/summary"
 NHL_STATS_LIMIT = 300
 MONEYPUCK_GOALIES_URL = "https://moneypuck.com/goalies.htm"
 DEFAULT_LEAGUE_AVG_SV = 0.903
@@ -302,15 +302,16 @@ def _fetch_goalie_stats(season: str) -> dict:
         return cached
 
     season_id = _season_id_from_label(season)
-    params = {
-        "isAggregate": "false",
-        "isGame": "false",
-        "sort": "[{\"property\":\"savePct\",\"direction\":\"DESC\"}]",
-        "start": 0,
-        "limit": NHL_STATS_LIMIT,
-        "factCayenneExp": "gamesPlayed>=5",
-        "cayenneExp": f"seasonId={season_id}",
-    }
+
+params = {
+    "isAggregate": "false",
+    "isGame": "true",
+    "start": 0,
+    "limit": 500,
+    "sort": "[{\"property\":\"savePct\",\"direction\":\"DESC\"}]",
+    # Filter to regular season goalies for that season
+    "factCayenneExp": f"seasonId={season_id} and gameTypeId=2 and gamesPlayed>=5",
+}
     try:
         payload = _get_with_retry(NHL_STATS_BASE, params=params)
     except Exception as exc:
