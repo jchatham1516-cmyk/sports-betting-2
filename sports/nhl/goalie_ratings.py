@@ -8,12 +8,15 @@ import unicodedata
 from datetime import date, datetime
 from typing import Optional
 
+import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 
 
 STATS_CACHE_DIR = "results/cache"
-NHL_STATS_BASE = "https://api.nhle.com/stats/rest/en/goalie/summary"
+NHL_STATS_ENDPOINTS = [
+    "https://api.nhle.com/stats/rest/en/goalie/summary",
+    "https://api.nhle.com/stats/rest/en/goalie",
+]
 NHL_STATS_LIMIT = 300
 MONEYPUCK_GOALIES_URL = "https://moneypuck.com/goalies.htm"
 DEFAULT_LEAGUE_AVG_SV = 0.903
@@ -23,19 +26,29 @@ _GOALIE_LEAGUE_STATS_CACHE: dict[str, tuple[float, float, float]] = {}
 _GOALIE_LOOKUP_EMPTY_WARNED = False
 
 
-def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 30, max_retries: int = 4) -> dict:
-    last_exc: Optional[Exception] = None
-    headers = {
+def _nhl_headers() -> dict[str, str]:
+    return {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/123 Safari/537.36"
         ),
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.nhl.com/stats/goalies",
-        "Origin": "https://www.nhl.com",
     }
+
+
+def _get_with_retry(
+    url: str,
+    *,
+    params: Optional[dict] = None,
+    timeout: int = 30,
+    max_retries: int = 4,
+    headers: Optional[dict[str, str]] = None,
+) -> dict:
+    last_exc: Optional[Exception] = None
+    headers = headers or _nhl_headers()
     backoff_schedule = [1, 2, 4]
     for attempt in range(1, max_retries + 1):
         retryable = False
@@ -101,7 +114,9 @@ def normalize_goalie_name(name: str) -> str:
     cleaned = re.sub(r"[^\w\s]", " ", cleaned)
     cleaned = cleaned.replace("_", " ")
     cleaned = " ".join(cleaned.strip().split())
-    return cleaned.lower()
+    cleaned = cleaned.lower()
+    cleaned = cleaned.replace("vasilevsky", "vasilevskiy")
+    return cleaned
 
 
 def _season_id_from_label(season: str) -> str:
@@ -190,7 +205,10 @@ def _normalize_header(text: str) -> str:
 def _parse_sv_pct(raw_value: str) -> Optional[float]:
     if raw_value is None:
         return None
-    cleaned = str(raw_value).strip().replace("%", "")
+    cleaned = str(raw_value).strip()
+    if cleaned.lower() in {"nan", "none", ""}:
+        return None
+    cleaned = cleaned.replace("%", "")
     if not cleaned:
         return None
     try:
@@ -204,71 +222,122 @@ def _parse_sv_pct(raw_value: str) -> Optional[float]:
     return value
 
 
+def _matches_goalie_name_column(col_name: str) -> bool:
+    normalized = _normalize_header(col_name)
+    return normalized in {"goalie", "player", "name"} or any(
+        key in normalized for key in ("goalie", "player", "name")
+    )
+
+
+def _matches_save_pct_column(col_name: str) -> bool:
+    normalized = _normalize_header(col_name)
+    if normalized in {"sv", "save"}:
+        return True
+    return any(
+        key in normalized
+        for key in ("svpct", "savepct", "savepercentage", "svpercent", "savepercent")
+    )
+
+
+def _matches_games_played_column(col_name: str) -> bool:
+    normalized = _normalize_header(col_name)
+    return normalized in {"gp", "games", "gamesplayed"} or "games" in normalized
+
+
 def _fetch_goalie_stats_from_moneypuck(season: str) -> dict:
     resp = requests.get(MONEYPUCK_GOALIES_URL, headers=_money_puck_headers(), timeout=30)
     text_snippet = resp.text[:200].strip().replace("\n", " ")
     if resp.status_code != 200:
-        raise RuntimeError(
-            f"moneypuck status={resp.status_code} body={text_snippet}"
-        )
-    soup = BeautifulSoup(resp.text, "html.parser")
-    table = soup.find("table", id="goalies") or soup.find("table")
-    if table is None:
-        raise RuntimeError("moneypuck goalie table not found")
+        raise RuntimeError(f"moneypuck status={resp.status_code} body={text_snippet}")
 
-    header_cells = []
-    header_row = table.find("tr")
-    if header_row:
-        header_cells = [cell.get_text(strip=True) for cell in header_row.find_all(["th", "td"])]
-    header_map = {_normalize_header(text): idx for idx, text in enumerate(header_cells)}
+    tables = pd.read_html(resp.text)
+    if not tables:
+        raise RuntimeError("moneypuck goalie tables not found")
 
-    name_idx = None
-    sv_idx = None
-    gp_idx = None
-    for key, idx in header_map.items():
-        if key in {"goalie", "player", "name"}:
-            name_idx = idx
-        if key in {"sv", "svpct", "savepct", "save", "savepercentage", "svpercent"}:
-            sv_idx = idx
-        if key in {"gp", "games", "gamesplayed"}:
-            gp_idx = idx
-    if name_idx is None or sv_idx is None:
-        raise RuntimeError("moneypuck goalie columns not found")
+    data_rows: list[dict] = []
+    for table in tables:
+        if table.empty:
+            continue
+        columns = [str(col) for col in table.columns]
+        name_cols = [col for col in columns if _matches_goalie_name_column(col)]
+        sv_cols = [col for col in columns if _matches_save_pct_column(col)]
+        if not name_cols or not sv_cols:
+            continue
+        name_col = name_cols[0]
+        sv_col = sv_cols[0]
+        gp_col = None
+        gp_cols = [col for col in columns if _matches_games_played_column(col)]
+        if gp_cols:
+            gp_col = gp_cols[0]
 
-    data_rows = []
-    for row in table.find_all("tr")[1:]:
-        cells = [cell.get_text(strip=True) for cell in row.find_all("td")]
-        if not cells:
-            continue
-        if name_idx >= len(cells) or sv_idx >= len(cells):
-            continue
-        name = cells[name_idx].strip()
-        if not name:
-            continue
-        sv_pct = _parse_sv_pct(cells[sv_idx])
-        if sv_pct is None:
-            continue
-        games_played = 0
-        if gp_idx is not None and gp_idx < len(cells):
-            try:
-                games_played = int(float(cells[gp_idx]))
-            except Exception:
-                games_played = 0
-        data_rows.append(
-            {
-                "goalieFullName": name,
-                "savePct": sv_pct,
-                "gamesPlayed": games_played,
-                "source": "moneypuck",
-            }
-        )
+        for _, row in table.iterrows():
+            name = str(row.get(name_col, "")).strip()
+            if not name or name.lower() in {"nan", "none"}:
+                continue
+            sv_pct = _parse_sv_pct(row.get(sv_col))
+            if sv_pct is None:
+                continue
+            games_played = 0
+            if gp_col:
+                try:
+                    games_played = int(float(row.get(gp_col)))
+                except Exception:
+                    games_played = 0
+            data_rows.append(
+                {
+                    "goalieFullName": name,
+                    "savePct": sv_pct,
+                    "gamesPlayed": games_played,
+                    "source": "moneypuck",
+                }
+            )
+        if data_rows:
+            break
+
     if not data_rows:
         raise RuntimeError("moneypuck goalie table empty")
+
     return {
         "data": data_rows,
         "season": season,
         "source": "moneypuck",
     }
+
+
+def _fetch_goalie_stats_from_nhl(season: str) -> dict:
+    season_id = _season_id_from_label(season)
+    params_base = {
+        "isAggregate": "false",
+        "isGame": "true",
+        "start": 0,
+        "limit": 500,
+        "sort": "[{\"property\":\"savePct\",\"direction\":\"DESC\"}]",
+    }
+    params_with_filters = {
+        **params_base,
+        "cayenneExp": f"seasonId={season_id} and gameTypeId=2",
+        "factCayenneExp": "gamesPlayed>=5",
+    }
+    params_no_fact = {
+        **params_base,
+        "cayenneExp": f"seasonId={season_id} and gameTypeId=2",
+    }
+    last_exc: Optional[Exception] = None
+    for endpoint in NHL_STATS_ENDPOINTS:
+        for params in (params_with_filters, params_no_fact):
+            try:
+                payload = _get_with_retry(endpoint, params=params, headers=_nhl_headers())
+            except Exception as exc:
+                last_exc = exc
+                continue
+            rows = _payload_rows_count(payload)
+            if rows > 0:
+                if isinstance(payload, dict):
+                    payload.setdefault("season", season)
+                    payload.setdefault("source", "nhl_stats")
+                return payload
+    detail = f": {last_exc}" if last_exc else ""
+    raise RuntimeError(f"NHL stats endpoints failed for season={season}{detail}")
 
 
 def _fetch_goalie_stats(season: str) -> dict:
@@ -301,18 +370,8 @@ def _fetch_goalie_stats(season: str) -> dict:
             )
         return cached
 
-    season_id = _season_id_from_label(season)
-
-    params = {
-        "isAggregate": "false",
-        "isGame": "true",
-        "start": 0,
-        "limit": 500,
-        "sort": "[{\"property\":\"savePct\",\"direction\":\"DESC\"}]",
-        "factCayenneExp": f"seasonId={season_id} and gameTypeId=2 and gamesPlayed>=5",
-    }
     try:
-        payload = _get_with_retry(NHL_STATS_BASE, params=params)
+        payload = _fetch_goalie_stats_from_nhl(season)
     except Exception as exc:
         if debug_enabled:
             print(
