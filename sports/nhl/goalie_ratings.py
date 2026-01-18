@@ -32,19 +32,21 @@ def debug_goalie_stats_summary(season: str) -> None:
     rows = len(data)
     sv_values: list[float] = []
     goalie_names: list[str] = []
+    high_sv_count = 0
+    top_by_games: list[tuple[str, int, Optional[float]]] = []
     for row in data:
         if not isinstance(row, dict):
             continue
-        sv_pct = row.get("savePct")
+        sv_pct = _goalie_row_save_pct(row)
         name = row.get("goalieFullName") or row.get("playerName") or ""
         if name:
             goalie_names.append(str(name))
-        try:
-            sv_pct = float(sv_pct)
-        except Exception:
+        games = _parse_int_value(row.get("gamesPlayed"), default=0)
+        top_by_games.append((str(name), games, sv_pct))
+        if sv_pct is None or sv_pct <= 0:
             continue
-        if sv_pct <= 0:
-            continue
+        if sv_pct >= 0.99:
+            high_sv_count += 1
         sv_values.append(sv_pct)
     min_sv = min(sv_values) if sv_values else float("nan")
     mean_sv = float(sum(sv_values) / len(sv_values)) if sv_values else float("nan")
@@ -53,23 +55,14 @@ def debug_goalie_stats_summary(season: str) -> None:
     print(
         "[nhl goalie ratings] summary "
         f"season={season} rows={rows} unique_goalies={unique_goalies} "
-        f"savePct_min={min_sv:.4f} savePct_mean={mean_sv:.4f} savePct_max={max_sv:.4f}"
+        f"savePct_min={min_sv:.4f} savePct_mean={mean_sv:.4f} savePct_max={max_sv:.4f} "
+        f"savePct_ge_0.99={high_sv_count}"
     )
-    top_by_games = []
-    for row in data:
-        if not isinstance(row, dict):
-            continue
-        name = row.get("goalieFullName") or row.get("playerName") or ""
-        try:
-            games = int(row.get("gamesPlayed") or 0)
-        except Exception:
-            games = 0
-        if name:
-            top_by_games.append((str(name), games))
     top_by_games.sort(key=lambda item: item[1], reverse=True)
-    print("[nhl goalie ratings] top_5_by_gamesPlayed:")
-    for name, games in top_by_games[:5]:
-        print(f"  {name} gamesPlayed={games}")
+    print("[nhl goalie ratings] top_10_by_gamesPlayed:")
+    for name, games, sv_pct in top_by_games[:10]:
+        sv_display = f"{sv_pct:.4f}" if sv_pct is not None else "None"
+        print(f"  {name} gamesPlayed={games} savePct={sv_display}")
 
 
 def _nhl_headers() -> dict[str, str]:
@@ -266,6 +259,63 @@ def _parse_sv_pct(raw_value: str) -> Optional[float]:
     if value > 1.5:
         value /= 100.0
     return value
+
+
+def _parse_save_pct_value(raw_value: object) -> Optional[float]:
+    if raw_value is None:
+        return None
+    cleaned = str(raw_value).strip()
+    if cleaned.lower() in {"nan", "none", ""}:
+        return None
+    try:
+        value = float(cleaned)
+    except Exception:
+        return None
+    if value <= 0:
+        return None
+    if value > 1.0:
+        return value / 100.0
+    return value
+
+
+def _parse_int_value(raw_value: object, default: int = 0) -> int:
+    try:
+        return int(float(raw_value))
+    except Exception:
+        return default
+
+
+def _parse_float_value(raw_value: object) -> Optional[float]:
+    try:
+        return float(raw_value)
+    except Exception:
+        return None
+
+
+def _compute_save_pct_from_counts(saves: object, shots_against: object) -> Optional[float]:
+    saves_value = _parse_float_value(saves)
+    shots_value = _parse_float_value(shots_against)
+    if saves_value is None or shots_value is None or shots_value <= 0:
+        return None
+    if saves_value < 0:
+        return None
+    return saves_value / shots_value
+
+
+def _goalie_row_save_pct(row: dict) -> Optional[float]:
+    sv_pct = _parse_save_pct_value(row.get("savePct"))
+    if sv_pct is not None:
+        return sv_pct
+    return _compute_save_pct_from_counts(row.get("saves"), row.get("shotsAgainst"))
+
+
+def _save_pct_fields(row: dict) -> dict[str, object]:
+    save_fields: dict[str, object] = {}
+    for key in row.keys():
+        normalized = _normalize_header(key)
+        if "save" in normalized and ("pct" in normalized or "percent" in normalized or "sv" in normalized):
+            save_fields[key] = row.get(key)
+    return save_fields
 
 
 def _matches_goalie_name_column(col_name: str) -> bool:
@@ -572,11 +622,10 @@ def _league_goalie_stats(season: str) -> tuple[float, float, float]:
     data = payload.get("data", []) if isinstance(payload, dict) else []
     sv_values: list[float] = []
     for row in data:
-        try:
-            sv_pct = float(row.get("savePct"))
-        except Exception:
+        if not isinstance(row, dict):
             continue
-        if sv_pct <= 0:
+        sv_pct = _goalie_row_save_pct(row)
+        if sv_pct is None or sv_pct <= 0:
             continue
         sv_values.append(sv_pct)
     league_avg_sv = float(sum(sv_values) / len(sv_values)) if sv_values else DEFAULT_LEAGUE_AVG_SV
@@ -658,17 +707,13 @@ def get_goalie_save_pct(goalie_name: str, season: str) -> Optional[float]:
     best, matched_key, used_fallback, name_norm = _resolve_goalie_row(goalie_name, season)
     if best is None:
         return None
-    sv_pct = best.get("savePct")
-    try:
-        sv_pct = float(sv_pct)
-    except Exception:
+    sv_pct = _goalie_row_save_pct(best)
+    if sv_pct is None:
+        return None
+    games = _parse_int_value(best.get("gamesPlayed"), default=0)
+    if games >= 5 and (sv_pct > 0.99 or sv_pct < 0.85):
         return None
     if used_fallback and os.getenv("NHL_GOALIES_DEBUG") == "1":
-        games = best.get("gamesPlayed", 0)
-        try:
-            games = int(games)
-        except Exception:
-            games = 0
         print(
             "[nhl goalie ratings] fallback match "
             f"original={goalie_name} normalized={name_norm} matched_key={matched_key} "
@@ -687,21 +732,48 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
             print(f"[goalie_rating] missing rating for: {goalie_name} season={season}")
         return (0.0, False)
 
-    sv_pct = best.get("savePct")
-    games = best.get("gamesPlayed", 0)
-    try:
-        sv_pct = float(sv_pct)
-        games = int(games)
-    except Exception:
-        return (0.0, False)
+    debug_enabled = os.getenv("NHL_GOALIES_DEBUG") == "1"
+    raw_games = best.get("gamesPlayed")
+    raw_shots = best.get("shotsAgainst")
+    raw_saves = best.get("saves")
+    raw_save_pct = best.get("savePct")
+    games = _parse_int_value(raw_games, default=0)
+    if debug_enabled:
+        save_fields = _save_pct_fields(best)
+        print(
+            "[nhl goalie ratings] debug goalie_row "
+            f"name={goalie_name} gamesPlayed={raw_games} shotsAgainst={raw_shots} "
+            f"saves={raw_saves} savePct={raw_save_pct} savePct_fields={save_fields}"
+        )
+        print(
+            "[nhl goalie ratings] debug goalie_row_keys "
+            f"name={goalie_name} keys={list(best.keys())}"
+        )
+
+    sv_pct = _goalie_row_save_pct(best)
     if used_fallback and os.getenv("NHL_GOALIES_DEBUG") == "1":
+        sv_display = f"{sv_pct:.4f}" if sv_pct is not None else "None"
         print(
             "[nhl goalie ratings] fallback match "
             f"original={goalie_name} normalized={name_norm} matched_key={matched_key} "
-            f"gamesPlayed={games} savePct={sv_pct:.4f}"
+            f"gamesPlayed={games} savePct={sv_display}"
         )
 
     league_avg_sv, _, _ = _league_goalie_stats(season)
+    if sv_pct is None:
+        if debug_enabled:
+            print(
+                "[nhl goalie ratings] WARNING: missing savePct, "
+                f"using league average for {goalie_name}"
+            )
+        return (0.0, False)
+    if games >= 5 and (sv_pct > 0.99 or sv_pct < 0.85):
+        if debug_enabled:
+            print(
+                "[nhl goalie ratings] WARNING: invalid savePct "
+                f"for {goalie_name} gamesPlayed={games} savePct={sv_pct:.4f}"
+            )
+        return (0.0, False)
     rating_raw = (sv_pct - league_avg_sv) * 1000.0
     rating_raw = max(-30.0, min(30.0, rating_raw))
     if games < 5:
@@ -728,7 +800,6 @@ def debug_goalie_rating(names: list[str]) -> None:
 
 if __name__ == "__main__":
     season = current_season_label()
-    payload = _fetch_goalie_stats(season)
-    print("rows", len(payload.get("data", [])))
+    debug_goalie_stats_summary(season)
     for name in ["Jake Oettinger", "Andrei Vasilevskiy"]:
         print(name, get_goalie_rating_with_meta(name, season))
