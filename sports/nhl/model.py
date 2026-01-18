@@ -551,43 +551,58 @@ def _compute_goalie_adjustment(
 
     if goalie_home_name and goalie_away_name:
         goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
-        max_shift = float(max(0.0, GOALIE_MAX_SHIFT))
-        raw_shift = float(goalie_rating_diff * GOALIE_STRENGTH_WEIGHT)
-        weighted_shift = float(raw_shift * NHL_GOALIE_WEIGHT * conf_w)
-        scaled_shift = float(_clamp(weighted_shift, -max_shift, max_shift))
+        max_shift = float(max(0.0, NHL_GOALIE_MAX_PROB_SHIFT))
+        raw_shift = float(goalie_rating_diff * NHL_GOALIE_WEIGHT)
+        scaled_shift = float(raw_shift * conf_w)
         if home_found and away_found:
             goalie_reason = "goalie_found"
-        elif home_found or away_found:
-            scaled_shift = float(_clamp(scaled_shift * 0.5, -max_shift, max_shift))
-            penalty = float(NHL_GOALIE_UNKNOWN_PENALTY * conf_w * NHL_GOALIE_WEIGHT)
-            if home_found and not away_found:
-                scaled_shift = float(_clamp(scaled_shift + penalty, -max_shift, max_shift))
-            elif away_found and not home_found:
-                scaled_shift = float(_clamp(scaled_shift - penalty, -max_shift, max_shift))
-            goalie_reason = "goalie_rating_not_found"
         else:
-            raw_shift = 0.0
-            weighted_shift = 0.0
-            scaled_shift = 0.0
+            if not home_found and not away_found:
+                goalie_prob_shift = 0.0
+                goalie_adj = 0.0
+                goalie_reason = "goalie_rating_not_found"
+                if os.getenv("NHL_GOALIES_DEBUG") == "1":
+                    print(
+                        "[nhl goalies] adjustment "
+                        f"home_goalie={goalie_home_name} away_goalie={goalie_away_name} "
+                        f"home_found={home_found} away_found={away_found} "
+                        f"home_rating={goalie_home_rating:.4f} away_rating={goalie_away_rating:.4f} "
+                        f"diff={goalie_rating_diff:.4f} weight={NHL_GOALIE_WEIGHT:.4f} "
+                        f"conf_w={conf_w:.3f} raw_shift={raw_shift:.4f} "
+                        f"scaled_shift={scaled_shift:.4f} final_adj={goalie_adj:.4f} "
+                        f"reason={goalie_reason}"
+                    )
+                return (
+                    goalie_adj,
+                    goalie_home_rating,
+                    goalie_away_rating,
+                    goalie_rating_diff,
+                    goalie_prob_shift,
+                    goalie_status,
+                    goalie_reason,
+                    conf_w,
+                    home_found,
+                    away_found,
+                )
+            penalty = float(NHL_GOALIE_UNKNOWN_PENALTY * conf_w)
+            if home_found and not away_found:
+                scaled_shift = float(scaled_shift + penalty)
+            elif away_found and not home_found:
+                scaled_shift = float(scaled_shift - penalty)
             goalie_reason = "goalie_rating_not_found"
+        scaled_shift = float(_clamp(scaled_shift, -max_shift, max_shift))
         goalie_prob_shift = float(scaled_shift)
         goalie_adj = float(abs(scaled_shift))
-        if goalie_reason == "goalie_rating_not_found" and goalie_home_name and goalie_away_name:
-            goalie_adj = float(NHL_GOALIE_UNKNOWN_PENALTY * conf_w)
-            if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
-                print(
-                    "[nhl goalie ratings] WARNING: ratings not found for both names "
-                    f"home_goalie={goalie_home_name} away_goalie={goalie_away_name} "
-                    f"conf_w={conf_w:.3f} adj={goalie_adj:.4f}"
-                )
-        if os.getenv("NHL_DEBUG_GOALIES") == "1":
+        if os.getenv("NHL_GOALIES_DEBUG") == "1":
             print(
                 "[nhl goalies] adjustment "
                 f"home_goalie={goalie_home_name} away_goalie={goalie_away_name} "
                 f"home_found={home_found} away_found={away_found} "
-                f"raw_shift={raw_shift:.4f} scaled_shift={scaled_shift:.4f} "
-                f"conf_w={conf_w:.3f} weight={NHL_GOALIE_WEIGHT:.3f} "
-                f"strength_weight={GOALIE_STRENGTH_WEIGHT:.4f}"
+                f"home_rating={goalie_home_rating:.4f} away_rating={goalie_away_rating:.4f} "
+                f"diff={goalie_rating_diff:.4f} weight={NHL_GOALIE_WEIGHT:.4f} "
+                f"conf_w={conf_w:.3f} raw_shift={raw_shift:.4f} "
+                f"scaled_shift={scaled_shift:.4f} final_adj={goalie_adj:.4f} "
+                f"reason={goalie_reason}"
             )
         return (
             goalie_adj,
