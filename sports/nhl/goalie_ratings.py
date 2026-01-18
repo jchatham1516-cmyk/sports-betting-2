@@ -309,6 +309,19 @@ def _goalie_row_save_pct(row: dict) -> Optional[float]:
     return _compute_save_pct_from_counts(row.get("saves"), row.get("shotsAgainst"))
 
 
+def _goalie_row_save_pct_meta(row: dict) -> tuple[Optional[float], str, dict[str, object]]:
+    raw_save_pct = row.get("savePct")
+    sv_pct = _parse_save_pct_value(raw_save_pct)
+    if sv_pct is not None:
+        return (sv_pct, "savePct", {"savePct": raw_save_pct})
+    raw_saves = row.get("saves")
+    raw_shots = row.get("shotsAgainst")
+    sv_pct = _compute_save_pct_from_counts(raw_saves, raw_shots)
+    if sv_pct is not None:
+        return (sv_pct, "saves/shotsAgainst", {"saves": raw_saves, "shotsAgainst": raw_shots})
+    return (None, "missing", {"savePct": raw_save_pct, "saves": raw_saves, "shotsAgainst": raw_shots})
+
+
 def _save_pct_fields(row: dict) -> dict[str, object]:
     save_fields: dict[str, object] = {}
     for key in row.keys():
@@ -701,25 +714,45 @@ def _resolve_goalie_row(goalie_name: str, season: str) -> tuple[Optional[dict], 
     return (best, matched_key, used_fallback, name_norm)
 
 
-def get_goalie_save_pct(goalie_name: str, season: str) -> Optional[float]:
+def _goalie_save_pct_with_meta(
+    goalie_name: str,
+    season: str,
+) -> tuple[Optional[float], bool, int, str, dict[str, object]]:
     if not goalie_name:
-        return None
+        return (None, False, 0, "missing", {})
     best, matched_key, used_fallback, name_norm = _resolve_goalie_row(goalie_name, season)
     if best is None:
-        return None
-    sv_pct = _goalie_row_save_pct(best)
+        return (None, False, 0, "missing", {})
+    sv_pct, source, raw_values = _goalie_row_save_pct_meta(best)
     if sv_pct is None:
-        return None
+        return (None, False, _parse_int_value(best.get("gamesPlayed"), default=0), source, raw_values)
     games = _parse_int_value(best.get("gamesPlayed"), default=0)
     if games >= 5 and (sv_pct > 0.99 or sv_pct < 0.85):
-        return None
+        if os.getenv("NHL_GOALIES_DEBUG") == "1":
+            print(
+                "[nhl goalie ratings] WARNING: invalid savePct "
+                f"for {goalie_name} gamesPlayed={games} savePct={sv_pct:.4f}"
+            )
+        return (None, False, games, source, raw_values)
     if used_fallback and os.getenv("NHL_GOALIES_DEBUG") == "1":
         print(
             "[nhl goalie ratings] fallback match "
             f"original={goalie_name} normalized={name_norm} matched_key={matched_key} "
             f"gamesPlayed={games} savePct={sv_pct:.4f}"
         )
-    return sv_pct
+    return (sv_pct, True, games, source, raw_values)
+
+
+def get_goalie_save_pct(goalie_name: str, season: str) -> tuple[Optional[float], bool]:
+    sv_pct, found, _, _, _ = _goalie_save_pct_with_meta(goalie_name, season)
+    return (sv_pct, found)
+
+
+def get_goalie_save_pct_meta(
+    goalie_name: str,
+    season: str,
+) -> tuple[Optional[float], bool, int, str, dict[str, object]]:
+    return _goalie_save_pct_with_meta(goalie_name, season)
 
 
 def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, bool]:
@@ -750,7 +783,7 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
             f"name={goalie_name} keys={list(best.keys())}"
         )
 
-    sv_pct = _goalie_row_save_pct(best)
+    sv_pct, found, games, _, _ = _goalie_save_pct_with_meta(goalie_name, season)
     if used_fallback and os.getenv("NHL_GOALIES_DEBUG") == "1":
         sv_display = f"{sv_pct:.4f}" if sv_pct is not None else "None"
         print(
@@ -760,18 +793,11 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
         )
 
     league_avg_sv, _, _ = _league_goalie_stats(season)
-    if sv_pct is None:
+    if sv_pct is None or not found:
         if debug_enabled:
             print(
                 "[nhl goalie ratings] WARNING: missing savePct, "
                 f"using league average for {goalie_name}"
-            )
-        return (0.0, False)
-    if games >= 5 and (sv_pct > 0.99 or sv_pct < 0.85):
-        if debug_enabled:
-            print(
-                "[nhl goalie ratings] WARNING: invalid savePct "
-                f"for {goalie_name} gamesPlayed={games} savePct={sv_pct:.4f}"
             )
         return (0.0, False)
     rating_raw = (sv_pct - league_avg_sv) * 1000.0
