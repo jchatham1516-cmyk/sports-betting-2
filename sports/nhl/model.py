@@ -564,7 +564,7 @@ def _compute_goalie_adjustment(
                 scaled_shift = float(_clamp(scaled_shift + penalty, -max_shift, max_shift))
             elif away_found and not home_found:
                 scaled_shift = float(_clamp(scaled_shift - penalty, -max_shift, max_shift))
-            goalie_reason = "partial_found"
+            goalie_reason = "goalie_rating_not_found"
         else:
             raw_shift = 0.0
             weighted_shift = 0.0
