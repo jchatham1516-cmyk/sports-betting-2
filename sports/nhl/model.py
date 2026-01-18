@@ -64,8 +64,7 @@ NHL_LEAGUE_AVG_GOALIE_RATING = float(os.getenv("NHL_LEAGUE_AVG_GOALIE_RATING", "
 NHL_GOALIE_WEIGHT = float(os.getenv("NHL_GOALIE_WEIGHT", "0.45"))
 NHL_GOALIE_MAX_PROB_SHIFT = float(os.getenv("NHL_GOALIE_MAX_PROB_SHIFT", "0.06"))
 NHL_GOALIE_UNKNOWN_PENALTY = float(os.getenv("NHL_GOALIE_UNKNOWN_PENALTY", "0.01"))
-GOALIE_STRENGTH_WEIGHT = float(os.getenv("NHL_GOALIE_STRENGTH_WEIGHT", "0.012"))
-GOALIE_MAX_SHIFT = float(os.getenv("NHL_GOALIE_MAX_SHIFT", "0.06"))
+GOALIE_SHIFT_SCALE = float(os.getenv("NHL_GOALIE_SHIFT_SCALE", "0.015"))
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -529,8 +528,6 @@ def _compute_goalie_adjustment(
         conf_w = float(status_w_home * status_w_away)
     else:
         conf_w = 0.5
-    effective_weight = float(GOALIE_STRENGTH_WEIGHT * conf_w)
-
     if goalie_home_name:
         goalie_home_rating, home_found = get_goalie_rating_with_meta(goalie_home_name, season_label)
     if goalie_away_name:
@@ -550,51 +547,32 @@ def _compute_goalie_adjustment(
             away_found,
         )
 
-    if goalie_home_name and goalie_away_name:
-        goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
-        if home_found and away_found:
-            goalie_reason = "goalie_found"
-        else:
-            if not home_found and not away_found:
-                goalie_reason = "goalie_not_found"
-            else:
-                goalie_reason = "partial_found"
-        shift_weight = effective_weight if home_found and away_found else effective_weight * 0.5
-        goalie_prob_shift = float(_clamp(goalie_rating_diff * shift_weight, -GOALIE_MAX_SHIFT, GOALIE_MAX_SHIFT))
-        goalie_adj = float(abs(goalie_prob_shift))
-        if os.getenv("NHL_GOALIES_DEBUG") == "1":
-            print(
-                "[nhl goalies] adjustment "
-                f"home_goalie={goalie_home_name} away_goalie={goalie_away_name} "
-                f"home_found={home_found} away_found={away_found} "
-                f"home_rating={goalie_home_rating:.4f} away_rating={goalie_away_rating:.4f} "
-                f"diff={goalie_rating_diff:.4f} eff_weight={effective_weight:.4f} "
-                f"conf_w={conf_w:.3f} prob_shift={goalie_prob_shift:.4f} "
-                f"final_adj={goalie_adj:.4f} "
-                f"reason={goalie_reason}"
-            )
-        return (
-            goalie_adj,
-            goalie_home_rating,
-            goalie_away_rating,
-            goalie_rating_diff,
-            goalie_prob_shift,
-            goalie_status,
-            goalie_reason,
-            conf_w,
-            home_found,
-            away_found,
-        )
-
-    if home_found or away_found:
+    if home_found and away_found:
+        goalie_reason = "goalie_found"
+    elif home_found or away_found:
         goalie_reason = "partial_found"
     else:
         goalie_reason = "goalie_not_found"
+
     goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
-    goalie_prob_shift = float(
-        _clamp(goalie_rating_diff * effective_weight * 0.5, -GOALIE_MAX_SHIFT, GOALIE_MAX_SHIFT)
+    base_shift = _clamp(
+        GOALIE_SHIFT_SCALE * goalie_rating_diff,
+        -NHL_GOALIE_MAX_PROB_SHIFT,
+        NHL_GOALIE_MAX_PROB_SHIFT,
     )
+    goalie_prob_shift = float(base_shift * NHL_GOALIE_WEIGHT * conf_w)
     goalie_adj = float(abs(goalie_prob_shift))
+    if goalie_home_name and goalie_away_name and os.getenv("NHL_GOALIES_DEBUG") == "1":
+        print(
+            "[nhl goalies] adjustment "
+            f"home_goalie={goalie_home_name} away_goalie={goalie_away_name} "
+            f"home_found={home_found} away_found={away_found} "
+            f"home_rating={goalie_home_rating:.4f} away_rating={goalie_away_rating:.4f} "
+            f"diff={goalie_rating_diff:.4f} base_shift={base_shift:.4f} "
+            f"goalie_weight={NHL_GOALIE_WEIGHT:.3f} conf_w={conf_w:.3f} "
+            f"prob_shift={goalie_prob_shift:.4f} final_adj={goalie_adj:.4f} "
+            f"reason={goalie_reason}"
+        )
     return (
         goalie_adj,
         goalie_home_rating,
