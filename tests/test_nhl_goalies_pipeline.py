@@ -11,7 +11,9 @@ def test_goalie_lookup_normalizes_keys(monkeypatch):
     monkeypatch.setattr("sports.nhl.model.build_team_historical_total_lines", lambda **_kwargs: {})
     monkeypatch.setattr("sports.nhl.model._build_team_scoring_table", lambda *_args, **_kwargs: pd.DataFrame())
     monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_UNKNOWN_PENALTY", 0.02)
-    monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", lambda _name, _season: (1.0, True))
+    monkeypatch.setattr(
+        "sports.nhl.model.get_goalie_rating_with_meta", lambda _name, _season: (1.0, True, "ok")
+    )
     monkeypatch.setattr(
         "sports.nhl.model.get_starting_goalies",
         lambda _date: {

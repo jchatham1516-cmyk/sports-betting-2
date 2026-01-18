@@ -317,9 +317,15 @@ def main(argv=None):
         ml_probs = [ml_probabilities_for_row(r, sport=args.sport) for _, r in results_df.iterrows()]
         results_df["model_home_prob_raw"] = [p["model_home_prob_raw"] for p in ml_probs]
         results_df["model_home_prob_cal"] = [p["model_home_prob_cal"] for p in ml_probs]
+        results_df["model_home_prob_final_pre_goalie"] = [
+            p["model_home_prob_final_pre_goalie"] for p in ml_probs
+        ]
         results_df["model_home_prob_final"] = [p["model_home_prob_final"] for p in ml_probs]
         results_df["model_away_prob_raw"] = [p["model_away_prob_raw"] for p in ml_probs]
         results_df["model_away_prob_cal"] = [p["model_away_prob_cal"] for p in ml_probs]
+        results_df["model_away_prob_final_pre_goalie"] = [
+            p["model_away_prob_final_pre_goalie"] for p in ml_probs
+        ]
         results_df["model_away_prob_final"] = [p["model_away_prob_final"] for p in ml_probs]
         results_df["market_home_prob"] = [p["market_home_prob"] for p in ml_probs]
         results_df["market_away_prob"] = [p["market_away_prob"] for p in ml_probs]

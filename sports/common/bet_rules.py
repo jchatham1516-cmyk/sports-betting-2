@@ -450,6 +450,12 @@ def _apply_underdog_cap(p_final: float, p_market: float, config: SportBetConfig)
     return float(capped), capped < p_final - 1e-9
 
 
+def _apply_goalie_shift(p_final: float, shift: Optional[float]) -> float:
+    if shift is None or not np.isfinite(shift) or not np.isfinite(p_final):
+        return p_final
+    return float(max(0.01, min(0.99, p_final + float(shift))))
+
+
 def _ml_probabilities_for_side(
     model_home: float,
     market_home: float,
@@ -501,12 +507,36 @@ def ml_probabilities_for_row(row: pd.Series, sport: str = "nba") -> Dict[str, fl
         config=config,
     )
 
+    home_final_pre_goalie = home_final
+    away_final_pre_goalie = away_final
+    if sport.lower() == "nhl":
+        goalie_shift = safe_float(row.get("goalie_prob_shift"))
+        if goalie_shift is not None and np.isfinite(goalie_shift):
+            home_final = _apply_goalie_shift(home_final, goalie_shift)
+            away_final = _apply_goalie_shift(away_final, -goalie_shift)
+        z_home = safe_float(row.get("goalie_home_rating"))
+        z_away = safe_float(row.get("goalie_away_rating"))
+        diff = safe_float(row.get("goalie_rating_diff"))
+        p_before = home_final_pre_goalie
+        p_after = home_final
+        def _fmt(v: Optional[float]) -> str:
+            return f"{float(v):.4f}" if v is not None and np.isfinite(v) else "nan"
+
+        print(
+            "[goalie impact] "
+            f"{row.get('home')} vs {row.get('away')} | "
+            f"z_home={_fmt(z_home)} z_away={_fmt(z_away)} diff={_fmt(diff)} "
+            f"shift={_fmt(goalie_shift)} p_before={_fmt(p_before)} p_after={_fmt(p_after)}"
+        )
+
     return {
         "model_home_prob_raw": home_raw,
         "model_home_prob_cal": home_cal,
+        "model_home_prob_final_pre_goalie": home_final_pre_goalie,
         "model_home_prob_final": home_final,
         "model_away_prob_raw": away_raw,
         "model_away_prob_cal": away_cal,
+        "model_away_prob_final_pre_goalie": away_final_pre_goalie,
         "model_away_prob_final": away_final,
         "market_home_prob": home_market,
         "market_away_prob": away_market,
@@ -569,6 +599,9 @@ def primary_metrics_for_row(
         p_model_final, capped = _apply_underdog_cap(p_model_final, p_market_val, config)
         if capped:
             flags.append("UNDERDOG_CAP")
+        if sport.lower() == "nhl":
+            goalie_shift = safe_float(row.get("goalie_prob_shift"))
+            p_model_final = _apply_goalie_shift(p_model_final, goalie_shift)
         edge_prob_final = (
             float(p_model_final) - float(p_market_val)
             if np.isfinite(p_model_final) and np.isfinite(p_market_val)
