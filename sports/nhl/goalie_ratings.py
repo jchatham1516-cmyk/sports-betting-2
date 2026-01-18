@@ -71,7 +71,7 @@ def normalize_goalie_name(name: str) -> str:
         return ""
     cleaned = unicodedata.normalize("NFKD", str(name))
     cleaned = cleaned.encode("ascii", "ignore").decode("ascii")
-    cleaned = cleaned.replace("’", "'")
+    cleaned = cleaned.replace("’", "'").replace("‘", "'")
     cleaned = re.sub(r"\(.*?\)", " ", cleaned)
     cleaned = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", " ", cleaned, flags=re.IGNORECASE)
     cleaned = " ".join(cleaned.strip().split())
@@ -318,6 +318,8 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
 
     name_norm = normalize_goalie_name(goalie_name)
     best = lookup.get(name_norm)
+    matched_key = name_norm if best is not None else ""
+    used_fallback = False
     if best is None and name_norm:
         alias_maps = _goalie_alias_maps(season)
         parts = _name_tokens(name_norm)
@@ -326,12 +328,31 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
             first_initial = parts[0][0] if parts[0] else ""
             if last and first_initial:
                 candidates = alias_maps.get("last_initial", {}).get(f"{last}|{first_initial}", [])
-                if len(candidates) == 1:
-                    best = lookup.get(candidates[0])
+                if candidates:
+                    used_fallback = True
+                    best = _best_goalie_by_games(lookup, candidates)
+                    if best is not None:
+                        matched_key = candidates[0]
+                        if len(candidates) > 1:
+                            for candidate in candidates:
+                                if lookup.get(candidate) is best:
+                                    matched_key = candidate
+                                    break
             if best is None and last:
                 candidates = alias_maps.get("last", {}).get(last, [])
                 if candidates:
-                    best = _best_goalie_by_games(lookup, candidates)
+                    used_fallback = True
+                    if len(candidates) == 1:
+                        matched_key = candidates[0]
+                        best = lookup.get(candidates[0])
+                    else:
+                        best = _best_goalie_by_games(lookup, candidates)
+                        if best is not None:
+                            matched_key = candidates[0]
+                            for candidate in candidates:
+                                if lookup.get(candidate) is best:
+                                    matched_key = candidate
+                                    break
     if best is None:
         if os.getenv("NHL_GOALIES_DEBUG") == "1":
             print(f"[goalie_rating] missing rating for: {goalie_name} season={season}")
@@ -344,6 +365,12 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
         games = int(games)
     except Exception:
         return (0.0, False)
+    if used_fallback and os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
+        print(
+            "[nhl goalie ratings] fallback match "
+            f"original={goalie_name} normalized={name_norm} matched_key={matched_key} "
+            f"gamesPlayed={games} savePct={sv_pct:.4f}"
+        )
 
     league_avg_sv, league_avg_rating, league_std_rating = _league_goalie_stats(season)
     rating = (sv_pct - league_avg_sv) * 1000.0
