@@ -9,11 +9,13 @@ from datetime import date, datetime
 from typing import Optional
 
 import requests
+from bs4 import BeautifulSoup
 
 
 STATS_CACHE_DIR = "results/cache"
 NHL_STATS_BASE = "https://api.nhle.com/stats/rest/en/goalie"
 NHL_STATS_LIMIT = 300
+MONEYPUCK_GOALIES_URL = "https://moneypuck.com/goalies.htm"
 DEFAULT_LEAGUE_AVG_SV = 0.903
 _GOALIE_LOOKUP_CACHE: dict[str, dict[str, dict]] = {}
 _GOALIE_ALIAS_CACHE: dict[str, dict[str, dict[str, list[str]]]] = {}
@@ -29,7 +31,7 @@ def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 3
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/123 Safari/537.36"
         ),
-        "Accept": "application/json,text/plain,*/*",
+        "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.nhl.com/stats/goalies",
         "Origin": "https://www.nhl.com",
@@ -74,7 +76,8 @@ def _get_with_retry(url: str, *, params: Optional[dict] = None, timeout: int = 3
             time.sleep(backoff_schedule[backoff_index])
         elif not retryable:
             break
-    raise RuntimeError(f"failed to fetch {url}") from last_exc
+    detail = f": {last_exc}" if last_exc else ""
+    raise RuntimeError(f"failed to fetch {url}{detail}") from last_exc
 
 
 def _season_for_date(dt: date) -> str:
@@ -166,6 +169,108 @@ def _write_cached_stats(cache_path: str, payload: dict) -> None:
         json.dump(payload, f, indent=2, sort_keys=True)
 
 
+def _money_puck_headers() -> dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_3_1) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://moneypuck.com/",
+    }
+
+
+def _normalize_header(text: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "", str(text or "").strip().lower())
+    return cleaned
+
+
+def _parse_sv_pct(raw_value: str) -> Optional[float]:
+    if raw_value is None:
+        return None
+    cleaned = str(raw_value).strip().replace("%", "")
+    if not cleaned:
+        return None
+    try:
+        value = float(cleaned)
+    except Exception:
+        return None
+    if value <= 0:
+        return None
+    if value > 1.5:
+        value /= 100.0
+    return value
+
+
+def _fetch_goalie_stats_from_moneypuck(season: str) -> dict:
+    resp = requests.get(MONEYPUCK_GOALIES_URL, headers=_money_puck_headers(), timeout=30)
+    text_snippet = resp.text[:200].strip().replace("\n", " ")
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"moneypuck status={resp.status_code} body={text_snippet}"
+        )
+    soup = BeautifulSoup(resp.text, "html.parser")
+    table = soup.find("table", id="goalies") or soup.find("table")
+    if table is None:
+        raise RuntimeError("moneypuck goalie table not found")
+
+    header_cells = []
+    header_row = table.find("tr")
+    if header_row:
+        header_cells = [cell.get_text(strip=True) for cell in header_row.find_all(["th", "td"])]
+    header_map = {_normalize_header(text): idx for idx, text in enumerate(header_cells)}
+
+    name_idx = None
+    sv_idx = None
+    gp_idx = None
+    for key, idx in header_map.items():
+        if key in {"goalie", "player", "name"}:
+            name_idx = idx
+        if key in {"sv", "svpct", "savepct", "save", "savepercentage", "svpercent"}:
+            sv_idx = idx
+        if key in {"gp", "games", "gamesplayed"}:
+            gp_idx = idx
+    if name_idx is None or sv_idx is None:
+        raise RuntimeError("moneypuck goalie columns not found")
+
+    data_rows = []
+    for row in table.find_all("tr")[1:]:
+        cells = [cell.get_text(strip=True) for cell in row.find_all("td")]
+        if not cells:
+            continue
+        if name_idx >= len(cells) or sv_idx >= len(cells):
+            continue
+        name = cells[name_idx].strip()
+        if not name:
+            continue
+        sv_pct = _parse_sv_pct(cells[sv_idx])
+        if sv_pct is None:
+            continue
+        games_played = 0
+        if gp_idx is not None and gp_idx < len(cells):
+            try:
+                games_played = int(float(cells[gp_idx]))
+            except Exception:
+                games_played = 0
+        data_rows.append(
+            {
+                "goalieFullName": name,
+                "savePct": sv_pct,
+                "gamesPlayed": games_played,
+                "source": "moneypuck",
+            }
+        )
+    if not data_rows:
+        raise RuntimeError("moneypuck goalie table empty")
+    return {
+        "data": data_rows,
+        "season": season,
+        "source": "moneypuck",
+    }
+
+
 def _fetch_goalie_stats(season: str) -> dict:
     cache_path = os.path.join(STATS_CACHE_DIR, f"nhl_goalie_stats_{season}.json")
     cache_exists = os.path.exists(cache_path)
@@ -215,25 +320,35 @@ def _fetch_goalie_stats(season: str) -> dict:
                 f"{season} cache_used={cache_exists} live_ok=False error={exc}"
             )
         print(f"[nhl goalie ratings] WARNING: stats fetch failed: {exc}")
-        if cache_exists:
+        if cached_valid:
             if debug_enabled:
                 print(
                     "[nhl goalie ratings] season="
                     f"{season} status=failure rows={cached_rows} cache=hit"
                 )
             return cached
+        try:
+            payload = _fetch_goalie_stats_from_moneypuck(season)
+            rows = _payload_rows_count(payload)
+            if debug_enabled:
+                print(
+                    "[nhl goalie ratings] season="
+                    f"{season} status=fallback rows={rows} cache=miss source=moneypuck"
+                )
+            if rows > 0:
+                _write_cached_stats(cache_path, payload)
+                return payload
+        except Exception as fallback_exc:
+            print(
+                "[nhl goalie ratings] WARNING: fallback fetch failed: "
+                f"{fallback_exc}"
+            )
         if debug_enabled:
             print(
                 "[nhl goalie ratings] season="
                 f"{season} status=failure rows=0 cache=miss"
             )
-        empty_payload = {"data": [], "error": str(exc), "season": season}
-        _write_cached_stats(cache_path, empty_payload)
-        print(
-            "[nhl goalie ratings] WARNING: wrote empty cache after fetch failure "
-            f"season={season}"
-        )
-        return empty_payload
+        return {"data": [], "error": str(exc), "season": season}
 
     rows = _payload_rows_count(payload)
     if rows == 0:
@@ -250,11 +365,22 @@ def _fetch_goalie_stats(season: str) -> dict:
             )
         if cached_valid:
             return cached
-        _write_cached_stats(cache_path, payload)
-        print(
-            "[nhl goalie ratings] WARNING: wrote empty cache after 0-row payload "
-            f"season={season}"
-        )
+        try:
+            fallback_payload = _fetch_goalie_stats_from_moneypuck(season)
+            fallback_rows = _payload_rows_count(fallback_payload)
+            if fallback_rows > 0:
+                if debug_enabled:
+                    print(
+                        "[nhl goalie ratings] season="
+                        f"{season} status=fallback rows={fallback_rows} cache=miss source=moneypuck"
+                    )
+                _write_cached_stats(cache_path, fallback_payload)
+                return fallback_payload
+        except Exception as fallback_exc:
+            print(
+                "[nhl goalie ratings] WARNING: fallback fetch failed: "
+                f"{fallback_exc}"
+            )
         return payload
 
     if debug_enabled:
@@ -455,6 +581,13 @@ def get_goalie_rating(goalie_name: str, season: str) -> float:
 
 def current_season_label() -> str:
     return _season_for_date(datetime.utcnow().date())
+
+
+def debug_goalie_rating(names: list[str]) -> None:
+    season = current_season_label()
+    for name in names:
+        strength, found = get_goalie_rating_with_meta(name, season)
+        print(f"[goalie debug] season={season} name={name} strength={strength:.4f} found={found}")
 
 
 # CLI sanity check:
