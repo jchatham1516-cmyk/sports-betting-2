@@ -553,10 +553,16 @@ def _compute_goalie_adjustment(
         goalie_reason = "partial_found"
     else:
         goalie_reason = "goalie_not_found"
+        if goalie_home_name and goalie_away_name:
+            print(
+                "[nhl goalies] WARNING: goalie names present but ratings missing "
+                f"home_goalie={goalie_home_name} away_goalie={goalie_away_name} "
+                f"season={season_label}"
+            )
 
     goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
     base_shift = _clamp(
-        GOALIE_SHIFT_SCALE * goalie_rating_diff,
+        goalie_rating_diff * GOALIE_SHIFT_SCALE,
         -NHL_GOALIE_MAX_PROB_SHIFT,
         NHL_GOALIE_MAX_PROB_SHIFT,
     )
@@ -805,9 +811,9 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             )
 
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
-        p_raw = float(_clamp(p_raw + goalie_prob_shift, 0.01, 0.99))
-        p_home = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
-        p_home = float(_clamp(_shrink_prob_toward_half(p_home, SAFE_SHRINK), 0.01, 0.99))
+        p_base = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
+        p_base = float(_clamp(_shrink_prob_toward_half(p_base, SAFE_SHRINK), 0.01, 0.99))
+        p_home = float(_clamp(p_base + goalie_prob_shift, 0.01, 0.99))
 
         # If ratings empty (or both default), blend toward market but do NOT copy it 1:1
         if FALLBACK_USE_MARKET_IF_EMPTY and (not ratings_map or (eh == st.default_elo and ea == st.default_elo)):
