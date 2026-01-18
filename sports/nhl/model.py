@@ -19,7 +19,11 @@ from sports.common.historical_totals import build_team_historical_total_lines
 
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 from sports.nhl.goalies import GoalieInfo, get_starting_goalies
-from sports.nhl.goalie_ratings import current_season_label, get_goalie_rating_with_meta
+from sports.nhl.goalie_ratings import (
+    current_season_label,
+    get_goalie_rating_with_meta,
+    get_goalie_save_pct,
+)
 from sports.nhl.results_source import fetch_nhl_completed_games
 
 ELO_PATH = "results/elo_state_nhl.json"
@@ -61,10 +65,10 @@ TOTAL_MODEL_MAX = float(os.getenv("NHL_TOTAL_MODEL_MAX", "8.5"))
 
 STRICT_SANITY = os.getenv("NHL_STRICT_SANITY", "0") == "1"
 NHL_LEAGUE_AVG_GOALIE_RATING = float(os.getenv("NHL_LEAGUE_AVG_GOALIE_RATING", "0.0"))
-NHL_GOALIE_WEIGHT = float(os.getenv("NHL_GOALIE_WEIGHT", "0.45"))
-NHL_GOALIE_MAX_PROB_SHIFT = float(os.getenv("NHL_GOALIE_MAX_PROB_SHIFT", "0.06"))
+NHL_GOALIE_WEIGHT = float(os.getenv("NHL_GOALIE_WEIGHT", "1.0"))
+NHL_GOALIE_MAX_PROB_SHIFT = float(os.getenv("NHL_GOALIE_MAX_PROB_SHIFT", "0.10"))
 NHL_GOALIE_UNKNOWN_PENALTY = float(os.getenv("NHL_GOALIE_UNKNOWN_PENALTY", "0.01"))
-GOALIE_SHIFT_SCALE = float(os.getenv("NHL_GOALIE_SHIFT_SCALE", "0.015"))
+GOALIE_SHIFT_SCALE = float(os.getenv("NHL_GOALIE_SHIFT_SCALE", "0.05"))
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -481,8 +485,8 @@ def _goalie_status_weight(status: str) -> float:
     if status == "CONFIRMED":
         return 1.0
     if status == "PROJECTED":
-        return 0.6
-    return 0.35
+        return 0.85
+    return 0.60
 
 
 def _goalie_game_status(home_name: Optional[str], away_name: Optional[str]) -> str:
@@ -547,10 +551,15 @@ def _compute_goalie_adjustment(
             away_found,
         )
 
+    partial_found = home_found ^ away_found
     if home_found and away_found:
         goalie_reason = "goalie_found"
-    elif home_found or away_found:
+    elif partial_found:
         goalie_reason = "partial_found"
+        if home_found and not away_found:
+            goalie_away_rating = NHL_LEAGUE_AVG_GOALIE_RATING
+        elif away_found and not home_found:
+            goalie_home_rating = NHL_LEAGUE_AVG_GOALIE_RATING
     else:
         goalie_reason = "goalie_not_found"
         if goalie_home_name and goalie_away_name:
@@ -566,7 +575,8 @@ def _compute_goalie_adjustment(
         -NHL_GOALIE_MAX_PROB_SHIFT,
         NHL_GOALIE_MAX_PROB_SHIFT,
     )
-    goalie_prob_shift = float(base_shift * NHL_GOALIE_WEIGHT * conf_w)
+    partial_factor = 0.65 if partial_found else 1.0
+    goalie_prob_shift = float(base_shift * NHL_GOALIE_WEIGHT * conf_w * partial_factor)
     goalie_adj = float(abs(goalie_prob_shift))
     if goalie_home_name and goalie_away_name and os.getenv("NHL_GOALIES_DEBUG") == "1":
         print(
@@ -808,6 +818,16 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 f"home_rating={goalie_home_rating:.3f} away_rating={goalie_away_rating:.3f} "
                 f"rating_diff={goalie_rating_diff:.3f} conf_w={goalie_confidence_weight:.2f} "
                 f"prob_shift={goalie_prob_shift:.4f} adj={goalie_adj:.4f}"
+            )
+        if goalie_home_name and goalie_away_name and abs(goalie_rating_diff) < 1e-6:
+            home_sv = get_goalie_save_pct(goalie_home_name, season_label)
+            away_sv = get_goalie_save_pct(goalie_away_name, season_label)
+            home_sv_text = f"{home_sv:.4f}" if home_sv is not None else "n/a"
+            away_sv_text = f"{away_sv:.4f}" if away_sv is not None else "n/a"
+            print(
+                "[nhl goalies] WARNING: identical goalie ratings "
+                f"home_goalie={goalie_home_name} savePct={home_sv_text} "
+                f"away_goalie={goalie_away_name} savePct={away_sv_text}"
             )
 
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
