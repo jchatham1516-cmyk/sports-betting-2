@@ -552,11 +552,13 @@ def _compute_goalie_adjustment(
     if goalie_home_name and goalie_away_name:
         goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
         max_shift = float(max(0.0, GOALIE_MAX_SHIFT))
-        raw_shift = float(_clamp(goalie_rating_diff * GOALIE_STRENGTH_WEIGHT, -max_shift, max_shift))
-        scaled_shift = float(raw_shift * conf_w * NHL_GOALIE_WEIGHT)
+        raw_shift = float(goalie_rating_diff * GOALIE_STRENGTH_WEIGHT)
+        weighted_shift = float(raw_shift * NHL_GOALIE_WEIGHT * conf_w)
+        scaled_shift = float(_clamp(weighted_shift, -max_shift, max_shift))
         if home_found and away_found:
             goalie_reason = "goalie_found"
         elif home_found or away_found:
+            scaled_shift = float(_clamp(scaled_shift * 0.5, -max_shift, max_shift))
             penalty = float(NHL_GOALIE_UNKNOWN_PENALTY * conf_w * NHL_GOALIE_WEIGHT)
             if home_found and not away_found:
                 scaled_shift = float(_clamp(scaled_shift + penalty, -max_shift, max_shift))
@@ -565,10 +567,19 @@ def _compute_goalie_adjustment(
             goalie_reason = "partial_found"
         else:
             raw_shift = 0.0
+            weighted_shift = 0.0
             scaled_shift = 0.0
-            goalie_reason = "goalie_rating_fallback"
+            goalie_reason = "goalie_rating_not_found"
         goalie_prob_shift = float(scaled_shift)
         goalie_adj = float(abs(scaled_shift))
+        if goalie_reason == "goalie_rating_not_found" and goalie_home_name and goalie_away_name:
+            goalie_adj = float(NHL_GOALIE_UNKNOWN_PENALTY * conf_w)
+            if os.getenv("NHL_DEBUG_GOALIE_RATINGS") == "1":
+                print(
+                    "[nhl goalie ratings] WARNING: ratings not found for both names "
+                    f"home_goalie={goalie_home_name} away_goalie={goalie_away_name} "
+                    f"conf_w={conf_w:.3f} adj={goalie_adj:.4f}"
+                )
         if os.getenv("NHL_DEBUG_GOALIES") == "1":
             print(
                 "[nhl goalies] adjustment "
