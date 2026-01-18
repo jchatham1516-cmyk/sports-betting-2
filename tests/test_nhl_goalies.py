@@ -85,7 +85,7 @@ def test_goalie_rating_known_and_unknown(monkeypatch):
 
 def test_goalie_adj_non_zero_when_both_goalies_found(monkeypatch):
     def _rating(name, _season):
-        return (1.8, True) if "Home" in name else (-1.2, True)
+        return (1.8, True, "ok") if "Home" in name else (-1.2, True, "ok")
 
     monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", _rating)
     monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 0.5)
@@ -101,12 +101,12 @@ def test_goalie_adj_non_zero_when_both_goalies_found(monkeypatch):
     )
 
     assert adj != 0.0
-    assert reason == "goalie_rating_applied"
+    assert reason == "goalie_found"
 
 
 def test_goalie_adj_limited_for_elite_vs_weak(monkeypatch):
     def _rating(name, _season):
-        return (3.0, True) if "Home" in name else (-3.0, True)
+        return (3.0, True, "ok") if "Home" in name else (-3.0, True, "ok")
 
     monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", _rating)
     monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 0.35)
@@ -124,7 +124,9 @@ def test_goalie_adj_limited_for_elite_vs_weak(monkeypatch):
 
 
 def test_goalie_adj_zero_for_equal_goalies(monkeypatch):
-    monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", lambda _name, _season: (1.2, True))
+    monkeypatch.setattr(
+        "sports.nhl.model.get_goalie_rating_with_meta", lambda _name, _season: (1.2, True, "ok")
+    )
     monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_WEIGHT", 0.35)
     monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_PROB_SHIFT", 0.06)
 
@@ -140,7 +142,9 @@ def test_goalie_adj_zero_for_equal_goalies(monkeypatch):
 
 
 def test_goalie_adj_small_when_goalie_missing(monkeypatch):
-    monkeypatch.setattr("sports.nhl.model.get_goalie_rating_with_meta", lambda _name, _season: (1.2, True))
+    monkeypatch.setattr(
+        "sports.nhl.model.get_goalie_rating_with_meta", lambda _name, _season: (1.2, True, "ok")
+    )
     monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_UNKNOWN_PENALTY", 0.01)
     monkeypatch.setattr("sports.nhl.model.NHL_GOALIE_MAX_PROB_SHIFT", 0.06)
 
@@ -153,7 +157,7 @@ def test_goalie_adj_small_when_goalie_missing(monkeypatch):
     )
 
     assert abs(adj) <= 0.01
-    assert reason == "goalie_missing_opponent"
+    assert reason == "partial_found"
 
 
 def test_run_daily_nhl_uses_goalies_when_available(monkeypatch):
@@ -163,7 +167,7 @@ def test_run_daily_nhl_uses_goalies_when_available(monkeypatch):
     monkeypatch.setattr("sports.nhl.model._build_team_scoring_table", lambda *_args, **_kwargs: pd.DataFrame())
     monkeypatch.setattr(
         "sports.nhl.model.get_goalie_rating_with_meta",
-        lambda name, _season: ((15.0, True) if "Home" in name else (-10.0, True)),
+        lambda name, _season: ((15.0, True, "ok") if "Home" in name else (-10.0, True, "ok")),
     )
     monkeypatch.setattr(
         "sports.nhl.model.get_starting_goalies",

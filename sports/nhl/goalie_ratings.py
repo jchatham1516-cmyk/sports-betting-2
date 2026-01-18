@@ -261,10 +261,10 @@ def _parse_sv_pct(raw_value: str) -> Optional[float]:
     return value
 
 
-def _parse_save_pct_value(raw_value: object) -> Optional[float]:
+def _norm_sv(raw_value: object) -> Optional[float]:
     if raw_value is None:
         return None
-    cleaned = str(raw_value).strip()
+    cleaned = str(raw_value).strip().replace("%", "")
     if cleaned.lower() in {"nan", "none", ""}:
         return None
     try:
@@ -273,9 +273,15 @@ def _parse_save_pct_value(raw_value: object) -> Optional[float]:
         return None
     if value <= 0:
         return None
-    if value > 1.0:
-        return value / 100.0
+    if value > 1.5:
+        value = value / 100.0
+    if value < 0.85 or value > 0.95:
+        return None
     return value
+
+
+def _parse_save_pct_value(raw_value: object) -> Optional[float]:
+    return _norm_sv(raw_value)
 
 
 def _parse_int_value(raw_value: object, default: int = 0) -> int:
@@ -299,7 +305,7 @@ def _compute_save_pct_from_counts(saves: object, shots_against: object) -> Optio
         return None
     if saves_value < 0:
         return None
-    return saves_value / shots_value
+    return _norm_sv(saves_value / shots_value)
 
 
 def _goalie_row_save_pct(row: dict) -> Optional[float]:
@@ -627,7 +633,7 @@ def _goalie_alias_maps(season: str) -> dict[str, dict[str, list[str]]]:
     return cached
 
 
-def _league_goalie_stats(season: str) -> tuple[float, float, float]:
+def _league_goalie_stats(season: str) -> tuple[float, float]:
     cached = _GOALIE_LEAGUE_STATS_CACHE.get(season)
     if cached is not None:
         return cached
@@ -642,24 +648,14 @@ def _league_goalie_stats(season: str) -> tuple[float, float, float]:
             continue
         sv_values.append(sv_pct)
     league_avg_sv = float(sum(sv_values) / len(sv_values)) if sv_values else DEFAULT_LEAGUE_AVG_SV
-    ratings: list[float] = []
-    for sv_pct in sv_values:
-        rating = (sv_pct - league_avg_sv) * 1000.0
-        rating = max(-30.0, min(30.0, rating))
-        ratings.append(rating)
-    if ratings:
-        league_avg_rating = float(sum(ratings) / len(ratings))
-        if len(ratings) > 1:
-            mean = league_avg_rating
-            league_std_rating = float((sum((r - mean) ** 2 for r in ratings) / len(ratings)) ** 0.5)
-        else:
-            league_std_rating = 1.0
+    if sv_values and len(sv_values) > 1:
+        mean = league_avg_sv
+        league_std_sv = float((sum((sv - mean) ** 2 for sv in sv_values) / len(sv_values)) ** 0.5)
     else:
-        league_avg_rating = 0.0
-        league_std_rating = 1.0
-    if league_std_rating <= 1e-6:
-        league_std_rating = 1.0
-    stats = (league_avg_sv, league_avg_rating, league_std_rating)
+        league_std_sv = 0.01
+    if league_std_sv <= 1e-6:
+        league_std_sv = 0.01
+    stats = (league_avg_sv, league_std_sv)
     _GOALIE_LEAGUE_STATS_CACHE[season] = stats
     return stats
 
@@ -755,15 +751,15 @@ def get_goalie_save_pct_meta(
     return _goalie_save_pct_with_meta(goalie_name, season)
 
 
-def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, bool]:
+def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, bool, str]:
     if not goalie_name:
-        return (0.0, False)
+        return (0.0, False, "missing_stats")
 
     best, matched_key, used_fallback, name_norm = _resolve_goalie_row(goalie_name, season)
     if best is None:
         if os.getenv("NHL_GOALIES_DEBUG") == "1":
             print(f"[goalie_rating] missing rating for: {goalie_name} season={season}")
-        return (0.0, False)
+        return (0.0, False, "missing_stats")
 
     debug_enabled = os.getenv("NHL_GOALIES_DEBUG") == "1"
     raw_games = best.get("gamesPlayed")
@@ -792,24 +788,21 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
             f"gamesPlayed={games} savePct={sv_display}"
         )
 
-    league_avg_sv, _, _ = _league_goalie_stats(season)
+    league_avg_sv, league_std_sv = _league_goalie_stats(season)
     if sv_pct is None or not found:
         if debug_enabled:
             print(
                 "[nhl goalie ratings] WARNING: missing savePct, "
                 f"using league average for {goalie_name}"
             )
-        return (0.0, False)
-    rating_raw = (sv_pct - league_avg_sv) * 1000.0
-    rating_raw = max(-30.0, min(30.0, rating_raw))
-    if games < 5:
-        rating_raw *= 0.5
-    strength = rating_raw / 10.0
-    return (float(strength), True)
+        return (0.0, False, "missing_stats")
+    z_score = (sv_pct - league_avg_sv) / league_std_sv
+    z_score = max(-3.0, min(3.0, z_score))
+    return (float(z_score), True, "ok")
 
 
 def get_goalie_rating(goalie_name: str, season: str) -> float:
-    rating, _ = get_goalie_rating_with_meta(goalie_name, season)
+    rating, _, _ = get_goalie_rating_with_meta(goalie_name, season)
     return float(rating)
 
 
@@ -820,8 +813,11 @@ def current_season_label() -> str:
 def debug_goalie_rating(names: list[str]) -> None:
     season = current_season_label()
     for name in names:
-        strength, found = get_goalie_rating_with_meta(name, season)
-        print(f"[goalie debug] season={season} name={name} strength={strength:.4f} found={found}")
+        strength, found, reason = get_goalie_rating_with_meta(name, season)
+        print(
+            f"[goalie debug] season={season} name={name} strength={strength:.4f} "
+            f"found={found} reason={reason}"
+        )
 
 
 if __name__ == "__main__":

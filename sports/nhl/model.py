@@ -22,7 +22,6 @@ from sports.nhl.goalies import GoalieInfo, get_starting_goalies
 from sports.nhl.goalie_ratings import (
     current_season_label,
     get_goalie_rating_with_meta,
-    get_goalie_save_pct,
     get_goalie_save_pct_meta,
 )
 from sports.nhl.results_source import fetch_nhl_completed_games
@@ -67,9 +66,8 @@ TOTAL_MODEL_MAX = float(os.getenv("NHL_TOTAL_MODEL_MAX", "8.5"))
 STRICT_SANITY = os.getenv("NHL_STRICT_SANITY", "0") == "1"
 NHL_LEAGUE_AVG_GOALIE_RATING = float(os.getenv("NHL_LEAGUE_AVG_GOALIE_RATING", "0.0"))
 NHL_GOALIE_WEIGHT = float(os.getenv("NHL_GOALIE_WEIGHT", "1.0"))
-NHL_GOALIE_MAX_PROB_SHIFT = float(os.getenv("NHL_GOALIE_MAX_PROB_SHIFT", "0.10"))
+NHL_GOALIE_MAX_PROB_SHIFT = float(os.getenv("NHL_GOALIE_MAX_PROB_SHIFT", "0.03"))
 NHL_GOALIE_UNKNOWN_PENALTY = float(os.getenv("NHL_GOALIE_UNKNOWN_PENALTY", "0.01"))
-GOALIE_SHIFT_SCALE = float(os.getenv("NHL_GOALIE_SHIFT_SCALE", "0.05"))
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -534,9 +532,9 @@ def _compute_goalie_adjustment(
     else:
         conf_w = 0.5
     if goalie_home_name:
-        goalie_home_rating, home_found = get_goalie_rating_with_meta(goalie_home_name, season_label)
+        goalie_home_rating, home_found, _ = get_goalie_rating_with_meta(goalie_home_name, season_label)
     if goalie_away_name:
-        goalie_away_rating, away_found = get_goalie_rating_with_meta(goalie_away_name, season_label)
+        goalie_away_rating, away_found, _ = get_goalie_rating_with_meta(goalie_away_name, season_label)
 
     if not goalie_home_name and not goalie_away_name:
         return (
@@ -574,11 +572,8 @@ def _compute_goalie_adjustment(
     if abs(goalie_rating_diff) < 1e-6:
         base_shift = 0.0
     else:
-        base_shift = _clamp(
-            goalie_rating_diff * GOALIE_SHIFT_SCALE,
-            -NHL_GOALIE_MAX_PROB_SHIFT,
-            NHL_GOALIE_MAX_PROB_SHIFT,
-        )
+        raw_shift = goalie_rating_diff * (NHL_GOALIE_MAX_PROB_SHIFT / 3.0)
+        base_shift = _clamp(raw_shift, -NHL_GOALIE_MAX_PROB_SHIFT, NHL_GOALIE_MAX_PROB_SHIFT)
     partial_factor = 0.65 if partial_found else 1.0
     goalie_prob_shift = float(base_shift * NHL_GOALIE_WEIGHT * conf_w * partial_factor)
     goalie_adj = float(abs(goalie_prob_shift))
@@ -845,21 +840,24 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 f"home_source={home_sv_source} home_raw={home_sv_raw} "
                 f"away_source={away_sv_source} away_raw={away_sv_raw}"
             )
-        if goalie_home_name and goalie_away_name and abs(goalie_rating_diff) < 1e-6:
-            home_sv, _ = get_goalie_save_pct(goalie_home_name, season_label)
-            away_sv, _ = get_goalie_save_pct(goalie_away_name, season_label)
-            home_sv_text = f"{home_sv:.4f}" if home_sv is not None else "n/a"
-            away_sv_text = f"{away_sv:.4f}" if away_sv is not None else "n/a"
+        if (
+            goalie_home_name
+            and goalie_away_name
+            and goalie_home_found
+            and goalie_away_found
+            and abs(goalie_rating_diff) < 0.05
+            and os.getenv("NHL_GOALIES_DEBUG") == "1"
+        ):
             print(
-                "[nhl goalies] WARNING: identical goalie ratings "
-                f"home_goalie={goalie_home_name} savePct={home_sv_text} "
-                f"away_goalie={goalie_away_name} savePct={away_sv_text}"
+                "[nhl goalies] debug nearly-identical goalie ratings "
+                f"home_goalie={goalie_home_name} away_goalie={goalie_away_name} "
+                f"home_rating={goalie_home_rating:.4f} away_rating={goalie_away_rating:.4f}"
             )
 
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_base = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
         p_base = float(_clamp(_shrink_prob_toward_half(p_base, SAFE_SHRINK), 0.01, 0.99))
-        p_home = float(_clamp(p_base + goalie_prob_shift, 0.01, 0.99))
+        p_home = float(_clamp(p_base, 0.01, 0.99))
 
         # If ratings empty (or both default), blend toward market but do NOT copy it 1:1
         if FALLBACK_USE_MARKET_IF_EMPTY and (not ratings_map or (eh == st.default_elo and ea == st.default_elo)):
