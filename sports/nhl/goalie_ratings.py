@@ -303,15 +303,14 @@ def _fetch_goalie_stats(season: str) -> dict:
 
     season_id = _season_id_from_label(season)
 
-params = {
-    "isAggregate": "false",
-    "isGame": "true",
-    "start": 0,
-    "limit": 500,
-    "sort": "[{\"property\":\"savePct\",\"direction\":\"DESC\"}]",
-    # Filter to regular season goalies for that season
-    "factCayenneExp": f"seasonId={season_id} and gameTypeId=2 and gamesPlayed>=5",
-}
+    params = {
+        "isAggregate": "false",
+        "isGame": "true",
+        "start": 0,
+        "limit": 500,
+        "sort": "[{\"property\":\"savePct\",\"direction\":\"DESC\"}]",
+        "factCayenneExp": f"seasonId={season_id} and gameTypeId=2 and gamesPlayed>=5",
+    }
     try:
         payload = _get_with_retry(NHL_STATS_BASE, params=params)
     except Exception as exc:
@@ -321,7 +320,7 @@ params = {
                 f"{season} cache_used={cache_exists} live_ok=False error={exc}"
             )
         print(f"[nhl goalie ratings] WARNING: stats fetch failed: {exc}")
-        if cached_valid:
+        if cache_exists:
             if debug_enabled:
                 print(
                     "[nhl goalie ratings] season="
@@ -404,7 +403,8 @@ params = {
             "[nhl goalie ratings] debug payload rows="
             f"{rows} sample_goalies={sample_names}"
         )
-    _write_cached_stats(cache_path, payload)
+    if rows > 0:
+        _write_cached_stats(cache_path, payload)
     return payload
 
 
@@ -590,7 +590,9 @@ def debug_goalie_rating(names: list[str]) -> None:
         strength, found = get_goalie_rating_with_meta(name, season)
         print(f"[goalie debug] season={season} name={name} strength={strength:.4f} found={found}")
 
-
-# CLI sanity check:
-# from sports.nhl.goalie_ratings import current_season_label, get_goalie_rating_with_meta
-# print(get_goalie_rating_with_meta("Jake Oettinger", current_season_label()))
+if __name__ == "__main__":
+    season = current_season_label()
+    payload = _fetch_goalie_stats(season)
+    print("rows", len(payload.get("data", [])))
+    for name in ["Jake Oettinger", "Andrei Vasilevskiy"]:
+        print(name, get_goalie_rating_with_meta(name, season))
