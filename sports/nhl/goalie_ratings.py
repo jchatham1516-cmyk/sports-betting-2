@@ -15,34 +15,37 @@ import requests
 STATS_CACHE_DIR = "results/cache"
 NHL_STATS_ENDPOINTS = [
     "https://api.nhle.com/stats/rest/en/goalie/summary",
-    "https://api.nhle.com/stats/rest/en/goalie",
 ]
 NHL_STATS_LIMIT = 300
 MONEYPUCK_GOALIES_URL = "https://moneypuck.com/goalies.htm"
 DEFAULT_LEAGUE_AVG_SV = 0.903
+MIN_GOALIE_GAMES = 8
 _GOALIE_LOOKUP_CACHE: dict[str, dict[str, dict]] = {}
 _GOALIE_ALIAS_CACHE: dict[str, dict[str, dict[str, list[str]]]] = {}
-_GOALIE_LEAGUE_STATS_CACHE: dict[str, tuple[float, float, float]] = {}
+_GOALIE_LEAGUE_STATS_CACHE: dict[str, tuple[float, float]] = {}
 _GOALIE_LOOKUP_EMPTY_WARNED = False
 
 
 def debug_goalie_stats_summary(season: str) -> None:
     payload = _fetch_goalie_stats(season)
-    data = payload.get("data", []) if isinstance(payload, dict) else []
-    rows = len(data)
+    goalies = payload.get("goalies", {}) if isinstance(payload, dict) else {}
+    rows = len(goalies) if isinstance(goalies, dict) else 0
     sv_values: list[float] = []
     goalie_names: list[str] = []
     high_sv_count = 0
     top_by_games: list[tuple[str, int, Optional[float]]] = []
-    for row in data:
+    if isinstance(goalies, dict):
+        rows_iter = goalies.items()
+    else:
+        rows_iter = []
+    for name_key, row in rows_iter:
         if not isinstance(row, dict):
             continue
         sv_pct = _goalie_row_save_pct(row)
-        name = row.get("goalieFullName") or row.get("playerName") or ""
-        if name:
-            goalie_names.append(str(name))
+        if name_key:
+            goalie_names.append(str(name_key))
         games = _parse_int_value(row.get("gamesPlayed"), default=0)
-        top_by_games.append((str(name), games, sv_pct))
+        top_by_games.append((str(name_key), games, sv_pct))
         if sv_pct is None or sv_pct <= 0:
             continue
         if sv_pct >= 0.99:
@@ -211,6 +214,9 @@ def _load_cached_stats(cache_path: str) -> dict:
 
 def _payload_rows_count(payload: object) -> int:
     if isinstance(payload, dict):
+        goalies = payload.get("goalies")
+        if isinstance(goalies, dict):
+            return len(goalies)
         data = payload.get("data", [])
         if isinstance(data, list):
             return len(data)
@@ -313,6 +319,63 @@ def _goalie_row_save_pct(row: dict) -> Optional[float]:
     if sv_pct is not None:
         return sv_pct
     return _compute_save_pct_from_counts(row.get("saves"), row.get("shotsAgainst"))
+
+
+def _build_goalie_summary(payload: dict, season: str, source: str) -> dict:
+    data = payload.get("data", []) if isinstance(payload, dict) else []
+    temp: dict[str, dict[str, object]] = {}
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("goalieFullName") or row.get("playerName") or row.get("playerFullName") or ""
+        name_norm = normalize_goalie_name(name)
+        if not name_norm:
+            continue
+        sv_pct = _goalie_row_save_pct(row)
+        if sv_pct is None:
+            continue
+        games = _parse_int_value(row.get("gamesPlayed"), default=0)
+        current = temp.get(name_norm)
+        if current is None or games > _parse_int_value(current.get("gamesPlayed"), default=0):
+            temp[name_norm] = {
+                "name": str(name).strip(),
+                "savePct": float(sv_pct),
+                "gamesPlayed": games,
+            }
+
+    sv_values = [row["savePct"] for row in temp.values() if isinstance(row.get("savePct"), float)]
+    if sv_values:
+        mean = float(sum(sv_values) / len(sv_values))
+    else:
+        mean = DEFAULT_LEAGUE_AVG_SV
+    if len(sv_values) > 1:
+        variance = sum((sv - mean) ** 2 for sv in sv_values) / len(sv_values)
+        std_dev = float(variance**0.5)
+    else:
+        std_dev = 0.01
+    if std_dev <= 1e-6:
+        std_dev = 0.01
+
+    goalies: dict[str, dict[str, object]] = {}
+    for name_key, row in temp.items():
+        sv_pct = float(row["savePct"])
+        games = _parse_int_value(row.get("gamesPlayed"), default=0)
+        z_score = (sv_pct - mean) / std_dev
+        shrink = min(1.0, max(0.0, games / 20.0))
+        rating = float(z_score * shrink)
+        goalies[name_key] = {
+            "name": row.get("name") or name_key,
+            "savePct": sv_pct,
+            "gamesPlayed": games,
+            "rating": rating,
+        }
+
+    return {
+        "season": season,
+        "source": source,
+        "total": len(goalies),
+        "goalies": goalies,
+    }
 
 
 def _goalie_row_save_pct_meta(row: dict) -> tuple[Optional[float], str, dict[str, object]]:
@@ -423,23 +486,21 @@ def _fetch_goalie_stats_from_nhl(season: str) -> dict:
     season_id = _season_id_from_label(season)
     params_base = {
         "isAggregate": "false",
-        "isGame": "true",
+        "isGame": "false",
         "start": 0,
         "limit": 500,
         "sort": "[{\"property\":\"savePct\",\"direction\":\"DESC\"}]",
     }
-    params_with_filters = {
-        **params_base,
-        "cayenneExp": f"seasonId={season_id} and gameTypeId=2",
-        "factCayenneExp": "gamesPlayed>=5",
-    }
-    params_no_fact = {
-        **params_base,
-        "cayenneExp": f"seasonId={season_id} and gameTypeId=2",
-    }
+    min_games_values = [MIN_GOALIE_GAMES, 5]
     last_exc: Optional[Exception] = None
     for endpoint in NHL_STATS_ENDPOINTS:
-        for params in (params_with_filters, params_no_fact):
+        for min_games in min_games_values:
+            params = {
+                **params_base,
+                "cayenneExp": (
+                    f"seasonId={season_id} and gameTypeId=2 and gamesPlayed>={min_games}"
+                ),
+            }
             try:
                 payload = _get_with_retry(endpoint, params=params, headers=_nhl_headers())
             except Exception as exc:
@@ -459,8 +520,9 @@ def _fetch_goalie_stats(season: str) -> dict:
     cache_path = os.path.join(STATS_CACHE_DIR, f"nhl_goalie_stats_{season}.json")
     cache_exists = os.path.exists(cache_path)
     cached = _load_cached_stats(cache_path)
-    cached_rows = _payload_rows_count(cached)
-    cached_valid = cached_rows > 0
+    cached_goalies = cached.get("goalies") if isinstance(cached, dict) else None
+    cached_valid = isinstance(cached_goalies, dict) and len(cached_goalies) > 0
+    cached_rows = len(cached_goalies) if cached_valid else _payload_rows_count(cached)
     debug_enabled = os.getenv("NHL_GOALIES_DEBUG") == "1"
     if cached_valid:
         if debug_enabled:
@@ -473,12 +535,7 @@ def _fetch_goalie_stats(season: str) -> dict:
                 f"{season} status=cached rows={cached_rows} cache=hit"
             )
         if debug_enabled:
-            data = cached.get("data", []) if isinstance(cached, dict) else []
-            sample_names = [
-                row.get("goalieFullName") or row.get("playerName")
-                for row in data[:3]
-                if isinstance(row, dict)
-            ]
+            sample_names = list(cached_goalies.keys())[:3] if isinstance(cached_goalies, dict) else []
             print(
                 "[nhl goalie ratings] debug payload rows="
                 f"{cached_rows} sample_goalies={sample_names}"
@@ -494,7 +551,7 @@ def _fetch_goalie_stats(season: str) -> dict:
                 f"{season} cache_used={cache_exists} live_ok=False error={exc}"
             )
         print(f"[nhl goalie ratings] WARNING: stats fetch failed: {exc}")
-        if cache_exists:
+        if cache_exists and cached_valid:
             if debug_enabled:
                 print(
                     "[nhl goalie ratings] season="
@@ -503,6 +560,7 @@ def _fetch_goalie_stats(season: str) -> dict:
             return cached
         try:
             payload = _fetch_goalie_stats_from_moneypuck(season)
+            payload = _build_goalie_summary(payload, season, payload.get("source", "moneypuck"))
             rows = _payload_rows_count(payload)
             if debug_enabled:
                 print(
@@ -522,8 +580,9 @@ def _fetch_goalie_stats(season: str) -> dict:
                 "[nhl goalie ratings] season="
                 f"{season} status=failure rows=0 cache=miss"
             )
-        return {"data": [], "error": str(exc), "season": season}
+        return {"goalies": {}, "error": str(exc), "season": season, "total": 0, "source": "nhl_stats"}
 
+    payload = _build_goalie_summary(payload, season, payload.get("source", "nhl_stats"))
     rows = _payload_rows_count(payload)
     if rows == 0:
         if debug_enabled:
@@ -541,6 +600,11 @@ def _fetch_goalie_stats(season: str) -> dict:
             return cached
         try:
             fallback_payload = _fetch_goalie_stats_from_moneypuck(season)
+            fallback_payload = _build_goalie_summary(
+                fallback_payload,
+                season,
+                fallback_payload.get("source", "moneypuck"),
+            )
             fallback_rows = _payload_rows_count(fallback_payload)
             if fallback_rows > 0:
                 if debug_enabled:
@@ -567,12 +631,7 @@ def _fetch_goalie_stats(season: str) -> dict:
             "[nhl goalie ratings] season="
             f"{season} status=ok rows={rows} cache={cache_status}"
         )
-        data = payload.get("data", []) if isinstance(payload, dict) else []
-        sample_names = [
-            row.get("goalieFullName") or row.get("playerName")
-            for row in data[:3]
-            if isinstance(row, dict)
-        ]
+        sample_names = list(payload.get("goalies", {}).keys())[:3]
         print(
             "[nhl goalie ratings] debug payload rows="
             f"{rows} sample_goalies={sample_names}"
@@ -587,28 +646,27 @@ def _goalie_lookup_for_season(season: str) -> dict[str, dict]:
     if cached is not None:
         return cached
     payload = _fetch_goalie_stats(season)
-    data = payload.get("data", []) if isinstance(payload, dict) else []
     lookup: dict[str, dict] = {}
-    for row in data:
-        row_name = row.get("goalieFullName") or row.get("playerName") or ""
-        name_norm = normalize_goalie_name(row_name)
-        if not name_norm:
-            continue
-        current = lookup.get(name_norm)
-        try:
-            games = int(row.get("gamesPlayed") or 0)
-        except Exception:
-            games = 0
-        if current is None:
-            lookup[name_norm] = row
-            continue
-        try:
-            current_games = int(current.get("gamesPlayed") or 0)
-        except Exception:
-            current_games = 0
-        if games > current_games:
-            lookup[name_norm] = row
+    goalies = payload.get("goalies", {}) if isinstance(payload, dict) else {}
+    if isinstance(goalies, dict):
+        for name_key, row in goalies.items():
+            if not name_key or not isinstance(row, dict):
+                continue
+            current = lookup.get(name_key)
+            games = _parse_int_value(row.get("gamesPlayed"), default=0)
+            if current is None:
+                lookup[name_key] = row
+                continue
+            current_games = _parse_int_value(current.get("gamesPlayed"), default=0)
+            if games > current_games:
+                lookup[name_key] = row
     _GOALIE_LOOKUP_CACHE[season] = lookup
+    if os.getenv("NHL_GOALIES_DEBUG") == "1":
+        sample_keys = list(lookup.keys())[:5]
+        print(
+            "[nhl goalie ratings] lookup_loaded "
+            f"season={season} total_goalies={len(lookup)} sample_keys={sample_keys}"
+        )
     return lookup
 
 
@@ -638,15 +696,16 @@ def _league_goalie_stats(season: str) -> tuple[float, float]:
     if cached is not None:
         return cached
     payload = _fetch_goalie_stats(season)
-    data = payload.get("data", []) if isinstance(payload, dict) else []
+    data = payload.get("goalies", {}) if isinstance(payload, dict) else {}
     sv_values: list[float] = []
-    for row in data:
-        if not isinstance(row, dict):
-            continue
-        sv_pct = _goalie_row_save_pct(row)
-        if sv_pct is None or sv_pct <= 0:
-            continue
-        sv_values.append(sv_pct)
+    if isinstance(data, dict):
+        for row in data.values():
+            if not isinstance(row, dict):
+                continue
+            sv_pct = _goalie_row_save_pct(row)
+            if sv_pct is None or sv_pct <= 0:
+                continue
+            sv_values.append(sv_pct)
     league_avg_sv = float(sum(sv_values) / len(sv_values)) if sv_values else DEFAULT_LEAGUE_AVG_SV
     if sv_values and len(sv_values) > 1:
         mean = league_avg_sv
@@ -751,28 +810,26 @@ def get_goalie_save_pct_meta(
     return _goalie_save_pct_with_meta(goalie_name, season)
 
 
-def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, bool, str]:
+def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, bool, dict[str, object]]:
     if not goalie_name:
-        return (0.0, False, "missing_stats")
+        return (0.0, False, {"savePct": None, "gamesPlayed": 0, "name_key": ""})
 
     best, matched_key, used_fallback, name_norm = _resolve_goalie_row(goalie_name, season)
     if best is None:
         if os.getenv("NHL_GOALIES_DEBUG") == "1":
             print(f"[goalie_rating] missing rating for: {goalie_name} season={season}")
-        return (0.0, False, "missing_stats")
+        return (0.0, False, {"savePct": None, "gamesPlayed": 0, "name_key": name_norm})
 
     debug_enabled = os.getenv("NHL_GOALIES_DEBUG") == "1"
     raw_games = best.get("gamesPlayed")
-    raw_shots = best.get("shotsAgainst")
-    raw_saves = best.get("saves")
     raw_save_pct = best.get("savePct")
     games = _parse_int_value(raw_games, default=0)
     if debug_enabled:
         save_fields = _save_pct_fields(best)
         print(
             "[nhl goalie ratings] debug goalie_row "
-            f"name={goalie_name} gamesPlayed={raw_games} shotsAgainst={raw_shots} "
-            f"saves={raw_saves} savePct={raw_save_pct} savePct_fields={save_fields}"
+            f"name={goalie_name} gamesPlayed={raw_games} savePct={raw_save_pct} "
+            f"savePct_fields={save_fields}"
         )
         print(
             "[nhl goalie ratings] debug goalie_row_keys "
@@ -788,17 +845,29 @@ def get_goalie_rating_with_meta(goalie_name: str, season: str) -> tuple[float, b
             f"gamesPlayed={games} savePct={sv_display}"
         )
 
-    league_avg_sv, league_std_sv = _league_goalie_stats(season)
-    if sv_pct is None or not found:
+    rating_value = _parse_float_value(best.get("rating"))
+    if rating_value is None and sv_pct is not None and found:
+        league_avg_sv, league_std_sv = _league_goalie_stats(season)
+        z_score = (sv_pct - league_avg_sv) / league_std_sv
+        shrink = min(1.0, max(0.0, games / 20.0))
+        rating_value = float(z_score * shrink)
+
+    if sv_pct is None or not found or rating_value is None:
         if debug_enabled:
             print(
                 "[nhl goalie ratings] WARNING: missing savePct, "
                 f"using league average for {goalie_name}"
             )
-        return (0.0, False, "missing_stats")
-    z_score = (sv_pct - league_avg_sv) / league_std_sv
-    z_score = max(-3.0, min(3.0, z_score))
-    return (float(z_score), True, "ok")
+        return (
+            0.0,
+            False,
+            {"savePct": sv_pct, "gamesPlayed": games, "name_key": matched_key or name_norm},
+        )
+    return (
+        float(rating_value),
+        True,
+        {"savePct": sv_pct, "gamesPlayed": games, "name_key": matched_key or name_norm},
+    )
 
 
 def get_goalie_rating(goalie_name: str, season: str) -> float:
@@ -813,10 +882,10 @@ def current_season_label() -> str:
 def debug_goalie_rating(names: list[str]) -> None:
     season = current_season_label()
     for name in names:
-        strength, found, reason = get_goalie_rating_with_meta(name, season)
+        strength, found, meta = get_goalie_rating_with_meta(name, season)
         print(
             f"[goalie debug] season={season} name={name} strength={strength:.4f} "
-            f"found={found} reason={reason}"
+            f"found={found} meta={meta}"
         )
 
 

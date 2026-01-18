@@ -68,6 +68,8 @@ NHL_LEAGUE_AVG_GOALIE_RATING = float(os.getenv("NHL_LEAGUE_AVG_GOALIE_RATING", "
 NHL_GOALIE_WEIGHT = float(os.getenv("NHL_GOALIE_WEIGHT", "1.0"))
 NHL_GOALIE_MAX_PROB_SHIFT = float(os.getenv("NHL_GOALIE_MAX_PROB_SHIFT", "0.03"))
 NHL_GOALIE_UNKNOWN_PENALTY = float(os.getenv("NHL_GOALIE_UNKNOWN_PENALTY", "0.01"))
+GOALIE_PROB_WEIGHT = float(os.getenv("NHL_GOALIE_PROB_WEIGHT", "0.02"))
+MAX_GOALIE_SHIFT = float(os.getenv("NHL_MAX_GOALIE_SHIFT", "0.03"))
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -569,13 +571,11 @@ def _compute_goalie_adjustment(
             )
 
     goalie_rating_diff = float(goalie_home_rating) - float(goalie_away_rating)
-    if abs(goalie_rating_diff) < 1e-6:
-        base_shift = 0.0
-    else:
-        raw_shift = goalie_rating_diff * (NHL_GOALIE_MAX_PROB_SHIFT / 3.0)
-        base_shift = _clamp(raw_shift, -NHL_GOALIE_MAX_PROB_SHIFT, NHL_GOALIE_MAX_PROB_SHIFT)
     partial_factor = 0.65 if partial_found else 1.0
-    goalie_prob_shift = float(base_shift * NHL_GOALIE_WEIGHT * conf_w * partial_factor)
+    confidence_weight = conf_w * partial_factor
+    raw_shift = GOALIE_PROB_WEIGHT * goalie_rating_diff * confidence_weight
+    base_shift = _clamp(raw_shift, -MAX_GOALIE_SHIFT, MAX_GOALIE_SHIFT)
+    goalie_prob_shift = base_shift
     goalie_adj = float(abs(goalie_prob_shift))
     if goalie_home_name and goalie_away_name and os.getenv("NHL_GOALIES_DEBUG") == "1":
         print(
@@ -584,7 +584,7 @@ def _compute_goalie_adjustment(
             f"home_found={home_found} away_found={away_found} "
             f"home_rating={goalie_home_rating:.4f} away_rating={goalie_away_rating:.4f} "
             f"diff={goalie_rating_diff:.4f} base_shift={base_shift:.4f} "
-            f"goalie_weight={NHL_GOALIE_WEIGHT:.3f} conf_w={conf_w:.3f} "
+            f"goalie_prob_weight={GOALIE_PROB_WEIGHT:.3f} conf_w={confidence_weight:.3f} "
             f"prob_shift={goalie_prob_shift:.4f} final_adj={goalie_adj:.4f} "
             f"reason={goalie_reason}"
         )
@@ -596,7 +596,7 @@ def _compute_goalie_adjustment(
         goalie_prob_shift,
         goalie_status,
         goalie_reason,
-        conf_w,
+        confidence_weight,
         home_found,
         away_found,
     )
