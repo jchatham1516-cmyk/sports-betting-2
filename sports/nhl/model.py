@@ -18,6 +18,8 @@ from sports.common.odds_sources import SPORT_TO_ODDS_KEY
 from sports.common.historical_totals import build_team_historical_total_lines
 
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
+from sports.common.prob_calibration import update_prob_calibration
+from sports.common.prob_uncertainty import update_uncertainty
 from sports.nhl.goalies import GoalieInfo, get_starting_goalies
 from sports.nhl.goalie_ratings import (
     current_season_label,
@@ -41,6 +43,9 @@ FALLBACK_USE_MARKET_IF_EMPTY = os.getenv("NHL_FALLBACK_USE_MARKET_IF_EMPTY", "1"
 MARKET_FALLBACK_BLEND = float(os.getenv("NHL_MARKET_FALLBACK_BLEND", "0.35"))  # 0..0.85
 
 CAL_MIN_GAMES = int(os.getenv("NHL_CAL_MIN_GAMES", "120"))
+PROB_CAL_WINDOW = int(os.getenv("NHL_PROB_CAL_WINDOW", "260"))
+PROB_CAL_MIN_GAMES = int(os.getenv("NHL_PROB_CAL_MIN_GAMES", str(CAL_MIN_GAMES)))
+UNCERTAINTY_WINDOW = int(os.getenv("NHL_UNCERTAINTY_WINDOW", "140"))
 
 TOTAL_DEFAULT_PRICE = float(os.getenv("NHL_TOTAL_DEFAULT_PRICE", "-110.0"))
 TOTAL_HIST_DAYS = int(os.getenv("NHL_TOTAL_HIST_DAYS", "21"))
@@ -391,6 +396,22 @@ def update_elo_from_recent_scores(days_from: int = 120) -> EloState:
 
     try:
         if len(train_ps) >= CAL_MIN_GAMES:
+            ps_arr = np.array(train_ps, dtype=float)
+            ys_arr = np.array(train_ys, dtype=float)
+            update_uncertainty(
+                "nhl",
+                ps_arr,
+                ys_arr,
+                window=UNCERTAINTY_WINDOW,
+                min_samples=max(30, int(CAL_MIN_GAMES)),
+            )
+            update_prob_calibration(
+                "nhl",
+                ps_arr,
+                ys_arr,
+                window=PROB_CAL_WINDOW,
+                min_samples=PROB_CAL_MIN_GAMES,
+            )
             mcal = fit_margin(np.array(train_xs, dtype=float), np.array(train_margins, dtype=float))
             save_margin_cal(MARGIN_CAL_PATH, mcal)
     except Exception as e:

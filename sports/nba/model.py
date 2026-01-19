@@ -27,6 +27,8 @@ from sports.nba.injuries import (
 from sports.common.eval import build_game_key
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 from sports.common.calibration import load_nba_calibrator, update_and_save_nba_calibration
+from sports.common.prob_calibration import update_prob_calibration
+from sports.common.prob_uncertainty import update_uncertainty, load_uncertainty
 
 # BallDontLie client (already in your repo)
 from sports.nba.bdl_client import bdl_get, season_start_year_for_date, get_bdl_api_key
@@ -44,10 +46,14 @@ ELO_K = float(os.getenv("NBA_ELO_K", "20.0"))
 
 ELO_TRAIN_DAYS = int(os.getenv("NBA_ELO_TRAIN_DAYS", "200"))
 CAL_MIN_GAMES = int(os.getenv("NBA_CAL_MIN_GAMES", "80"))
+PROB_CAL_WINDOW = int(os.getenv("NBA_PROB_CAL_WINDOW", "240"))
+PROB_CAL_MIN_GAMES = int(os.getenv("NBA_PROB_CAL_MIN_GAMES", str(CAL_MIN_GAMES)))
 
 # injuries -> margin adjust
 MAX_ABS_INJ_POINTS = float(os.getenv("NBA_MAX_ABS_INJ_POINTS", "6.0"))
 INJ_DAMP = float(os.getenv("NBA_INJ_DAMP", "0.60"))
+INJURY_LOW_CONF_MULT = float(os.getenv("NBA_INJURY_LOW_CONF_MULT", "0.60"))
+INJURY_MED_CONF_MULT = float(os.getenv("NBA_INJURY_MED_CONF_MULT", "0.85"))
 ELO_PER_POINT = float(os.getenv("NBA_ELO_PER_POINT", "40.0"))
 
 # basic regularization
@@ -371,6 +377,17 @@ def _injury_total_adjustment(inj_home: list[dict], inj_away: list[dict]) -> tupl
     return total_adj, reason_text
 
 
+def _injury_confidence_weight(source: str, injury_data: dict) -> tuple[float, str]:
+    src = str(source or "").upper()
+    if not injury_data:
+        return float(INJURY_LOW_CONF_MULT), "LOW"
+    if src == "OFFICIAL":
+        return 1.0, "HIGH"
+    if src == "ESPN":
+        return float(INJURY_MED_CONF_MULT), "MEDIUM"
+    return float(INJURY_LOW_CONF_MULT), "LOW"
+
+
 def _total_pick_from_edge(
     edge_points: float,
     *,
@@ -644,10 +661,20 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
             ps_arr = np.array(train_ps, dtype=float)
             ys_arr = np.array(train_ys, dtype=float)
 
-            resid = ys_arr - ps_arr
-            resid_var = float(np.var(resid))
-            with open(UNCERTAINTY_PATH, "w", encoding="utf-8") as f:
-                json.dump({"resid_var": resid_var, "n": len(resid)}, f, indent=2)
+            update_uncertainty(
+                "nba",
+                ps_arr,
+                ys_arr,
+                window=UNCERTAINTY_WINDOW,
+                min_samples=max(30, int(CAL_MIN_GAMES)),
+            )
+            update_prob_calibration(
+                "nba",
+                ps_arr,
+                ys_arr,
+                window=PROB_CAL_WINDOW,
+                min_samples=PROB_CAL_MIN_GAMES,
+            )
 
             mcal = fit_margin(np.array(train_xs, dtype=float), np.array(train_margins, dtype=float))
             save_margin_cal(MARGIN_CAL_PATH, mcal)
@@ -660,8 +687,8 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
 def _load_calibrators():
     unc = None
     try:
-        with open(UNCERTAINTY_PATH, "r", encoding="utf-8") as f:
-            unc = float(json.load(f).get("resid_var", float("nan")))
+        data = load_uncertainty("nba") or {}
+        unc = float(data.get("uncertainty", float("nan")))
     except Exception:
         unc = None
     mcal = None
@@ -701,7 +728,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
     except Exception as e:
         print(f"[nba] WARNING: Elo update failed ({e}); using backfill state")
         st = backfill_nba_elo_state()
-    resid_var, margin_cal = _load_calibrators()
+    uncertainty, margin_cal = _load_calibrators()
 
     form_adjs = _build_form_adjustments(stats_df) if stats_df is not None else {}
 
@@ -788,6 +815,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
             injury_data = {}
             injury_source = "NONE"
 
+    injury_conf_weight, injury_confidence = _injury_confidence_weight(injury_source, injury_data)
+
     rows = []
 
     # IMPORTANT: odds_dict may store teams in the KEY (tuple), not in oi
@@ -815,8 +844,16 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         inj_list_away = build_injury_list_for_team_nba(away, injury_data)
         inj_detail_home = build_injury_detail_list_for_team_nba(home, injury_data)
         inj_detail_away = build_injury_detail_list_for_team_nba(away, injury_data)
-        inj_pts_home = _clamp(injury_adjustment_points(inj_list_home), -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS) * INJ_DAMP
-        inj_pts_away = _clamp(injury_adjustment_points(inj_list_away), -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS) * INJ_DAMP
+        inj_pts_home = (
+            _clamp(injury_adjustment_points(inj_list_home), -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
+            * INJ_DAMP
+            * injury_conf_weight
+        )
+        inj_pts_away = (
+            _clamp(injury_adjustment_points(inj_list_away), -MAX_ABS_INJ_POINTS, MAX_ABS_INJ_POINTS)
+            * INJ_DAMP
+            * injury_conf_weight
+        )
         inj_elo_home = float(inj_pts_home) * float(ELO_PER_POINT)
         inj_elo_away = float(inj_pts_away) * float(ELO_PER_POINT)
 
@@ -824,6 +861,10 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         if injury_source in {"NONE", "UNKNOWN"}:
             inj_total_adj = 0.0
             inj_total_reason = "INJURY_UNKNOWN"
+        else:
+            inj_total_adj = float(inj_total_adj) * float(injury_conf_weight)
+            if injury_confidence in {"LOW", "MEDIUM"}:
+                inj_total_reason = f"{inj_total_reason}|INJ_CONF_{injury_confidence}"
 
         form_home = float(form_adjs.get(home, 0.0))
         form_away = float(form_adjs.get(away, 0.0))
@@ -834,7 +875,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         p_raw = float(elo_win_prob(eh, ea, home_adv=HOME_ADV))
         p_home = float(_clamp(0.5 + BASE_COMPRESS * (p_raw - 0.5), 0.01, 0.99))
 
-        resid_sd = float(math.sqrt(resid_var)) if resid_var is not None and not math.isnan(resid_var) else 0.06
+        resid_sd = (
+            float(uncertainty) if uncertainty is not None and not math.isnan(uncertainty) else 0.06
+        )
         shrink = 1.0 + float(UNCERTAINTY_SHRINK) * float(_clamp(resid_sd, 0.0, 0.50))
         p_home = 0.5 + (p_home - 0.5) / shrink
 
@@ -1050,6 +1093,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "away_ml": float(away_ml) if not np.isnan(away_ml) else np.nan,
                 "inj_points_home": float(inj_pts_home),
                 "inj_points_away": float(inj_pts_away),
+                "injury_confidence": str(injury_confidence),
+                "injury_confidence_weight": float(injury_conf_weight),
+                "injury_source": str(injury_source),
                 "elo_diff": float(elo_diff),
                 "model_spread_home": float(model_spread_home),
                 "model_margin_home": float(mu_margin_home),
