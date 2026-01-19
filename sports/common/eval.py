@@ -220,6 +220,9 @@ def evaluate_predictions(
 
     brier = float("nan")
     calib_df: Optional[pd.DataFrame] = None
+    ml_hit_rate = float("nan")
+    ml_hit_rate_hi_edge = float("nan")
+    ml_high_edge_count = 0
 
     aligned_results = _prepare_results(df_results) if df_results is not None else None
     if aligned_results is not None and not aligned_results.empty:
@@ -233,10 +236,46 @@ def evaluate_predictions(
             brier = brier_score(joined["actual_home_win"], joined["model_home_prob"])
             calib_df = calibration_table(joined["actual_home_win"], joined["model_home_prob"])
 
+            ml_mask = pd.Series([True] * len(joined))
+            if "primary_market" in joined.columns:
+                ml_mask = joined["primary_market"].astype(str).str.upper() == "ML"
+
+            if "primary_side" in joined.columns:
+                pick_home = joined["primary_side"].astype(str).str.upper() == "HOME"
+            else:
+                pick_home = joined["model_home_prob"].astype(float) >= 0.5
+
+            actual_home_win = joined["actual_home_win"].astype(float)
+            hit = (pick_home & (actual_home_win == 1.0)) | (~pick_home & (actual_home_win == 0.0))
+            if ml_mask.any():
+                ml_hit_rate = float(hit[ml_mask].mean())
+
+            edge = None
+            for col in ("edge_prob_final", "edge_prob_cal", "edge_prob_raw"):
+                if col in joined.columns:
+                    edge = pd.to_numeric(joined[col], errors="coerce")
+                    break
+            if edge is None and "market_home_prob" in joined.columns:
+                edge = pd.to_numeric(joined["model_home_prob"], errors="coerce") - pd.to_numeric(
+                    joined["market_home_prob"], errors="coerce"
+                )
+            if edge is not None:
+                hi_edge_mask = ml_mask & edge.abs().ge(0.05)
+                ml_high_edge_count = int(hi_edge_mask.sum())
+                if ml_high_edge_count > 0:
+                    ml_hit_rate_hi_edge = float(hit[hi_edge_mask].mean())
+
     if calib_df is not None:
         print("\n[eval] Brier score (home win): {:.5f}".format(brier))
         print("[eval] Calibration buckets (model_home_prob vs actual home wins):")
         print(calib_df.to_string(index=False))
+        if np.isfinite(ml_hit_rate):
+            print(f"[eval] ML hit rate: {ml_hit_rate:.3f}")
+        if ml_high_edge_count > 0 and np.isfinite(ml_hit_rate_hi_edge):
+            print(
+                f"[eval] ML hit rate (abs edge >= 0.05): {ml_hit_rate_hi_edge:.3f} "
+                f"(n={ml_high_edge_count})"
+            )
     else:
         print("\n[eval] No results to compute Brier/calibration yet. Skipping accuracy table.")
 

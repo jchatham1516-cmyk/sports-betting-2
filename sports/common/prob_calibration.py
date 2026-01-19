@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 
-from sports.common.util import clamp, normalize_result_label
+from sports.common.util import clamp, normalize_result_label, safe_float
 
 
 MIN_SAMPLES = 300
@@ -246,3 +247,129 @@ def calibrate_prob(
     ys = np.asarray(p_raw_or_y, dtype=float)
     params = fit_platt(probs, ys)
     return PlattCalibrator(a=params["a"], b=params["b"]), "platt"
+
+
+def _load_bet_log_samples(
+    sport: str,
+    *,
+    days_back: int,
+    bet_log_paths: List[str],
+) -> Tuple[np.ndarray, np.ndarray]:
+    frames: List[pd.DataFrame] = []
+    for path in bet_log_paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            frames.append(pd.read_csv(path))
+        except Exception:
+            continue
+
+    if not frames:
+        return np.array([]), np.array([])
+
+    bets = pd.concat(frames, ignore_index=True)
+    if bets.empty:
+        return np.array([]), np.array([])
+
+    bets = bets.copy()
+    bets["sport"] = bets.get("sport", "").astype(str).str.lower()
+    bets = bets[bets["sport"] == str(sport).lower()]
+    bets = bets[bets.get("market_type", "").astype(str).str.lower() == "moneyline"]
+
+    if "date" in bets.columns:
+        bets["date_parsed"] = pd.to_datetime(bets["date"], errors="coerce")
+        cutoff = datetime.utcnow() - timedelta(days=int(days_back))
+        bets = bets[bets["date_parsed"] >= cutoff]
+
+    bets["result_norm"] = bets.get("result", "").apply(normalize_result_label)
+    bets = bets[bets["result_norm"].isin(["WIN", "LOSS"])]
+    if bets.empty:
+        return np.array([]), np.array([])
+
+    def _pick_prob(row: pd.Series) -> float:
+        for col in ("p_model_raw", "model_prob", "p_model_cal", "p_model_final"):
+            val = safe_float(row.get(col))
+            if val is not None and np.isfinite(val):
+                return float(val)
+        return float("nan")
+
+    p_raw = bets.apply(_pick_prob, axis=1).astype(float)
+    y = (bets["result_norm"] == "WIN").astype(float)
+
+    mask = np.isfinite(p_raw.to_numpy()) & np.isfinite(y.to_numpy())
+    return p_raw.to_numpy()[mask], y.to_numpy()[mask]
+
+
+def _load_prediction_samples(
+    sport: str,
+    *,
+    days_back: int,
+    preds_dir: str,
+    eval_history_path: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    try:
+        from sports.common.eval import update_eval_history_with_scores
+    except Exception:
+        return np.array([]), np.array([])
+
+    merged = update_eval_history_with_scores(
+        sport=sport,
+        preds_dir=preds_dir,
+        out_path=eval_history_path,
+        days_back=days_back,
+    )
+    if merged.empty:
+        return np.array([]), np.array([])
+
+    if "score_date" in merged.columns:
+        merged = merged.copy()
+        merged["score_date"] = pd.to_datetime(merged["score_date"], errors="coerce")
+        cutoff = datetime.utcnow() - timedelta(days=int(days_back))
+        merged = merged[merged["score_date"] >= cutoff]
+
+    p_raw = pd.to_numeric(merged.get("model_home_prob", np.nan), errors="coerce")
+    y = pd.to_numeric(merged.get("actual_home_win", np.nan), errors="coerce")
+    mask = np.isfinite(p_raw.to_numpy()) & np.isfinite(y.to_numpy())
+    return p_raw.to_numpy()[mask], y.to_numpy()[mask]
+
+
+def update_daily_ml_calibration(
+    sport: str = "nba",
+    *,
+    days_back: int = 45,
+    min_samples: int = MIN_SAMPLES,
+    bet_log_paths: Optional[List[str]] = None,
+    preds_dir: str = "results",
+    eval_history_path: Optional[str] = None,
+) -> Optional[PlattCalibrator]:
+    sport_key = str(sport).lower()
+    bet_log_paths = bet_log_paths or ["results/tracking/bet_log.csv", "results/bet_log.csv"]
+    eval_history_path = eval_history_path or f"results/eval_history_{sport_key}.csv"
+
+    p_raw_log, y_log = _load_bet_log_samples(sport_key, days_back=days_back, bet_log_paths=bet_log_paths)
+    p_raw_pred, y_pred = _load_prediction_samples(
+        sport_key,
+        days_back=days_back,
+        preds_dir=preds_dir,
+        eval_history_path=eval_history_path,
+    )
+
+    if p_raw_log.size and p_raw_pred.size:
+        p_raw = np.concatenate([p_raw_log, p_raw_pred])
+        y = np.concatenate([y_log, y_pred])
+    elif p_raw_log.size:
+        p_raw, y = p_raw_log, y_log
+    else:
+        p_raw, y = p_raw_pred, y_pred
+
+    if p_raw.size < int(min_samples):
+        print(f"[calibration] {sport_key} has only {p_raw.size} samples; skipping ML calibration update.")
+        return None
+
+    return update_prob_calibration(
+        sport_key,
+        p_raw,
+        y,
+        window=int(p_raw.size),
+        min_samples=int(min_samples),
+    )
