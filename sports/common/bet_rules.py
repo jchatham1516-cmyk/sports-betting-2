@@ -1,7 +1,7 @@
 # sports/common/bet_rules.py
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 import math
 from typing import Dict, List, Optional, Tuple
@@ -500,12 +500,12 @@ def _primary_probabilities(
     return None, None, None, None, "missing primary market"
 
 
-def _anchor_prob(p_cal: float, p_market: float, anchor_weight: float) -> float:
+def _anchor_prob(p_cal: float, p_market: float, config: SportBetConfig) -> float:
     if not np.isfinite(p_cal):
         return float("nan")
     if not np.isfinite(p_market):
         return float(p_cal)
-    w = float(max(0.0, min(1.0, float(anchor_weight))))
+    w = float(max(0.0, min(1.0, float(config.anchor_weight))))
     return float(w * p_market + (1.0 - w) * p_cal)
 
 
@@ -552,7 +552,6 @@ def _ml_probabilities_for_side(
     side: str,
     *,
     sport: str,
-    anchor_weight: float,
     config: SportBetConfig,
 ) -> Tuple[float, float, float, float, List[str]]:
     flags: List[str] = []
@@ -570,7 +569,7 @@ def _ml_probabilities_for_side(
     if not np.isfinite(p_cal):
         p_cal = p_raw
 
-    p_final = _anchor_prob(p_cal, p_market, anchor_weight)
+    p_final = _anchor_prob(p_cal, p_market, config)
     p_final, capped = _apply_underdog_cap(p_final, p_market, config)
     if capped:
         flags.append("UNDERDOG_CAP")
@@ -583,14 +582,14 @@ def ml_probabilities_for_row(row: pd.Series, sport: str = "nba") -> Dict[str, fl
     market_home = safe_float(row.get("market_home_prob"))
     config = get_sport_bet_config(sport)
     anchor_weight = _dynamic_anchor_weight(sport, config.anchor_weight)
-    anchor_weight = _dynamic_anchor_weight(sport, config.anchor_weight)
+    if anchor_weight != config.anchor_weight:
+        config = replace(config, anchor_weight=anchor_weight)
 
     home_raw, home_cal, home_final, home_market, _ = _ml_probabilities_for_side(
         float(model_home) if model_home is not None else float("nan"),
         float(market_home) if market_home is not None else float("nan"),
         "HOME",
         sport=sport,
-        anchor_weight=anchor_weight,
         config=config,
     )
     away_raw, away_cal, away_final, away_market, _ = _ml_probabilities_for_side(
@@ -598,7 +597,6 @@ def ml_probabilities_for_row(row: pd.Series, sport: str = "nba") -> Dict[str, fl
         float(market_home) if market_home is not None else float("nan"),
         "AWAY",
         sport=sport,
-        anchor_weight=anchor_weight,
         config=config,
     )
 
@@ -705,7 +703,7 @@ def primary_metrics_for_row(
     flags: List[str] = []
 
     if primary_market == "ML":
-        p_model_final = _anchor_prob(p_model_cal, p_market_val, anchor_weight)
+        p_model_final = _anchor_prob(p_model_cal, p_market_val, config)
         p_model_final, capped = _apply_underdog_cap(p_model_final, p_market_val, config)
         if capped:
             flags.append("UNDERDOG_CAP")
@@ -990,6 +988,45 @@ def decide_bet_from_row(
         )
         return decision
 
+    min_conf = str(min_confidence or "").upper()
+    conf_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+    if str(sport).lower() == "nba" and min_conf in conf_rank:
+        decision_conf = str(_conf or "").upper()
+        if conf_rank.get(decision_conf, -1) < conf_rank[min_conf]:
+            override = np.isfinite(ev) and np.isfinite(abs_edge) and (
+                ev >= float(MIN_EV_OVERRIDE) and abs_edge >= float(MIN_EV_OVERRIDE_EDGE)
+            )
+            if not override:
+                decision = DecisionOutcome(
+                    "PASS",
+                    0.0,
+                    float(unit_dollars),
+                    0.0,
+                    f"PASS: confidence<{min_conf}",
+                    "LOW_CONFIDENCE_PASS",
+                    f"confidence<{min_conf}",
+                    0.0,
+                    0.0,
+                    p_model_raw,
+                    p_model_cal,
+                    p_model_final,
+                    p_market,
+                    edge_prob_raw,
+                    edge_prob_cal,
+                    edge_prob_final,
+                )
+                _print_decision(
+                    decision,
+                    p_model_raw_val=p_model_raw,
+                    p_model_cal_val=p_model_cal,
+                    p_model_final_val=p_model_final,
+                    p_market_val=p_market,
+                    edge_prob_raw_val=edge_prob_raw,
+                    edge_prob_final_val=edge_prob_final,
+                    min_edge_dyn=min_edge_dynamic,
+                )
+                return decision
+
     raw_units = default_bet_units_from_tier(value_tier)
     bet_size = float(raw_units * float(unit_dollars))
 
@@ -1021,7 +1058,7 @@ def decide_bet_from_row(
 
     disagreement = abs(float(p_model_cal - p_market)) if np.isfinite(p_model_cal) and np.isfinite(p_market) else 0.0
     if disagreement > float(config.disagree_pass_edge):
-        if edge_prob_final < float(config.disagree_pass_min_edge) or raw_units > float(config.disagree_pass_max_units):
+        if edge_prob_final < float(config.disagree_pass_min_edge):
             flags.append("DISAGREE_PASS")
             decision = DecisionOutcome(
                 "PASS",

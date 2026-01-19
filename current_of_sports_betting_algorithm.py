@@ -29,7 +29,7 @@ from sports.common.bet_rules import (
     ml_probabilities_for_row,
     primary_metrics_for_row,
 )
-from sports.common.prob_calibration import fit_calibrator
+from sports.common.prob_calibration import fit_calibrator, update_daily_ml_calibration
 from sports.common.history_builder import build_historical_dataset, season_string_for_date
 from sports.common.reporting import generate_backtest_report
 
@@ -202,6 +202,15 @@ def main(argv=None):
 
     # Run sport model
     if args.sport == "nba":
+        try:
+            update_daily_ml_calibration(
+                "nba",
+                days_back=int(os.getenv("NBA_PROB_CAL_DAYS", "45")),
+                min_samples=int(os.getenv("NBA_PROB_CAL_MIN_SAMPLES", "120")),
+            )
+        except Exception as e:
+            print(f"[calibration] WARNING: NBA ML calibration update failed: {e}")
+
         api_key = get_bdl_api_key()
         game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
         season_year = season_start_year_for_date(game_date_obj)
