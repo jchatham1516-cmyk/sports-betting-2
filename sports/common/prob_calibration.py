@@ -37,6 +37,10 @@ class PlattCalibrator:
 
 
 def _calibration_path(sport: str) -> str:
+    return os.path.join("results", f"prob_cal_{sport}.json")
+
+
+def _legacy_calibration_path(sport: str) -> str:
     return os.path.join("results", "calibration", f"platt_{sport}.json")
 
 
@@ -101,12 +105,20 @@ def apply_platt(p_raw: float, a: float, b: float) -> float:
     return float(1.0 / (1.0 + np.exp(-z)))
 
 
-def save_calibrator(sport: str, params: Dict[str, float], n_samples: int = 0) -> None:
-    os.makedirs(os.path.join("results", "calibration"), exist_ok=True)
+def save_calibrator(
+    sport: str,
+    params: Dict[str, float],
+    n_samples: int = 0,
+    window: Optional[int] = None,
+    method: str = "platt",
+) -> None:
+    os.makedirs("results", exist_ok=True)
     payload = {
         "a": float(params.get("a", 1.0)),
         "b": float(params.get("b", 0.0)),
         "n_samples": int(n_samples),
+        "window": int(window) if window is not None else None,
+        "method": str(method),
     }
     with open(_calibration_path(str(sport).lower()), "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
@@ -119,8 +131,11 @@ def load_calibrator(sport: str) -> Optional[Dict[str, float]]:
         return {"a": cal.a, "b": cal.b}
 
     path = _calibration_path(sport_key)
+    legacy_path = _legacy_calibration_path(sport_key)
     if not os.path.exists(path):
-        return None
+        if not os.path.exists(legacy_path):
+            return None
+        path = legacy_path
     try:
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
@@ -180,6 +195,34 @@ def fit_calibrator(sport: str, rows_df: pd.DataFrame) -> Optional[PlattCalibrato
     calibrator = PlattCalibrator(a=params["a"], b=params["b"], n_samples=int(p_raw.size))
     _CALIBRATOR_CACHE[sport_key] = calibrator
     save_calibrator(sport_key, params, n_samples=int(p_raw.size))
+    return calibrator
+
+
+def update_prob_calibration(
+    sport: str,
+    probs: np.ndarray,
+    outcomes: np.ndarray,
+    *,
+    window: int = 300,
+    min_samples: int = MIN_SAMPLES,
+) -> Optional[PlattCalibrator]:
+    p_raw = np.asarray(probs, dtype=float)
+    y = np.asarray(outcomes, dtype=float)
+    mask = np.isfinite(p_raw) & np.isfinite(y)
+    p_raw = p_raw[mask]
+    y = y[mask]
+
+    if window and window > 0 and p_raw.size > window:
+        p_raw = p_raw[-window:]
+        y = y[-window:]
+
+    if p_raw.size < int(min_samples):
+        return None
+
+    params = fit_platt(p_raw, y)
+    calibrator = PlattCalibrator(a=params["a"], b=params["b"], n_samples=int(p_raw.size))
+    _CALIBRATOR_CACHE[str(sport).lower()] = calibrator
+    save_calibrator(sport, params, n_samples=int(p_raw.size), window=int(window), method="platt")
     return calibrator
 
 
