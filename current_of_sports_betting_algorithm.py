@@ -5,6 +5,7 @@ import os
 import argparse
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 
 from recommendations import add_recommendations_to_df, Thresholds
@@ -322,6 +323,9 @@ def main(argv=None):
         results_df["confidence_reason"] = [m[10] for m in metrics]
         results_df["value_tier"] = [m[11] for m in metrics]
         results_df["primary_price"] = [m[12] for m in metrics]
+        results_df["primary_ev"] = [m[15] for m in metrics]
+        results_df["min_play_edge_abs_used"] = [m[16] for m in metrics]
+        results_df["min_primary_edge_abs_used"] = [m[17] for m in metrics]
 
         ml_probs = [ml_probabilities_for_row(r, sport=args.sport) for _, r in results_df.iterrows()]
         results_df["model_home_prob_raw"] = [p["model_home_prob_raw"] for p in ml_probs]
@@ -387,6 +391,22 @@ def main(argv=None):
                     print(format_decision_trace(r, d))
 
         results_df = _cap_to_top_plays(results_df, max_plays)
+
+        if args.sport == "nhl":
+            abs_edges = results_df["edge_prob_cal"].abs().astype(float)
+            abs_edges = abs_edges.replace([np.inf, -np.inf], np.nan).dropna()
+            plays = (results_df["play_pass"].astype(str) == "PLAY").sum()
+            passes = (results_df["play_pass"].astype(str) == "PASS").sum()
+            mean_edge = float(np.nanmean(abs_edges)) if not abs_edges.empty else 0.0
+            median_edge = float(np.nanmedian(abs_edges)) if not abs_edges.empty else 0.0
+            p90_edge = float(np.nanpercentile(abs_edges, 90)) if not abs_edges.empty else 0.0
+            max_edge = float(np.nanmax(abs_edges)) if not abs_edges.empty else 0.0
+            print(
+                "[nhl summary] "
+                f"games={len(results_df)} plays={plays} passes={passes} "
+                f"abs_edge_cal mean={mean_edge:.4f} median={median_edge:.4f} "
+                f"p90={p90_edge:.4f} max={max_edge:.4f}"
+            )
 
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
