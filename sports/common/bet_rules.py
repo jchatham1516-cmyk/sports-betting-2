@@ -34,6 +34,8 @@ CONF_MED = 0.05
 MIN_EV_TO_PLAY = 0.015
 MIN_PLAY_EDGE_ABS = MIN_EV_TO_PLAY
 MIN_PRIMARY_EDGE_ABS = 0.03
+MIN_PLAY_EDGE_ABS_NHL = 0.015
+MIN_PRIMARY_EDGE_ABS_NHL = 0.025
 MIN_SANITY_EDGE_ABS = 0.03
 MIN_EV_OVERRIDE = 0.02
 MIN_EV_OVERRIDE_EDGE = 0.02
@@ -42,6 +44,13 @@ EDGE_SHIFT_DOWNGRADE = float(os.getenv("EDGE_SHIFT_DOWNGRADE", "0.04"))
 EXTREME_ML_POS_ODDS = float(os.getenv("EXTREME_ML_POS_ODDS", "350"))
 EXTREME_ML_NEG_ODDS = float(os.getenv("EXTREME_ML_NEG_ODDS", "-450"))
 EXTREME_EDGE_REQUIREMENT = float(os.getenv("EXTREME_ML_EDGE_REQUIREMENT", "0.12"))
+
+
+def _edge_thresholds_for_sport(sport: str) -> Tuple[float, float]:
+    sport_key = str(sport).lower()
+    if sport_key == "nhl":
+        return MIN_PLAY_EDGE_ABS_NHL, MIN_PRIMARY_EDGE_ABS_NHL
+    return MIN_PLAY_EDGE_ABS, MIN_PRIMARY_EDGE_ABS
 
 
 def _to_float(x):
@@ -671,7 +680,11 @@ def primary_metrics_for_row(
     Optional[float],
     Optional[str],
     str,
+    float,
+    float,
+    float,
 ]:
+    min_play_edge_abs, min_primary_edge_abs = _edge_thresholds_for_sport(sport)
     primary_market, primary_side = _primary_market_and_side(row)
     p_model_raw, p_market, primary_price, opp_price, data_reason = _primary_probabilities(
         row, primary_market, primary_side
@@ -745,6 +758,12 @@ def primary_metrics_for_row(
         value_tier = _downgrade_value_tier(value_tier)
         flags.append("EDGE_SHIFT_DOWNGRADE")
 
+    primary_ev = (
+        ev_per_dollar(p_model_final, primary_price)
+        if primary_price is not None and np.isfinite(primary_price)
+        else float("nan")
+    )
+
     return (
         primary_market,
         primary_side,
@@ -761,6 +780,9 @@ def primary_metrics_for_row(
         primary_price,
         data_reason,
         ",".join(flags),
+        primary_ev,
+        float(min_play_edge_abs),
+        float(min_primary_edge_abs),
     )
 
 
@@ -841,15 +863,12 @@ def decide_bet_from_row(
         primary_price,
         data_reason,
         metric_flags,
+        primary_ev,
+        min_play_edge_abs_used,
+        min_primary_edge_abs_used,
     ) = primary_metrics_for_row(row, sport=sport, settings=settings)
 
     config = get_sport_bet_config(sport)
-    min_edge_cal = float(config.min_edge_cal)
-    if str(sport).lower() == "nhl":
-        goalie_status = str(row.get("goalie_status", "UNKNOWN")).upper().strip()
-        if goalie_status == "UNKNOWN":
-            min_edge_cal = max(min_edge_cal, float(os.getenv("NHL_MIN_EDGE_CAL_UNKNOWN", "0.05")))
-    min_edge_dynamic = _dynamic_min_edge(sport, min_edge_cal)
 
     if data_reason or not np.isfinite(p_model_cal) or not np.isfinite(p_market):
         flags.append("MISSING_DATA_PASS")
@@ -879,16 +898,13 @@ def decide_bet_from_row(
             p_market_val=p_market,
             edge_prob_raw_val=edge_prob_raw,
             edge_prob_final_val=edge_prob_final,
-            min_edge_dyn=min_edge_dynamic,
+            min_edge_dyn=min_primary_edge_abs_used,
         )
         return decision
 
-    ev = (
-        ev_per_dollar(p_model_final, primary_price)
-        if primary_price is not None and np.isfinite(primary_price)
-        else float("nan")
-    )
+    ev = primary_ev
     abs_edge = abs(edge_prob_final) if np.isfinite(edge_prob_final) else float("nan")
+    abs_edge_cal = abs(edge_prob_cal) if np.isfinite(edge_prob_cal) else float("nan")
 
     if primary_market == "ML" and primary_price is not None and np.isfinite(primary_price):
         if (float(primary_price) >= float(EXTREME_ML_POS_ODDS)) or (
@@ -922,19 +938,19 @@ def decide_bet_from_row(
                     p_market_val=p_market,
                     edge_prob_raw_val=edge_prob_raw,
                     edge_prob_final_val=edge_prob_final,
-                    min_edge_dyn=min_edge_dynamic,
+                    min_edge_dyn=min_primary_edge_abs_used,
                 )
                 return decision
 
-    if not np.isfinite(abs_edge) or abs_edge < float(min_edge_dynamic):
+    if not np.isfinite(abs_edge_cal) or abs_edge_cal < float(min_primary_edge_abs_used):
         decision = DecisionOutcome(
             "PASS",
             0.0,
             float(unit_dollars),
             0.0,
-            f"PASS: edge_final<{min_edge_dynamic:.3f}",
+            f"PASS: edge_cal<{min_primary_edge_abs_used:.3f}",
             "LOW_EDGE_PASS",
-            f"edge_final<{min_edge_dynamic:.3f}",
+            f"edge_cal<{min_primary_edge_abs_used:.3f}",
             0.0,
             0.0,
             p_model_raw,
@@ -953,19 +969,19 @@ def decide_bet_from_row(
             p_market_val=p_market,
             edge_prob_raw_val=edge_prob_raw,
             edge_prob_final_val=edge_prob_final,
-            min_edge_dyn=min_edge_dynamic,
+            min_edge_dyn=min_primary_edge_abs_used,
         )
         return decision
 
-    if np.isfinite(ev) and ev < float(MIN_EV_TO_PLAY):
+    if not np.isfinite(ev) or ev <= 0.0:
         decision = DecisionOutcome(
             "PASS",
             0.0,
             float(unit_dollars),
             0.0,
-            f"PASS: ev<{MIN_EV_TO_PLAY:.3f}",
+            "PASS: primary_ev<=0.000",
             "LOW_EV_PASS",
-            f"ev<{MIN_EV_TO_PLAY:.3f}",
+            "primary_ev<=0.000",
             0.0,
             0.0,
             p_model_raw,
@@ -984,7 +1000,7 @@ def decide_bet_from_row(
             p_market_val=p_market,
             edge_prob_raw_val=edge_prob_raw,
             edge_prob_final_val=edge_prob_final,
-            min_edge_dyn=min_edge_dynamic,
+            min_edge_dyn=min_primary_edge_abs_used,
         )
         return decision
 
@@ -1023,7 +1039,7 @@ def decide_bet_from_row(
                     p_market_val=p_market,
                     edge_prob_raw_val=edge_prob_raw,
                     edge_prob_final_val=edge_prob_final,
-                    min_edge_dyn=min_edge_dynamic,
+                    min_edge_dyn=min_primary_edge_abs_used,
                 )
                 return decision
 
@@ -1086,7 +1102,7 @@ def decide_bet_from_row(
                 p_market_val=p_market,
                 edge_prob_raw_val=edge_prob_raw,
                 edge_prob_final_val=edge_prob_final,
-                min_edge_dyn=min_edge_dynamic,
+                min_edge_dyn=min_primary_edge_abs_used,
             )
             return decision
 
@@ -1132,7 +1148,7 @@ def decide_bet_from_row(
         p_market_val=p_market,
         edge_prob_raw_val=edge_prob_raw,
         edge_prob_final_val=edge_prob_final,
-        min_edge_dyn=min_edge_dynamic,
+        min_edge_dyn=min_primary_edge_abs_used,
     )
     return decision
 
@@ -1260,6 +1276,9 @@ def add_betting_outputs(
     out["confidence_reason"] = [m[10] for m in metrics]
     out["value_tier"] = [m[11] for m in metrics]
     out["primary_price"] = [m[12] for m in metrics]
+    out["primary_ev"] = [m[15] for m in metrics]
+    out["min_play_edge_abs_used"] = [m[16] for m in metrics]
+    out["min_primary_edge_abs_used"] = [m[17] for m in metrics]
 
     decisions = [
         decide_bet_from_row(
