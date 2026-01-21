@@ -32,7 +32,8 @@ from sports.common.bet_rules import (
 )
 from sports.common.prob_calibration import fit_calibrator, update_daily_ml_calibration
 from sports.common.history_builder import build_historical_dataset, season_string_for_date
-from sports.common.reporting import generate_backtest_report
+from sports.common.reporting import generate_backtest_report, self_check_recent_bets
+from sports.common.prob_uncertainty import load_uncertainty
 
 from sports.nba.bdl_client import (
     get_bdl_api_key,
@@ -131,8 +132,8 @@ def main(argv=None):
     parser.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL)
     parser.add_argument("--sizing", type=str, default="flat", choices=["flat", "kelly"])
     parser.add_argument("--flat_pct", type=float, default=UNIT_PCT)
-    parser.add_argument("--kelly_mult", type=float, default=0.5)
-    parser.add_argument("--kelly_max_pct", type=float, default=0.03)
+    parser.add_argument("--kelly_mult", type=float, default=0.25)
+    parser.add_argument("--kelly_max_pct", type=float, default=0.015)
 
     parser.add_argument("--play_require_pick", action="store_true")
     parser.add_argument("--play_value_tier", type=str, default="MEDIUM VALUE")
@@ -149,6 +150,8 @@ def main(argv=None):
     parser.add_argument("--build-history", action="store_true", help="Build full-season historical dataset.")
     parser.add_argument("--fit-calibration", action="store_true", help="Fit Platt calibration from historical data.")
     parser.add_argument("--season", type=str, default=None, help="Season string like 2025-2026.")
+    parser.add_argument("--report", action="store_true", help="Print a quick self-check report from recent bets.")
+    parser.add_argument("--report_n", type=int, default=200, help="Number of recent bets to include in --report.")
 
     args = parser.parse_args(argv)
 
@@ -273,6 +276,27 @@ def main(argv=None):
 
     debug_df = pd.DataFrame()
     if not results_df.empty:
+        ml_probs = [ml_probabilities_for_row(r, sport=args.sport) for _, r in results_df.iterrows()]
+        results_df["model_home_prob_raw"] = [p["model_home_prob_raw"] for p in ml_probs]
+        results_df["model_home_prob_cal"] = [p["model_home_prob_cal"] for p in ml_probs]
+        results_df["model_home_prob_final_pre_goalie"] = [
+            p["model_home_prob_final_pre_goalie"] for p in ml_probs
+        ]
+        results_df["model_home_prob_final"] = [p["model_home_prob_final"] for p in ml_probs]
+        results_df["model_away_prob_raw"] = [p["model_away_prob_raw"] for p in ml_probs]
+        results_df["model_away_prob_cal"] = [p["model_away_prob_cal"] for p in ml_probs]
+        results_df["model_away_prob_final_pre_goalie"] = [
+            p["model_away_prob_final_pre_goalie"] for p in ml_probs
+        ]
+        results_df["model_away_prob_final"] = [p["model_away_prob_final"] for p in ml_probs]
+        results_df["market_home_prob"] = [p["market_home_prob"] for p in ml_probs]
+        results_df["market_away_prob"] = [p["market_away_prob"] for p in ml_probs]
+
+        uncertainty_data = load_uncertainty(args.sport)
+        if uncertainty_data:
+            print(f"[uncertainty] loaded {args.sport} -> {uncertainty_data}")
+        else:
+            print(f"[uncertainty] WARNING: no uncertainty file found for {args.sport}")
         conf_high = 0.18
         conf_med = 0.10
         if args.sport == "nhl":
@@ -327,22 +351,6 @@ def main(argv=None):
         results_df["min_play_edge_abs_used"] = [m[16] for m in metrics]
         results_df["min_primary_edge_abs_used"] = [m[17] for m in metrics]
 
-        ml_probs = [ml_probabilities_for_row(r, sport=args.sport) for _, r in results_df.iterrows()]
-        results_df["model_home_prob_raw"] = [p["model_home_prob_raw"] for p in ml_probs]
-        results_df["model_home_prob_cal"] = [p["model_home_prob_cal"] for p in ml_probs]
-        results_df["model_home_prob_final_pre_goalie"] = [
-            p["model_home_prob_final_pre_goalie"] for p in ml_probs
-        ]
-        results_df["model_home_prob_final"] = [p["model_home_prob_final"] for p in ml_probs]
-        results_df["model_away_prob_raw"] = [p["model_away_prob_raw"] for p in ml_probs]
-        results_df["model_away_prob_cal"] = [p["model_away_prob_cal"] for p in ml_probs]
-        results_df["model_away_prob_final_pre_goalie"] = [
-            p["model_away_prob_final_pre_goalie"] for p in ml_probs
-        ]
-        results_df["model_away_prob_final"] = [p["model_away_prob_final"] for p in ml_probs]
-        results_df["market_home_prob"] = [p["market_home_prob"] for p in ml_probs]
-        results_df["market_away_prob"] = [p["market_away_prob"] for p in ml_probs]
-
         decisions = [
             decide_bet_from_row(
                 r,
@@ -392,21 +400,21 @@ def main(argv=None):
 
         results_df = _cap_to_top_plays(results_df, max_plays)
 
-        if args.sport == "nhl":
-            abs_edges = results_df["edge_prob_cal"].abs().astype(float)
-            abs_edges = abs_edges.replace([np.inf, -np.inf], np.nan).dropna()
-            plays = (results_df["play_pass"].astype(str) == "PLAY").sum()
-            passes = (results_df["play_pass"].astype(str) == "PASS").sum()
-            mean_edge = float(np.nanmean(abs_edges)) if not abs_edges.empty else 0.0
-            median_edge = float(np.nanmedian(abs_edges)) if not abs_edges.empty else 0.0
-            p90_edge = float(np.nanpercentile(abs_edges, 90)) if not abs_edges.empty else 0.0
-            max_edge = float(np.nanmax(abs_edges)) if not abs_edges.empty else 0.0
-            print(
-                "[nhl summary] "
-                f"games={len(results_df)} plays={plays} passes={passes} "
-                f"abs_edge_cal mean={mean_edge:.4f} median={median_edge:.4f} "
-                f"p90={p90_edge:.4f} max={max_edge:.4f}"
-            )
+    if args.sport == "nhl":
+        abs_edges = results_df["edge_prob_cal"].abs().astype(float)
+        abs_edges = abs_edges.replace([np.inf, -np.inf], np.nan).dropna()
+        plays = (results_df["play_pass"].astype(str) == "PLAY").sum()
+        passes = (results_df["play_pass"].astype(str) == "PASS").sum()
+        mean_edge = float(np.nanmean(abs_edges)) if not abs_edges.empty else 0.0
+        median_edge = float(np.nanmedian(abs_edges)) if not abs_edges.empty else 0.0
+        p90_edge = float(np.nanpercentile(abs_edges, 90)) if not abs_edges.empty else 0.0
+        max_edge = float(np.nanmax(abs_edges)) if not abs_edges.empty else 0.0
+        print(
+            "[nhl summary] "
+            f"games={len(results_df)} plays={plays} passes={passes} "
+            f"abs_edge_cal mean={mean_edge:.4f} median={median_edge:.4f} "
+            f"p90={p90_edge:.4f} max={max_edge:.4f}"
+        )
 
     os.makedirs("results", exist_ok=True)
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
@@ -512,6 +520,9 @@ def main(argv=None):
             graded_path = summary.get("graded_path")
             if graded_path:
                 print(f"[tracking] Wrote graded results to {graded_path}")
+
+    if args.report:
+        self_check_recent_bets(bet_log_path=bet_log_path, last_n=int(args.report_n))
 
     try:
         hist_path = f"data/historical/{args.sport}_{season}.csv"

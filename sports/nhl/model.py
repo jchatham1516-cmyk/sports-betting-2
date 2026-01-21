@@ -1031,6 +1031,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "edge_home": float(edge_home) if not np.isnan(edge_home) else np.nan,
                 "edge_away": float(-edge_home) if not np.isnan(edge_home) else np.nan,
+                "margin_calibrated": False,
                 "ml_recommendation": ml_pick,
                 "home_ml": home_ml,
                 "away_ml": away_ml,

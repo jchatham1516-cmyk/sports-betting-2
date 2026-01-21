@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from sports.common.bet_rules import _to_float, breakeven_prob_from_american, ev_per_dollar
+from sports.common.bet_config import get_sport_bet_config
 
 
 @dataclass
@@ -214,6 +215,7 @@ def add_recommendations_to_df(
     """
     out = df.copy()
     sport = str(sport or "nba").lower().strip()
+    config = get_sport_bet_config(sport)
 
     # Ensure market_home_prob exists if MLs exist
     if "market_home_prob" not in out.columns:
@@ -235,20 +237,44 @@ def add_recommendations_to_df(
     if "edge_away" not in out.columns:
         out["edge_away"] = np.nan
 
-    if "model_home_prob" in out.columns and "market_home_prob" in out.columns:
+    if "model_home_prob_final" in out.columns and "market_home_prob" in out.columns:
         for i in out.index:
-            mp = out.loc[i, "model_home_prob"]
+            mp = out.loc[i, "model_home_prob_final"]
             mk = out.loc[i, "market_home_prob"]
             if pd.isna(mp) or pd.isna(mk):
                 continue
             out.loc[i, "edge_home"] = float(mp - mk)
             out.loc[i, "edge_away"] = float(-(mp - mk))
 
-    # ML recommendation
-    out["ml_recommendation"] = out.get("ml_recommendation", "")
+    # Standardize probability columns
+    for col in ("model_home_prob_raw", "model_home_prob_cal", "model_home_prob_final"):
+        if col not in out.columns:
+            out[col] = np.nan
+    fallback_mask = out["model_home_prob_cal"].isna() | out["model_home_prob_final"].isna()
     if "model_home_prob" in out.columns:
         for i in out.index:
-            mp = float(out.loc[i, "model_home_prob"]) if not pd.isna(out.loc[i, "model_home_prob"]) else float("nan")
+            base = out.loc[i, "model_home_prob"]
+            if pd.isna(out.loc[i, "model_home_prob_raw"]) and not pd.isna(base):
+                out.loc[i, "model_home_prob_raw"] = float(base)
+            if pd.isna(out.loc[i, "model_home_prob_cal"]) and not pd.isna(out.loc[i, "model_home_prob_raw"]):
+                out.loc[i, "model_home_prob_cal"] = float(out.loc[i, "model_home_prob_raw"])
+            if pd.isna(out.loc[i, "model_home_prob_final"]) and not pd.isna(out.loc[i, "model_home_prob_cal"]):
+                out.loc[i, "model_home_prob_final"] = float(out.loc[i, "model_home_prob_cal"])
+
+    if "decision_flags" not in out.columns:
+        out["decision_flags"] = ""
+    if "decision_reason" not in out.columns:
+        out["decision_reason"] = ""
+
+    # ML recommendation
+    out["ml_recommendation"] = out.get("ml_recommendation", "")
+    if "model_home_prob_final" in out.columns:
+        for i in out.index:
+            mp = (
+                float(out.loc[i, "model_home_prob_final"])
+                if not pd.isna(out.loc[i, "model_home_prob_final"])
+                else float("nan")
+            )
             mk = float(out.loc[i, "market_home_prob"]) if not pd.isna(out.loc[i, "market_home_prob"]) else float("nan")
             out.loc[i, "ml_recommendation"] = _ml_pick(mp, mk, thresholds)
 
@@ -351,13 +377,29 @@ def add_recommendations_to_df(
 
     for i in out.index:
         row = out.loc[i]
+        flags: List[str] = [f for f in str(row.get("decision_flags", "")).split(",") if f]
 
         # ML EV (NFL/NBA/NHL): use model_home_prob + odds
-        p_home = _to_float(row.get("model_home_prob", np.nan))
+        p_home = _to_float(
+            row.get(
+                "model_home_prob_final",
+                row.get("model_home_prob_cal", row.get("model_home_prob_raw", row.get("model_home_prob", np.nan))),
+            )
+        )
         p_away = 1.0 - p_home if np.isfinite(p_home) else np.nan
         ml_ev_home = ev_per_dollar(p_home, row.get("home_ml"))
         ml_ev_away = ev_per_dollar(p_away, row.get("away_ml"))
         ml_ev, ml_side = _best_ev(ml_ev_home, ml_ev_away, "HOME", "AWAY")
+
+        if bool(fallback_mask.loc[i]) or not np.isfinite(_to_float(row.get("model_home_prob_final", np.nan))):
+            if "UNCALIBRATED_FALLBACK" not in flags:
+                flags.append("UNCALIBRATED_FALLBACK")
+            if "UNCALIBRATED_FALLBACK" not in str(out.loc[i, "decision_reason"]):
+                out.loc[i, "decision_reason"] = (
+                    f"{out.loc[i, 'decision_reason']} | UNCALIBRATED_FALLBACK"
+                    if str(out.loc[i, "decision_reason"]).strip()
+                    else "UNCALIBRATED_FALLBACK"
+                )
 
         # ATS EV: use ats_home_cover_prob + spread price
         p_home_cover = _to_float(row.get("ats_home_cover_prob", row.get("p_home_cover", np.nan)))
@@ -366,6 +408,28 @@ def add_recommendations_to_df(
         ats_ev_home = ev_per_dollar(p_home_cover, ats_price)
         ats_ev_away = ev_per_dollar(p_away_cover, ats_price)
         ats_ev, ats_side = _best_ev(ats_ev_home, ats_ev_away, "HOME", "AWAY")
+
+        margin_calibrated = row.get("margin_calibrated")
+        margin_calibrated = bool(margin_calibrated) if not pd.isna(margin_calibrated) else False
+        ats_edge_prob = np.nan
+        be_prob = breakeven_prob_from_american(ats_price)
+        if np.isfinite(p_home_cover) and np.isfinite(be_prob):
+            ats_edge_prob = float(p_home_cover - be_prob)
+        if not margin_calibrated:
+            required_edge = float(config.min_edge_cal) + float(config.uncalibrated_edge_add)
+            if not np.isfinite(ats_edge_prob) or abs(float(ats_edge_prob)) < required_edge:
+                ats_ev = np.nan
+                ats_side = ""
+                if "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
+                    flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
+                out.loc[i, "decision_reason"] = (
+                    f"{out.loc[i, 'decision_reason']} | ATS_GATED_UNCALIBRATED_MARGIN"
+                    if str(out.loc[i, "decision_reason"]).strip()
+                    else "ATS_GATED_UNCALIBRATED_MARGIN"
+                )
+            else:
+                if "ATS_UNCALIBRATED_MARGIN" not in flags:
+                    flags.append("ATS_UNCALIBRATED_MARGIN")
 
         # TOTAL EV: compute probability of OVER/UNDER with fallbacks
         p_over = np.nan
@@ -388,12 +452,35 @@ def add_recommendations_to_df(
         under_ev = ev_per_dollar(p_under, row.get("total_under_price"))
         total_ev, total_side = _best_ev(over_ev, under_ev, "OVER", "UNDER")
 
+        total_sd_ok = np.isfinite(total_sd) and float(total_sd) >= float(config.total_sd_min)
+        model_total_ok = np.isfinite(_to_float(row.get("model_total_final", row.get("model_total"))))
+        if not total_sd_ok or not model_total_ok:
+            total_ev = np.nan
+            total_side = ""
+            total_flag = "TOTAL_GATED_LOW_QUALITY"
+            if "total_decision_flags" in out.columns:
+                existing_total_flags = str(out.loc[i, "total_decision_flags"] or "")
+                if total_flag not in existing_total_flags:
+                    out.loc[i, "total_decision_flags"] = (
+                        f"{existing_total_flags},{total_flag}".strip(",")
+                        if existing_total_flags.strip()
+                        else total_flag
+                    )
+            if total_flag not in flags:
+                flags.append(total_flag)
+            out.loc[i, "decision_reason"] = (
+                f"{out.loc[i, 'decision_reason']} | {total_flag}"
+                if str(out.loc[i, "decision_reason"]).strip()
+                else total_flag
+            )
+
         out.loc[i, "ml_ev_best"] = ml_ev
         out.loc[i, "ml_ev_side"] = ml_side
         out.loc[i, "ats_ev_best"] = ats_ev
         out.loc[i, "ats_ev_side"] = ats_side
         out.loc[i, "total_ev_best"] = total_ev
         out.loc[i, "total_ev_side"] = total_side
+        out.loc[i, "decision_flags"] = ",".join(flags)
 
         # Save best score (used for filtering)
         ev_options = [v for v in [ml_ev, ats_ev, total_ev] if np.isfinite(v)]

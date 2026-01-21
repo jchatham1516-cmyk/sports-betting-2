@@ -1082,6 +1082,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "away": away,
                 "model_home_prob": float(p_home),
                 "model_home_prob_raw": float(p_home),
+                "margin_calibrated": bool(margin_cal is not None),
                 "market_home_imp": float(p_home_imp) if not np.isnan(p_home_imp) else np.nan,
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "market_home_delta": float(market_home_delta) if not np.isnan(market_home_delta) else np.nan,
