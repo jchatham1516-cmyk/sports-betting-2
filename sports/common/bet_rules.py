@@ -86,6 +86,8 @@ def _uncertainty_value(sport: str) -> float:
 
 
 _UNCERTAINTY_LOGGED: Dict[str, bool] = {}
+_NHL_SAMPLE_CACHE: Optional[int] = None
+_NHL_SAMPLE_CACHE_CHECKED = False
 
 
 def _uncertainty_for_threshold(sport: str, config: SportBetConfig) -> float:
@@ -95,18 +97,104 @@ def _uncertainty_for_threshold(sport: str, config: SportBetConfig) -> float:
     return float(uncertainty)
 
 
-def _log_uncertainty_once(sport: str, uncertainty: float, base_min_edge: float, config: SportBetConfig) -> None:
+def _log_uncertainty_once(
+    sport: str,
+    uncertainty: float,
+    base_min_edge: float,
+    config: SportBetConfig,
+    *,
+    effective_uncertainty: Optional[float] = None,
+    sample_size: Optional[int] = None,
+) -> None:
     key = str(sport).lower()
     if _UNCERTAINTY_LOGGED.get(key):
         return
     _UNCERTAINTY_LOGGED[key] = True
+    extra = ""
+    if effective_uncertainty is not None and np.isfinite(effective_uncertainty):
+        extra = f" effective={effective_uncertainty:.3f}"
+    if sample_size is not None:
+        extra = f"{extra} n={sample_size}"
     print(
         f"[uncertainty] sport={key} value={uncertainty:.3f} "
-        f"edge_mult={config.uncertainty_edge_mult:.2f} base_min_edge={base_min_edge:.3f}"
+        f"edge_mult={config.uncertainty_edge_mult:.2f} base_min_edge={base_min_edge:.3f}{extra}"
     )
 
 
+def _uncertainty_samples_from_data(data: Optional[Dict[str, float]]) -> Optional[int]:
+    if not data:
+        return None
+    for key in ("n_samples", "sample_size", "samples", "n"):
+        val = safe_float(data.get(key))
+        if val is not None and np.isfinite(val) and val > 0:
+            return int(val)
+    return None
+
+
+def _read_nhl_samples_from_bet_log() -> Optional[int]:
+    for path in ("results/tracking/bet_log.csv", "results/bet_log.csv"):
+        if not os.path.exists(path):
+            continue
+        try:
+            bet_log = pd.read_csv(path)
+        except Exception:
+            continue
+        if bet_log is None or bet_log.empty:
+            continue
+        if "sport" not in bet_log.columns or "market" not in bet_log.columns:
+            continue
+        sports = bet_log["sport"].astype(str).str.lower()
+        markets = bet_log["market"].astype(str).str.upper()
+        mask = (sports == "nhl") & (markets == "ML")
+        return int(mask.sum())
+    return None
+
+
+def _nhl_sample_size() -> Optional[int]:
+    global _NHL_SAMPLE_CACHE
+    global _NHL_SAMPLE_CACHE_CHECKED
+    if _NHL_SAMPLE_CACHE_CHECKED:
+        return _NHL_SAMPLE_CACHE
+    _NHL_SAMPLE_CACHE_CHECKED = True
+    data = _load_uncertainty_data("nhl") or {}
+    sample_size = _uncertainty_samples_from_data(data)
+    if sample_size is None:
+        sample_size = _read_nhl_samples_from_bet_log()
+    _NHL_SAMPLE_CACHE = sample_size
+    return sample_size
+
+
+def _nhl_uncertainty_context(config: SportBetConfig, *, use_floor: bool) -> Tuple[float, Optional[int], float]:
+    if use_floor:
+        raw_uncertainty = _uncertainty_for_threshold("nhl", config)
+    else:
+        raw_uncertainty = _uncertainty_value("nhl")
+        if not np.isfinite(raw_uncertainty) or raw_uncertainty <= 0.0:
+            raw_uncertainty = 0.0
+    sample_size = _nhl_sample_size()
+    effective_uncertainty = float(raw_uncertainty)
+    if sample_size is not None and sample_size < 50:
+        effective_uncertainty = float(raw_uncertainty) * (float(sample_size) / 50.0)
+    return float(effective_uncertainty), sample_size, float(raw_uncertainty)
+
+
 def _dynamic_min_edge(sport: str, base_min_edge: float, config: SportBetConfig) -> float:
+    if str(sport).lower() == "nhl":
+        effective_uncertainty, sample_size, raw_uncertainty = _nhl_uncertainty_context(
+            config, use_floor=True
+        )
+        _log_uncertainty_once(
+            sport,
+            raw_uncertainty,
+            base_min_edge,
+            config,
+            effective_uncertainty=effective_uncertainty,
+            sample_size=sample_size,
+        )
+        mult = float(config.uncertainty_edge_mult)
+        add_on = float(mult) * float(effective_uncertainty)
+        add_on = min(add_on, 0.025)
+        return float(max(0.0, float(base_min_edge) + add_on))
     uncertainty = _uncertainty_for_threshold(sport, config)
     _log_uncertainty_once(sport, uncertainty, base_min_edge, config)
     mult = float(config.uncertainty_edge_mult)
@@ -114,6 +202,12 @@ def _dynamic_min_edge(sport: str, base_min_edge: float, config: SportBetConfig) 
 
 
 def _dynamic_anchor_weight(sport: str, base_weight: float, config: SportBetConfig) -> float:
+    if str(sport).lower() == "nhl":
+        effective_uncertainty, _sample_size, _raw_uncertainty = _nhl_uncertainty_context(
+            config, use_floor=False
+        )
+        mult = float(config.uncertainty_anchor_mult)
+        return float(max(0.0, min(1.0, float(base_weight) + float(mult) * float(effective_uncertainty))))
     uncertainty = _uncertainty_value(sport)
     mult = float(config.uncertainty_anchor_mult)
     return float(max(0.0, min(1.0, float(base_weight) + float(mult) * float(uncertainty))))
@@ -857,6 +951,13 @@ def decide_bet_from_row(
     if existing_reason:
         reason_parts.append(existing_reason)
 
+    nhl_uncertainty_used = None
+    nhl_uncertainty_samples = None
+    if str(sport).lower() == "nhl":
+        nhl_uncertainty_used, nhl_uncertainty_samples, _raw_uncertainty = _nhl_uncertainty_context(
+            config, use_floor=True
+        )
+
     def _fmt(x: float) -> str:
         return "nan" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{float(x):.3f}"
 
@@ -995,14 +1096,18 @@ def decide_bet_from_row(
                 return decision
 
     if not np.isfinite(abs_edge) or abs_edge < float(min_primary_edge_abs_used):
+        uncertainty_note = ""
+        if str(sport).lower() == "nhl" and nhl_uncertainty_used is not None:
+            sample_str = "NA" if nhl_uncertainty_samples is None else str(nhl_uncertainty_samples)
+            uncertainty_note = f" (unc={nhl_uncertainty_used:.3f}, n={sample_str})"
         decision = DecisionOutcome(
             "PASS",
             0.0,
             float(unit_dollars),
             0.0,
-            f"NO BET: edge_final<{min_primary_edge_abs_used:.3f}",
+            f"NO BET: edge_final<{min_primary_edge_abs_used:.3f}{uncertainty_note}",
             "LOW_EDGE_PASS",
-            f"NO BET: edge_final<{min_primary_edge_abs_used:.3f}",
+            f"NO BET: edge_final<{min_primary_edge_abs_used:.3f}{uncertainty_note}",
             0.0,
             0.0,
             p_model_raw,
@@ -1339,6 +1444,17 @@ def add_betting_outputs(
     out["primary_ev"] = [m[15] for m in metrics]
     out["min_play_edge_abs_used"] = [m[16] for m in metrics]
     out["min_primary_edge_abs_used"] = [m[17] for m in metrics]
+    if str(sport).lower() == "nhl":
+        nhl_uncertainty_used, nhl_uncertainty_samples, _raw_uncertainty = _nhl_uncertainty_context(
+            get_sport_bet_config("nhl"), use_floor=True
+        )
+        out["nhl_uncertainty_used"] = float(nhl_uncertainty_used)
+        out["nhl_uncertainty_samples"] = (
+            int(nhl_uncertainty_samples) if nhl_uncertainty_samples is not None else np.nan
+        )
+    else:
+        out["nhl_uncertainty_used"] = np.nan
+        out["nhl_uncertainty_samples"] = np.nan
 
     decisions = [
         decide_bet_from_row(
