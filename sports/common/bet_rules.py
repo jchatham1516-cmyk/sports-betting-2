@@ -47,10 +47,10 @@ EXTREME_EDGE_REQUIREMENT = float(os.getenv("EXTREME_ML_EDGE_REQUIREMENT", "0.12"
 
 
 def _edge_thresholds_for_sport(sport: str) -> Tuple[float, float]:
-    sport_key = str(sport).lower()
-    if sport_key == "nhl":
-        return MIN_PLAY_EDGE_ABS_NHL, MIN_PRIMARY_EDGE_ABS_NHL
-    return MIN_PLAY_EDGE_ABS, MIN_PRIMARY_EDGE_ABS
+    config = get_sport_bet_config(sport)
+    base = float(config.min_edge_cal)
+    dynamic = _dynamic_min_edge(sport, base, config)
+    return float(dynamic), float(dynamic)
 
 
 def _to_float(x):
@@ -85,25 +85,37 @@ def _uncertainty_value(sport: str) -> float:
     return 0.0
 
 
-def _uncertainty_edge_multiplier(sport: str, default: float) -> float:
-    key = f"{str(sport).upper()}_UNCERTAINTY_EDGE_MULT"
-    return float(os.getenv(key, str(default)))
+_UNCERTAINTY_LOGGED: Dict[str, bool] = {}
 
 
-def _uncertainty_anchor_multiplier(sport: str, default: float) -> float:
-    key = f"{str(sport).upper()}_UNCERTAINTY_ANCHOR_MULT"
-    return float(os.getenv(key, str(default)))
-
-
-def _dynamic_min_edge(sport: str, base_min_edge: float) -> float:
+def _uncertainty_for_threshold(sport: str, config: SportBetConfig) -> float:
     uncertainty = _uncertainty_value(sport)
-    mult = _uncertainty_edge_multiplier(sport, 1.25)
+    if not np.isfinite(uncertainty) or float(uncertainty) <= 0.0:
+        uncertainty = float(config.uncertainty_floor)
+    return float(uncertainty)
+
+
+def _log_uncertainty_once(sport: str, uncertainty: float, base_min_edge: float, config: SportBetConfig) -> None:
+    key = str(sport).lower()
+    if _UNCERTAINTY_LOGGED.get(key):
+        return
+    _UNCERTAINTY_LOGGED[key] = True
+    print(
+        f"[uncertainty] sport={key} value={uncertainty:.3f} "
+        f"edge_mult={config.uncertainty_edge_mult:.2f} base_min_edge={base_min_edge:.3f}"
+    )
+
+
+def _dynamic_min_edge(sport: str, base_min_edge: float, config: SportBetConfig) -> float:
+    uncertainty = _uncertainty_for_threshold(sport, config)
+    _log_uncertainty_once(sport, uncertainty, base_min_edge, config)
+    mult = float(config.uncertainty_edge_mult)
     return float(max(0.0, float(base_min_edge) + float(mult) * float(uncertainty)))
 
 
-def _dynamic_anchor_weight(sport: str, base_weight: float) -> float:
+def _dynamic_anchor_weight(sport: str, base_weight: float, config: SportBetConfig) -> float:
     uncertainty = _uncertainty_value(sport)
-    mult = _uncertainty_anchor_multiplier(sport, 0.60)
+    mult = float(config.uncertainty_anchor_mult)
     return float(max(0.0, min(1.0, float(base_weight) + float(mult) * float(uncertainty))))
 
 
@@ -180,8 +192,8 @@ class BetDecision:
 class DecisionSettings:
     flat_pct: float = 0.04
     sizing_mode: str = "flat"  # "flat" or "kelly"
-    kelly_mult: float = 0.5
-    kelly_max_pct: float = 0.03
+    kelly_mult: float = 0.25
+    kelly_max_pct: float = 0.015
 
 
 @dataclass
@@ -590,7 +602,7 @@ def ml_probabilities_for_row(row: pd.Series, sport: str = "nba") -> Dict[str, fl
     model_home = safe_float(row.get("model_home_prob_raw", row.get("model_home_prob")))
     market_home = safe_float(row.get("market_home_prob"))
     config = get_sport_bet_config(sport)
-    anchor_weight = _dynamic_anchor_weight(sport, config.anchor_weight)
+    anchor_weight = _dynamic_anchor_weight(sport, config.anchor_weight, config)
     if anchor_weight != config.anchor_weight:
         config = replace(config, anchor_weight=anchor_weight)
 
@@ -684,16 +696,13 @@ def primary_metrics_for_row(
     float,
     float,
 ]:
-    min_play_edge_abs, min_primary_edge_abs = _edge_thresholds_for_sport(sport)
     primary_market, primary_side = _primary_market_and_side(row)
     p_model_raw, p_market, primary_price, opp_price, data_reason = _primary_probabilities(
         row, primary_market, primary_side
     )
 
     config = get_sport_bet_config(sport)
-    p_model_raw_val = (
-        float(p_model_raw) if p_model_raw is not None and np.isfinite(p_model_raw) else float("nan")
-    )
+    p_model_raw_val = float(p_model_raw) if p_model_raw is not None and np.isfinite(p_model_raw) else float("nan")
     p_market_val = float(p_market) if p_market is not None and np.isfinite(p_market) else float("nan")
 
     p_model_cal = calibrate_prob(sport, p_model_raw_val, market_type=primary_market)
@@ -716,24 +725,52 @@ def primary_metrics_for_row(
     flags: List[str] = []
 
     if primary_market == "ML":
-        p_model_final = _anchor_prob(p_model_cal, p_market_val, config)
-        p_model_final, capped = _apply_underdog_cap(p_model_final, p_market_val, config)
-        if capped:
-            flags.append("UNDERDOG_CAP")
+        model_raw_home = safe_float(row.get("model_home_prob_raw", row.get("model_home_prob")))
+        model_cal_home = safe_float(row.get("model_home_prob_cal"))
+        model_final_home = safe_float(row.get("model_home_prob_final"))
+        side = (primary_side or "").upper()
+
+        def _side_prob(val: Optional[float]) -> float:
+            if val is None or not np.isfinite(val):
+                return float("nan")
+            return float(1.0 - val) if side == "AWAY" else float(val)
+
+        p_model_raw_val = _side_prob(model_raw_home)
+        p_model_cal = _side_prob(model_cal_home)
+        p_model_final = _side_prob(model_final_home)
+
+        uncalibrated = not np.isfinite(p_model_cal) or not np.isfinite(p_model_final)
+
+        if not np.isfinite(p_model_cal):
+            p_model_cal = calibrate_prob(sport, p_model_raw_val, market_type=primary_market)
+        if not np.isfinite(p_model_cal):
+            p_model_cal = p_model_raw_val
+
+        if not np.isfinite(p_model_final):
+            p_model_final = _anchor_prob(p_model_cal, p_market_val, config)
+
+        if np.isfinite(p_model_final):
+            p_model_final, capped = _apply_underdog_cap(p_model_final, p_market_val, config)
+            if capped:
+                flags.append("UNDERDOG_CAP")
         if sport.lower() == "nhl":
             goalie_shift = safe_float(row.get("goalie_prob_shift"))
-            p_model_final = _apply_goalie_shift(
-                p_model_final,
-                goalie_shift,
-                goalie_status=row.get("goalie_status"),
-                home_status=row.get("goalie_home_status"),
-                away_status=row.get("goalie_away_status"),
-            )
+            if np.isfinite(p_model_final):
+                p_model_final = _apply_goalie_shift(
+                    p_model_final,
+                    goalie_shift,
+                    goalie_status=row.get("goalie_status"),
+                    home_status=row.get("goalie_home_status"),
+                    away_status=row.get("goalie_away_status"),
+                )
+
         edge_prob_final = (
             float(p_model_final) - float(p_market_val)
             if np.isfinite(p_model_final) and np.isfinite(p_market_val)
             else float("nan")
         )
+        if uncalibrated:
+            flags.append("UNCALIBRATED_FALLBACK")
 
     base_conf = confidence_tier_from_edge(edge_prob_final, config.min_edge_cal)
     injury_low = _injury_confidence_low(row)
@@ -764,6 +801,16 @@ def primary_metrics_for_row(
         else float("nan")
     )
 
+    extra_edge = 0.0
+    decision_flags = [f for f in flags]
+    existing_flags = str(row.get("decision_flags") or "")
+    if "UNCALIBRATED_FALLBACK" in existing_flags and "UNCALIBRATED_FALLBACK" not in decision_flags:
+        decision_flags.append("UNCALIBRATED_FALLBACK")
+    if "UNCALIBRATED_FALLBACK" in decision_flags:
+        extra_edge = float(config.uncalibrated_edge_add)
+
+    min_edge_dynamic = _dynamic_min_edge(sport, config.min_edge_cal, config) + extra_edge
+
     return (
         primary_market,
         primary_side,
@@ -779,10 +826,10 @@ def primary_metrics_for_row(
         value_tier,
         primary_price,
         data_reason,
-        ",".join(flags),
+        ",".join(decision_flags),
         primary_ev,
-        float(min_play_edge_abs),
-        float(min_primary_edge_abs),
+        float(min_edge_dynamic),
+        float(min_edge_dynamic),
     )
 
 
@@ -801,6 +848,14 @@ def decide_bet_from_row(
     flags: List[str] = []
     reason_parts: List[str] = []
     uncertainty = _uncertainty_value(sport)
+    config = get_sport_bet_config(sport)
+    existing_flags = [f for f in str(row.get("decision_flags") or "").split(",") if f]
+    for flag in existing_flags:
+        if flag not in flags:
+            flags.append(flag)
+    existing_reason = str(row.get("decision_reason") or "").strip()
+    if existing_reason:
+        reason_parts.append(existing_reason)
 
     def _fmt(x: float) -> str:
         return "nan" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{float(x):.3f}"
@@ -868,8 +923,6 @@ def decide_bet_from_row(
         min_primary_edge_abs_used,
     ) = primary_metrics_for_row(row, sport=sport, settings=settings)
 
-    config = get_sport_bet_config(sport)
-
     if data_reason or not np.isfinite(p_model_cal) or not np.isfinite(p_market):
         flags.append("MISSING_DATA_PASS")
         decision = DecisionOutcome(
@@ -877,9 +930,9 @@ def decide_bet_from_row(
             0.0,
             float(unit_dollars),
             0.0,
-            data_reason or "missing probabilities",
+            f"NO BET: {data_reason or 'missing probabilities'}",
             ",".join(flags),
-            data_reason or "missing probabilities",
+            f"NO BET: {data_reason or 'missing probabilities'}",
             0.0,
             0.0,
             p_model_raw,
@@ -904,7 +957,6 @@ def decide_bet_from_row(
 
     ev = primary_ev
     abs_edge = abs(edge_prob_final) if np.isfinite(edge_prob_final) else float("nan")
-    abs_edge_cal = abs(edge_prob_cal) if np.isfinite(edge_prob_cal) else float("nan")
 
     if primary_market == "ML" and primary_price is not None and np.isfinite(primary_price):
         if (float(primary_price) >= float(EXTREME_ML_POS_ODDS)) or (
@@ -942,15 +994,15 @@ def decide_bet_from_row(
                 )
                 return decision
 
-    if not np.isfinite(abs_edge_cal) or abs_edge_cal < float(min_primary_edge_abs_used):
+    if not np.isfinite(abs_edge) or abs_edge < float(min_primary_edge_abs_used):
         decision = DecisionOutcome(
             "PASS",
             0.0,
             float(unit_dollars),
             0.0,
-            f"PASS: edge_cal<{min_primary_edge_abs_used:.3f}",
+            f"NO BET: edge_final<{min_primary_edge_abs_used:.3f}",
             "LOW_EDGE_PASS",
-            f"edge_cal<{min_primary_edge_abs_used:.3f}",
+            f"NO BET: edge_final<{min_primary_edge_abs_used:.3f}",
             0.0,
             0.0,
             p_model_raw,
@@ -979,9 +1031,9 @@ def decide_bet_from_row(
             0.0,
             float(unit_dollars),
             0.0,
-            "PASS: primary_ev<=0.000",
+            "NO BET: primary_ev<=0.000",
             "LOW_EV_PASS",
-            "primary_ev<=0.000",
+            "NO BET: primary_ev<=0.000",
             0.0,
             0.0,
             p_model_raw,
@@ -1018,9 +1070,9 @@ def decide_bet_from_row(
                     0.0,
                     float(unit_dollars),
                     0.0,
-                    f"PASS: confidence<{min_conf}",
+                    f"NO BET: confidence<{min_conf}",
                     "LOW_CONFIDENCE_PASS",
-                    f"confidence<{min_conf}",
+                    f"NO BET: confidence<{min_conf}",
                     0.0,
                     0.0,
                     p_model_raw,
@@ -1043,7 +1095,8 @@ def decide_bet_from_row(
                 )
                 return decision
 
-    raw_units = default_bet_units_from_tier(value_tier)
+    base_units = default_bet_units_from_tier(value_tier)
+    raw_units = base_units
     bet_size = float(raw_units * float(unit_dollars))
 
     if settings.sizing_mode == "kelly" and primary_market == "ML":
@@ -1059,7 +1112,14 @@ def decide_bet_from_row(
             )
 
     raw_units = bet_size / float(unit_dollars) if unit_dollars > 0 else 0.0
+    raw_units = min(raw_units, base_units)
     final_units = min(raw_units, float(config.max_units))
+
+    uncertainty_for_sizing = _uncertainty_for_threshold(sport, config)
+    if "UNCALIBRATED_FALLBACK" in flags or uncertainty_for_sizing >= float(config.uncertainty_flat_threshold):
+        flags.append("UNCERTAINTY_FLAT")
+        final_units = min(float(config.flat_units_when_uncertain), float(config.max_units))
+        reason_parts.append("forced_flat_units")
 
     if primary_market == "ML" and primary_price is not None and np.isfinite(primary_price):
         if float(primary_price) >= float(config.longshot_odds):

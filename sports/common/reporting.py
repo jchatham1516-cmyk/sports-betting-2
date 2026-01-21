@@ -9,6 +9,7 @@ import pandas as pd
 
 from sports.common.teams import canon_team
 from sports.common.util import american_to_decimal, normalize_result_label
+from sports.common.bet_config import get_sport_bet_config
 
 
 ODDS_BUCKETS = [
@@ -171,5 +172,112 @@ def generate_backtest_report(
     out_path = os.path.join("results", "reports", f"{sport}_report.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+
+    return report
+
+
+def self_check_recent_bets(
+    *,
+    bet_log_path: str = "results/tracking/bet_log.csv",
+    last_n: int = 200,
+) -> Optional[Dict[str, object]]:
+    if not os.path.exists(bet_log_path):
+        print(f"[self-check] No bet log at {bet_log_path}; skipping.")
+        return None
+
+    bets = pd.read_csv(bet_log_path)
+    if bets.empty:
+        print("[self-check] Bet log empty; skipping.")
+        return None
+
+    bets = bets.tail(int(last_n)).copy()
+    bets["result"] = bets["result"].apply(normalize_result_label)
+    bets = bets[bets["result"].isin(["WIN", "LOSS", "PUSH"])]
+    if bets.empty:
+        print("[self-check] No graded bets in recent window; skipping.")
+        return None
+
+    bets["units"] = bets["units"].apply(_safe_float)
+    bets["unit_dollars"] = bets["unit_dollars"].apply(_safe_float)
+    bets["stake"] = bets["units"] * bets["unit_dollars"]
+    bets["price"] = bets["price_at_bet"].apply(_safe_float)
+
+    def _result_num(res: str) -> float:
+        if res == "WIN":
+            return 1.0
+        if res == "LOSS":
+            return 0.0
+        return 0.5
+
+    bets["result_num"] = bets["result"].apply(_result_num)
+    bets["model_prob"] = bets["model_prob"].apply(_safe_float)
+    bets["market_prob"] = bets["market_prob"].apply(_safe_float)
+    bets["edge_prob_final"] = bets["edge_prob_final"].apply(_safe_float)
+    bets["abs_edge_prob"] = bets["abs_edge_prob"].apply(_safe_float)
+
+    bets["implied_edge"] = bets["model_prob"] - bets["market_prob"]
+
+    overall_units = float(bets["units"].sum())
+    wins = int((bets["result"] == "WIN").sum())
+    losses = int((bets["result"] == "LOSS").sum())
+    pushes = int((bets["result"] == "PUSH").sum())
+    win_rate = wins / (wins + losses) if wins + losses > 0 else 0.0
+    avg_implied_edge = float(bets["implied_edge"].replace([np.inf, -np.inf], np.nan).mean())
+    avg_model_edge = float(bets["edge_prob_final"].replace([np.inf, -np.inf], np.nan).mean())
+
+    brier = float(
+        np.nanmean((bets["model_prob"] - bets["result_num"]) ** 2)
+        if bets["model_prob"].notna().any()
+        else float("nan")
+    )
+
+    by_market = {}
+    for market, group in bets.groupby(bets["market_type"].fillna("UNKNOWN")):
+        wins_m = int((group["result"] == "WIN").sum())
+        losses_m = int((group["result"] == "LOSS").sum())
+        pushes_m = int((group["result"] == "PUSH").sum())
+        win_rate_m = wins_m / (wins_m + losses_m) if wins_m + losses_m > 0 else 0.0
+        by_market[str(market)] = {
+            "bets": int(len(group)),
+            "wins": wins_m,
+            "losses": losses_m,
+            "pushes": pushes_m,
+            "win_rate": float(win_rate_m),
+            "avg_implied_edge": float(group["implied_edge"].replace([np.inf, -np.inf], np.nan).mean()),
+            "avg_model_edge": float(group["edge_prob_final"].replace([np.inf, -np.inf], np.nan).mean()),
+        }
+
+    def _thin_edge_flag(row: pd.Series) -> bool:
+        sport = str(row.get("sport", "")).lower()
+        config = get_sport_bet_config(sport)
+        edge = row.get("abs_edge_prob")
+        return bool(np.isfinite(edge) and float(edge) < float(config.min_edge_cal))
+
+    thin_edge_rate = float(bets.apply(_thin_edge_flag, axis=1).mean())
+
+    report = {
+        "sample_size": int(len(bets)),
+        "overall_units": overall_units,
+        "win_rate": win_rate,
+        "avg_implied_edge": avg_implied_edge,
+        "avg_model_edge": avg_model_edge,
+        "brier": brier,
+        "by_market": by_market,
+        "thin_edge_rate": thin_edge_rate,
+    }
+
+    print(
+        "[self-check] "
+        f"n={report['sample_size']} units={overall_units:.2f} win_rate={win_rate:.3f} "
+        f"avg_implied_edge={avg_implied_edge:.4f} avg_model_edge={avg_model_edge:.4f} brier={brier:.4f}"
+    )
+    for market, stats in by_market.items():
+        print(
+            "[self-check] "
+            f"{market}: bets={stats['bets']} win_rate={stats['win_rate']:.3f} "
+            f"avg_implied_edge={stats['avg_implied_edge']:.4f} avg_model_edge={stats['avg_model_edge']:.4f}"
+        )
+    if thin_edge_rate > 0.4:
+        print(f"[self-check] WARNING: {thin_edge_rate:.0%} of recent bets are thin-edge (<min_edge_cal).")
 
     return report

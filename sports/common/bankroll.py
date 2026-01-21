@@ -57,8 +57,8 @@ def bet_size_kelly_ml(
     p: float,
     odds_american: float,
     *,
-    kelly_mult: float = 0.5,
-    max_pct: float = 0.03,
+    kelly_mult: float = 0.25,
+    max_pct: float = 0.015,
 ) -> float:
     f = kelly_fraction(float(p), float(odds_american))
     f_adj = min(f * float(kelly_mult), float(max_pct))
@@ -71,8 +71,8 @@ def compute_bet_size(
     *,
     sizing_mode: str = "flat",  # "flat" or "kelly"
     flat_pct: float = UNIT_PCT,
-    kelly_mult: float = 0.5,
-    kelly_max_pct: float = 0.03,
+    kelly_mult: float = 0.25,
+    kelly_max_pct: float = 0.015,
 ) -> float:
     if str(row.get("play_pass")) != "PLAY":
         return 0.0
@@ -87,14 +87,25 @@ def compute_bet_size(
         ml = safe_float(row.get("home_ml"))
         if ml is None or (isinstance(ml, float) and math.isnan(ml)):
             return 0.0
-        p = float(row.get("model_home_prob"))
+        p = float(
+            row.get(
+                "model_home_prob_final",
+                row.get("model_home_prob_cal", row.get("model_home_prob")),
+            )
+        )
         return bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
 
     if "AWAY ML" in primary:
         ml = safe_float(row.get("away_ml"))
         if ml is None or (isinstance(ml, float) and math.isnan(ml)):
             return 0.0
-        p = 1.0 - float(row.get("model_home_prob"))
+        p_home = float(
+            row.get(
+                "model_home_prob_final",
+                row.get("model_home_prob_cal", row.get("model_home_prob")),
+            )
+        )
+        p = 1.0 - p_home
         return bet_size_kelly_ml(bankroll, p, ml, kelly_mult=kelly_mult, max_pct=kelly_max_pct)
 
     # ATS: fallback to flat
