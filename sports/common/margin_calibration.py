@@ -11,17 +11,30 @@ CAL_DIR = "results"
 class MarginCalibrator:
     a: float = 0.0
     b: float = 0.0
+    trained: bool = False
 
     def predict(self, elo_diff: float) -> float:
         return float(self.a + self.b * elo_diff)
 
+    def is_trained(self) -> bool:
+        if self.trained:
+            return True
+        return abs(float(self.b)) >= 1e-6
 
-def load(path: str) -> MarginCalibrator:
+
+def load(path: str) -> MarginCalibrator | None:
     if not os.path.exists(path):
-        return MarginCalibrator()
+        return None
     with open(path, "r", encoding="utf-8") as f:
-        d = json.load(f)
-    return MarginCalibrator(**d)
+        d = json.load(f) or {}
+    cal = MarginCalibrator(
+        a=float(d.get("a", 0.0)),
+        b=float(d.get("b", 0.0)),
+        trained=bool(d.get("trained", False)),
+    )
+    if not cal.is_trained():
+        return None
+    return cal
 
 
 def save(path: str, cal: MarginCalibrator) -> None:

@@ -282,6 +282,9 @@ def add_recommendations_to_df(
     out["spread_recommendation"] = out.get("spread_recommendation", "")
     if model_spread_home_col and model_spread_home_col in out.columns and "home_spread" in out.columns:
         for i in out.index:
+            if bool(out.get("ats_gated", pd.Series(False, index=out.index)).loc[i]):
+                out.loc[i, "spread_recommendation"] = "No ATS bet (gated): invalid spread model"
+                continue
             ms = float(out.loc[i, model_spread_home_col]) if not pd.isna(out.loc[i, model_spread_home_col]) else float("nan")
             hs = float(out.loc[i, "home_spread"]) if not pd.isna(out.loc[i, "home_spread"]) else float("nan")
             out.loc[i, "spread_recommendation"] = _ats_pick(ms, hs, thresholds)
@@ -405,9 +408,20 @@ def add_recommendations_to_df(
         p_home_cover = _to_float(row.get("ats_home_cover_prob", row.get("p_home_cover", np.nan)))
         p_away_cover = 1.0 - _to_float(p_home_cover) if np.isfinite(_to_float(p_home_cover)) else np.nan
         ats_price = row.get("spread_price")
-        ats_ev_home = ev_per_dollar(p_home_cover, ats_price)
-        ats_ev_away = ev_per_dollar(p_away_cover, ats_price)
-        ats_ev, ats_side = _best_ev(ats_ev_home, ats_ev_away, "HOME", "AWAY")
+        if bool(row.get("ats_gated", False)):
+            ats_ev = np.nan
+            ats_side = ""
+            if "ATS_GATED_INVALID_SPREAD" not in flags:
+                flags.append("ATS_GATED_INVALID_SPREAD")
+            out.loc[i, "decision_reason"] = (
+                f"{out.loc[i, 'decision_reason']} | ATS_GATED_INVALID_SPREAD"
+                if str(out.loc[i, "decision_reason"]).strip()
+                else "ATS_GATED_INVALID_SPREAD"
+            )
+        else:
+            ats_ev_home = ev_per_dollar(p_home_cover, ats_price)
+            ats_ev_away = ev_per_dollar(p_away_cover, ats_price)
+            ats_ev, ats_side = _best_ev(ats_ev_home, ats_ev_away, "HOME", "AWAY")
 
         margin_calibrated = row.get("margin_calibrated")
         margin_calibrated = bool(margin_calibrated) if not pd.isna(margin_calibrated) else False
