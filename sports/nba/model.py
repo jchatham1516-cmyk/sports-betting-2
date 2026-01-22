@@ -678,7 +678,11 @@ def update_elo_from_recent_scores(days_from: int = 10) -> EloState:
             )
 
             mcal = fit_margin(np.array(train_xs, dtype=float), np.array(train_margins, dtype=float))
-            save_margin_cal(MARGIN_CAL_PATH, mcal)
+            if len(train_xs) >= 50 and abs(float(mcal.b)) >= 1e-4:
+                mcal.trained = True
+                save_margin_cal(MARGIN_CAL_PATH, mcal)
+            else:
+                print("[nba calibration] margin_cal not trained; using fallback spread.")
     except Exception as e:
         print(f"[nba calibration] WARNING: calibration fit failed: {e}")
 
@@ -695,6 +699,8 @@ def _load_calibrators():
     mcal = None
     try:
         mcal = load_margin_cal(MARGIN_CAL_PATH)
+        if mcal is not None and hasattr(mcal, "is_trained") and not mcal.is_trained():
+            mcal = None
     except Exception:
         mcal = None
     return unc, mcal
@@ -887,15 +893,18 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         ml_reco = _ml_recommendation(p_home, mkt_home_p, min_edge=MIN_ML_EDGE)
 
         elo_diff = (eh + HOME_ADV) - ea
-        model_spread_home = float(-float(elo_diff) / 16.0)
-        if margin_cal is not None:
+        fallback_spread_home = float(_clamp(-float(elo_diff) / 16.0, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
+        model_spread_home = float(fallback_spread_home)
+        margin_cal_used = False
+        if margin_cal is not None and hasattr(margin_cal, "is_trained") and margin_cal.is_trained():
             try:
                 calibrated_margin = float(margin_cal.predict(elo_diff))
                 model_spread_home = float(_clamp(-calibrated_margin, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
+                margin_cal_used = True
             except Exception:
-                model_spread_home = float(_clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
-        else:
-            model_spread_home = float(_clamp(model_spread_home, -MAX_ABS_MODEL_SPREAD, MAX_ABS_MODEL_SPREAD))
+                model_spread_home = float(fallback_spread_home)
+        margin_cal_a = float(margin_cal.a) if margin_cal is not None else float("nan")
+        margin_cal_b = float(margin_cal.b) if margin_cal is not None else float("nan")
         mu_margin_home = float(-model_spread_home)
 
         h_off, h_def, h_pace_home, h_pace_away, h_n_w = _exp_weighted_team_stats(home, team_tbl, as_of)
@@ -1083,7 +1092,10 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "away": away,
                 "model_home_prob": float(p_home),
                 "model_home_prob_raw": float(p_home),
-                "margin_calibrated": bool(margin_cal is not None),
+                "margin_calibrated": bool(margin_cal_used),
+                "margin_cal_used": bool(margin_cal_used),
+                "margin_cal_a": float(margin_cal_a) if not np.isnan(margin_cal_a) else np.nan,
+                "margin_cal_b": float(margin_cal_b) if not np.isnan(margin_cal_b) else np.nan,
                 "market_home_imp": float(p_home_imp) if not np.isnan(p_home_imp) else np.nan,
                 "market_home_prob": float(mkt_home_p) if not np.isnan(mkt_home_p) else np.nan,
                 "market_home_delta": float(market_home_delta) if not np.isnan(market_home_delta) else np.nan,
@@ -1100,6 +1112,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "injury_source": str(injury_source),
                 "elo_diff": float(elo_diff),
                 "model_spread_home": float(model_spread_home),
+                "fallback_spread_home": float(fallback_spread_home),
                 "model_margin_home": float(mu_margin_home),
                 "margin_sd": float(margin_sd),
                 "margin_ci95_low": float(margin_ci95_low),
@@ -1145,6 +1158,18 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         )
 
     df = pd.DataFrame(rows)
+
+    if not df.empty:
+        model_spread_small = df["model_spread_home"].abs() < 0.25
+        big_market_spread = df["home_spread"].abs() >= 6.0
+        small_ratio = float(model_spread_small.mean())
+        big_market_count = int(big_market_spread.sum())
+        if small_ratio > 0.80 and big_market_count >= max(2, int(0.3 * len(df))):
+            df["spread_recommendation"] = "No ATS bet (gated): invalid spread model"
+            df["ats_gated"] = True
+        else:
+            if "ats_gated" not in df.columns:
+                df["ats_gated"] = False
 
     # Update totals calibration vs. observed market totals when enough samples exist
     if len(total_calibration_samples) >= 5:
