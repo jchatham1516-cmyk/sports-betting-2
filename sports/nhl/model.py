@@ -404,6 +404,7 @@ def update_elo_from_recent_scores(days_from: int = 120) -> EloState:
                 ys_arr,
                 window=UNCERTAINTY_WINDOW,
                 min_samples=max(30, int(CAL_MIN_GAMES)),
+                market="ML",
             )
             update_prob_calibration(
                 "nhl",

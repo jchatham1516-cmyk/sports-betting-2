@@ -164,7 +164,7 @@ def _nhl_sample_size() -> Optional[int]:
     return sample_size
 
 
-def _nhl_uncertainty_context(config: SportBetConfig, *, use_floor: bool) -> Tuple[float, Optional[int], float]:
+def _nhl_uncertainty_context(config: SportBetConfig, *, use_floor: bool) -> Tuple[float, int, float]:
     if use_floor:
         raw_uncertainty = _uncertainty_for_threshold("nhl", config)
     else:
@@ -172,10 +172,12 @@ def _nhl_uncertainty_context(config: SportBetConfig, *, use_floor: bool) -> Tupl
         if not np.isfinite(raw_uncertainty) or raw_uncertainty <= 0.0:
             raw_uncertainty = 0.0
     sample_size = _nhl_sample_size()
+    sample_size_for_scaling = sample_size if sample_size is not None else 20
     effective_uncertainty = float(raw_uncertainty)
-    if sample_size is not None and sample_size < 50:
-        effective_uncertainty = float(raw_uncertainty) * (float(sample_size) / 50.0)
-    return float(effective_uncertainty), sample_size, float(raw_uncertainty)
+    if sample_size_for_scaling < 50:
+        scale = max(float(sample_size_for_scaling), 10.0) / 50.0
+        effective_uncertainty = float(raw_uncertainty) * float(scale)
+    return float(effective_uncertainty), int(sample_size_for_scaling), float(raw_uncertainty)
 
 
 def _dynamic_min_edge(sport: str, base_min_edge: float, config: SportBetConfig) -> float:
@@ -192,9 +194,11 @@ def _dynamic_min_edge(sport: str, base_min_edge: float, config: SportBetConfig) 
             sample_size=sample_size,
         )
         mult = float(config.uncertainty_edge_mult)
-        add_on = float(mult) * float(effective_uncertainty)
-        add_on = min(add_on, 0.025)
-        return float(max(0.0, float(base_min_edge) + add_on))
+        min_edge = float(base_min_edge) + float(mult) * float(effective_uncertainty)
+        cap = float(os.getenv("NHL_DYNAMIC_MIN_EDGE_CAP", "0.055"))
+        if cap > 0:
+            min_edge = min(float(min_edge), cap)
+        return float(max(0.0, float(min_edge)))
     uncertainty = _uncertainty_for_threshold(sport, config)
     _log_uncertainty_once(sport, uncertainty, base_min_edge, config)
     mult = float(config.uncertainty_edge_mult)
@@ -953,8 +957,9 @@ def decide_bet_from_row(
 
     nhl_uncertainty_used = None
     nhl_uncertainty_samples = None
+    nhl_uncertainty_raw = None
     if str(sport).lower() == "nhl":
-        nhl_uncertainty_used, nhl_uncertainty_samples, _raw_uncertainty = _nhl_uncertainty_context(
+        nhl_uncertainty_used, nhl_uncertainty_samples, nhl_uncertainty_raw = _nhl_uncertainty_context(
             config, use_floor=True
         )
 
@@ -1099,7 +1104,10 @@ def decide_bet_from_row(
         uncertainty_note = ""
         if str(sport).lower() == "nhl" and nhl_uncertainty_used is not None:
             sample_str = "NA" if nhl_uncertainty_samples is None else str(nhl_uncertainty_samples)
-            uncertainty_note = f" (unc={nhl_uncertainty_used:.3f}, n={sample_str})"
+            raw_uncertainty = nhl_uncertainty_raw if nhl_uncertainty_raw is not None else nhl_uncertainty_used
+            uncertainty_note = (
+                f" (unc={raw_uncertainty:.3f} eff={nhl_uncertainty_used:.3f} n={sample_str})"
+            )
         decision = DecisionOutcome(
             "PASS",
             0.0,
@@ -1445,14 +1453,20 @@ def add_betting_outputs(
     out["min_play_edge_abs_used"] = [m[16] for m in metrics]
     out["min_primary_edge_abs_used"] = [m[17] for m in metrics]
     if str(sport).lower() == "nhl":
-        nhl_uncertainty_used, nhl_uncertainty_samples, _raw_uncertainty = _nhl_uncertainty_context(
+        nhl_uncertainty_used, nhl_uncertainty_samples, nhl_uncertainty_raw = _nhl_uncertainty_context(
             get_sport_bet_config("nhl"), use_floor=True
         )
+        out["nhl_uncertainty"] = float(nhl_uncertainty_raw)
+        out["nhl_uncertainty_n"] = float(nhl_uncertainty_samples)
+        out["nhl_uncertainty_effective"] = float(nhl_uncertainty_used)
         out["nhl_uncertainty_used"] = float(nhl_uncertainty_used)
         out["nhl_uncertainty_samples"] = (
             int(nhl_uncertainty_samples) if nhl_uncertainty_samples is not None else np.nan
         )
     else:
+        out["nhl_uncertainty"] = np.nan
+        out["nhl_uncertainty_n"] = np.nan
+        out["nhl_uncertainty_effective"] = np.nan
         out["nhl_uncertainty_used"] = np.nan
         out["nhl_uncertainty_samples"] = np.nan
 

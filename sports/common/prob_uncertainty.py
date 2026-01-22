@@ -48,6 +48,7 @@ def compute_uncertainty(
         "brier": brier,
         "error_std": error_std,
         "uncertainty": uncertainty,
+        "n": int(p.size),
         "n_samples": int(p.size),
         "window": int(window),
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -73,10 +74,33 @@ def update_uncertainty(
     *,
     window: int = 120,
     min_samples: int = 30,
+    market: Optional[str] = None,
+) -> Optional[Dict[str, float]]:
+    return update_uncertainty_json(
+        sport,
+        probs,
+        outcomes,
+        window=window,
+        min_samples=min_samples,
+        market=market,
+    )
+
+
+def update_uncertainty_json(
+    sport: str,
+    probs: np.ndarray,
+    outcomes: np.ndarray,
+    *,
+    window: int = 120,
+    min_samples: int = 30,
+    market: Optional[str] = None,
 ) -> Optional[Dict[str, float]]:
     data = compute_uncertainty(probs, outcomes, window=window, min_samples=min_samples)
     if data is None:
         return None
+    if market:
+        data["market"] = str(market).upper()
+    data["sport"] = str(sport).lower()
     save_uncertainty(sport, data)
     return data
 
