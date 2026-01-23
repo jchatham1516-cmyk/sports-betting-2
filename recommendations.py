@@ -423,6 +423,8 @@ def add_recommendations_to_df(
             ats_ev_away = ev_per_dollar(p_away_cover, ats_price)
             ats_ev, ats_side = _best_ev(ats_ev_home, ats_ev_away, "HOME", "AWAY")
 
+        market_type = str(row.get("market_type") or row.get("primary_market") or row.get("market") or "").upper()
+        is_spread_market = "SPREAD" in market_type or "ATS" in market_type
         margin_calibrated = row.get("margin_calibrated")
         margin_calibrated = bool(margin_calibrated) if not pd.isna(margin_calibrated) else False
         ats_edge_prob = np.nan
@@ -434,16 +436,18 @@ def add_recommendations_to_df(
             if not np.isfinite(ats_edge_prob) or abs(float(ats_edge_prob)) < required_edge:
                 ats_ev = np.nan
                 ats_side = ""
-                if "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
-                    flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
-                out.loc[i, "decision_reason"] = (
-                    f"{out.loc[i, 'decision_reason']} | ATS_GATED_UNCALIBRATED_MARGIN"
-                    if str(out.loc[i, "decision_reason"]).strip()
-                    else "ATS_GATED_UNCALIBRATED_MARGIN"
-                )
+                if is_spread_market:
+                    if "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
+                        flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
+                    out.loc[i, "decision_reason"] = (
+                        f"{out.loc[i, 'decision_reason']} | ATS_GATED_UNCALIBRATED_MARGIN"
+                        if str(out.loc[i, "decision_reason"]).strip()
+                        else "ATS_GATED_UNCALIBRATED_MARGIN"
+                    )
             else:
-                if "ATS_UNCALIBRATED_MARGIN" not in flags:
-                    flags.append("ATS_UNCALIBRATED_MARGIN")
+                if is_spread_market:
+                    if "ATS_UNCALIBRATED_MARGIN" not in flags:
+                        flags.append("ATS_UNCALIBRATED_MARGIN")
 
         # TOTAL EV: compute probability of OVER/UNDER with fallbacks
         p_over = np.nan

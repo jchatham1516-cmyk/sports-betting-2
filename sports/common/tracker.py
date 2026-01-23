@@ -479,21 +479,34 @@ def append_bets_from_predictions(preds_df: pd.DataFrame, sport: str, bet_log_pat
     os.makedirs(os.path.dirname(bet_log_path) or ".", exist_ok=True)
 
     new_df = pd.DataFrame(bets)
-    if os.path.exists(bet_log_path):
+    existing_cols: List[str] = []
+    existing_ids: set = set()
+    log_exists = os.path.exists(bet_log_path)
+    if log_exists:
         existing = pd.read_csv(bet_log_path)
+        existing_cols = list(existing.columns)
+        if "bet_id" in existing.columns:
+            existing_ids = set(existing["bet_id"].astype(str))
+
+    if existing_ids:
+        new_df = new_df[~new_df["bet_id"].astype(str).isin(existing_ids)]
+
+    if new_df.empty:
+        return 0
+
+    if existing_cols:
+        column_order = existing_cols
     else:
-        existing = pd.DataFrame(columns=BET_LOG_COLUMNS)
+        column_order = list(dict.fromkeys(BET_LOG_COLUMNS + list(new_df.columns)))
 
-    combined = pd.concat([existing, new_df], ignore_index=True)
+    for col in column_order:
+        if col not in new_df.columns:
+            new_df[col] = np.nan
 
-    for col in set(BET_LOG_COLUMNS + list(new_df.columns) + list(existing.columns)):
-        if col not in combined.columns:
-            combined[col] = np.nan
+    new_df = new_df[column_order]
+    new_df.to_csv(bet_log_path, mode="a", header=not log_exists, index=False)
 
-    combined = combined.drop_duplicates(subset=["bet_id"], keep="first")
-    combined.to_csv(bet_log_path, index=False)
-
-    return max(0, len(combined) - len(existing))
+    return len(new_df)
 
 
 def _events_to_scores_df(events: List[Dict[str, object]], target_date: date) -> pd.DataFrame:
