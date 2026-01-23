@@ -25,6 +25,7 @@ from sports.nba.injuries import (
 )
 
 from sports.common.eval import build_game_key
+from sports.common.ats_calibration import get_ats_calibrator
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 from sports.common.calibration import load_nba_calibrator, update_and_save_nba_calibration
 from sports.common.prob_calibration import update_prob_calibration
@@ -736,6 +737,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         print(f"[nba] WARNING: Elo update failed ({e}); using backfill state")
         st = backfill_nba_elo_state()
     uncertainty, margin_cal = _load_calibrators()
+    ats_cal = get_ats_calibrator(sport="nba")
 
     form_adjs = _build_form_adjustments(stats_df) if stats_df is not None else {}
 
@@ -1086,15 +1088,29 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         # --- NEW: use dynamic margin SD for ATS prob ---
         ats_sd = float(margin_sd) if (not np.isnan(margin_sd) and margin_sd > 1e-6) else float(ATS_SD_PTS)
-        p_home_cover = float(_clamp(_phi((spread_edge_home / ats_sd)), 0.001, 0.999)) if not np.isnan(spread_edge_home) else float("nan")
+        p_home_cover_raw = (
+            float(_clamp(_phi((spread_edge_home / ats_sd)), 0.001, 0.999))
+            if not np.isnan(spread_edge_home)
+            else float("nan")
+        )
 
         # --- NEW: edge vs breakeven ---
         be_spread = _breakeven_prob_from_american(spread_price)
         if np.isnan(be_spread):
             be_spread = 0.5238
-        ats_edge_vs_be = float(p_home_cover - be_spread) if not np.isnan(p_home_cover) else float("nan")
+        ats_edge_vs_be = float(p_home_cover_raw - be_spread) if not np.isnan(p_home_cover_raw) else float("nan")
         spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) and not np.isnan(model_spread_home) else float("nan")
-        p_home_cover = float(_clamp(_phi((spread_edge_home / ATS_SD_PTS)), 0.001, 0.999)) if not np.isnan(spread_edge_home) else float("nan")
+        p_home_cover_raw = (
+            float(_clamp(_phi((spread_edge_home / ATS_SD_PTS)), 0.001, 0.999))
+            if not np.isnan(spread_edge_home)
+            else float("nan")
+        )
+        ats_cal_used = ats_cal is not None and np.isfinite(spread_edge_home)
+        if ats_cal_used:
+            ats_x = float(mu_margin_home + home_spread)
+            p_home_cover = float(ats_cal.predict_prob_cover(ats_x))
+        else:
+            p_home_cover = p_home_cover_raw
 
         market_home_delta = (
             float(mkt_home_p - p_home_imp)
@@ -1145,6 +1161,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "spread_price": float(spread_price) if not np.isnan(spread_price) else np.nan,
                 "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
                 "p_home_cover": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
+                "ats_cal_used": bool(ats_cal_used),
+                "ats_cal_a": float(ats_cal.a) if ats_cal_used else np.nan,
+                "ats_cal_b": float(ats_cal.b) if ats_cal_used else np.nan,
                 "pace_factor": float(pace_factor) if not np.isnan(pace_factor) else np.nan,
                 "pace_reason": str(pace_reason),
                 "inj_total_adj": float(inj_total_adj),
