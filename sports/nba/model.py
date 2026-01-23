@@ -1074,6 +1074,25 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
 
         home_spread = _safe_float((oi or {}).get("home_spread"))
         spread_price = _safe_float((oi or {}).get("spread_price"), default=ATS_DEFAULT_PRICE)
+
+        # --- NEW: anchor spread to market ---
+        SPREAD_ANCHOR_W = float(os.getenv("NBA_SPREAD_ANCHOR_W", "0.55"))
+        model_spread_raw = float(model_spread_home)
+        if not np.isnan(home_spread):
+            w = float(_clamp(SPREAD_ANCHOR_W, 0.0, 1.0))
+            model_spread_home = float(w * home_spread + (1.0 - w) * model_spread_raw)
+
+        spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
+
+        # --- NEW: use dynamic margin SD for ATS prob ---
+        ats_sd = float(margin_sd) if (not np.isnan(margin_sd) and margin_sd > 1e-6) else float(ATS_SD_PTS)
+        p_home_cover = float(_clamp(_phi((spread_edge_home / ats_sd)), 0.001, 0.999)) if not np.isnan(spread_edge_home) else float("nan")
+
+        # --- NEW: edge vs breakeven ---
+        be_spread = _breakeven_prob_from_american(spread_price)
+        if np.isnan(be_spread):
+            be_spread = 0.5238
+        ats_edge_vs_be = float(p_home_cover - be_spread) if not np.isnan(p_home_cover) else float("nan")
         spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) and not np.isnan(model_spread_home) else float("nan")
         p_home_cover = float(_clamp(_phi((spread_edge_home / ATS_SD_PTS)), 0.001, 0.999)) if not np.isnan(spread_edge_home) else float("nan")
 
