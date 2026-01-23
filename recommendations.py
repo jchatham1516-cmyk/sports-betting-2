@@ -423,27 +423,27 @@ def add_recommendations_to_df(
             ats_ev_away = ev_per_dollar(p_away_cover, ats_price)
             ats_ev, ats_side = _best_ev(ats_ev_home, ats_ev_away, "HOME", "AWAY")
 
+        ats_cal_used = row.get("ats_cal_used")
+        ats_cal_used = bool(ats_cal_used) if not pd.isna(ats_cal_used) else False
         margin_calibrated = row.get("margin_calibrated")
         margin_calibrated = bool(margin_calibrated) if not pd.isna(margin_calibrated) else False
+        ats_calibrated = ats_cal_used if sport == "nba" else margin_calibrated
         ats_edge_prob = np.nan
         be_prob = breakeven_prob_from_american(ats_price)
         if np.isfinite(p_home_cover) and np.isfinite(be_prob):
             ats_edge_prob = float(p_home_cover - be_prob)
-        if not margin_calibrated:
-            required_edge = float(config.min_edge_cal) + float(config.uncalibrated_edge_add)
-            if not np.isfinite(ats_edge_prob) or abs(float(ats_edge_prob)) < required_edge:
-                ats_ev = np.nan
-                ats_side = ""
-                if "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
-                    flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
-                out.loc[i, "decision_reason"] = (
-                    f"{out.loc[i, 'decision_reason']} | ATS_GATED_UNCALIBRATED_MARGIN"
-                    if str(out.loc[i, "decision_reason"]).strip()
-                    else "ATS_GATED_UNCALIBRATED_MARGIN"
-                )
-            else:
-                if "ATS_UNCALIBRATED_MARGIN" not in flags:
-                    flags.append("ATS_UNCALIBRATED_MARGIN")
+        if not ats_calibrated:
+            ats_ev = np.nan
+            ats_side = ""
+            if "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
+                flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
+            out.loc[i, "decision_reason"] = (
+                f"{out.loc[i, 'decision_reason']} | ATS_GATED_UNCALIBRATED_MARGIN"
+                if str(out.loc[i, "decision_reason"]).strip()
+                else "ATS_GATED_UNCALIBRATED_MARGIN"
+            )
+            if "ATS_UNCALIBRATED_MARGIN" not in flags:
+                flags.append("ATS_UNCALIBRATED_MARGIN")
 
         # TOTAL EV: compute probability of OVER/UNDER with fallbacks
         p_over = np.nan

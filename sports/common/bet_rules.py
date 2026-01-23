@@ -1029,6 +1029,41 @@ def decide_bet_from_row(
         min_primary_edge_abs_used,
     ) = primary_metrics_for_row(row, sport=sport, settings=settings)
 
+    if (
+        str(sport).lower() == "nba"
+        and primary_market == "ATS"
+        and "ATS_UNCALIBRATED_MARGIN" in flags
+    ):
+        decision = DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            "NO ATS: margin model uncalibrated",
+            ",".join(flags),
+            "NO ATS: margin model uncalibrated",
+            0.0,
+            0.0,
+            p_model_raw,
+            p_model_cal,
+            p_model_final,
+            p_market,
+            edge_prob_raw,
+            edge_prob_cal,
+            edge_prob_final,
+        )
+        _print_decision(
+            decision,
+            p_model_raw_val=p_model_raw,
+            p_model_cal_val=p_model_cal,
+            p_model_final_val=p_model_final,
+            p_market_val=p_market,
+            edge_prob_raw_val=edge_prob_raw,
+            edge_prob_final_val=edge_prob_final,
+            min_edge_dyn=min_primary_edge_abs_used,
+        )
+        return decision
+
     if data_reason or not np.isfinite(p_model_cal) or not np.isfinite(p_market):
         flags.append("MISSING_DATA_PASS")
         decision = DecisionOutcome(
@@ -1416,6 +1451,12 @@ def add_betting_outputs(
         ml_ev = _safe_num(r.get("ml_ev_best"))
         ats_ev = _safe_num(r.get("ats_ev_best"))
         total_ev = _safe_num(r.get("total_ev_best"))
+        decision_flags = [f for f in str(r.get("decision_flags") or "").split(",") if f]
+        if str(sport).lower() == "nba" and (
+            "ATS_UNCALIBRATED_MARGIN" in decision_flags
+            or "ATS_GATED_UNCALIBRATED_MARGIN" in decision_flags
+        ):
+            ats_ev = float("nan")
 
         primary, why = choose_primary_recommendation(
             ml_reco=ml_reco,

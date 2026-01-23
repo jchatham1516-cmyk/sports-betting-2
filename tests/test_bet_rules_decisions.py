@@ -99,3 +99,23 @@ def test_confidence_caps_for_moneyline_underdogs():
     row = _base_row(home_ml=450, away_ml=-500, model_home_prob=0.35, market_home_prob=0.2)
     metrics = primary_metrics_for_row(row, sport="nba")
     assert metrics[9] == "LOW"
+
+
+def test_ats_uncalibrated_margin_forces_pass():
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK ATS: HOME",
+            "primary_market": "ATS",
+            "primary_side": "HOME",
+            "home_spread": -5.5,
+            "spread_price": -110,
+            "ats_home_cover_prob": 0.56,
+            "market_spread_prob": 0.5238,
+            "decision_flags": "ATS_UNCALIBRATED_MARGIN",
+        }
+    )
+
+    decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
+
+    assert decision.play_pass == "PASS"
+    assert decision.decision_reason == "NO ATS: margin model uncalibrated"
