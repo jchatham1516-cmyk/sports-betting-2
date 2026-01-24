@@ -275,16 +275,38 @@ def _dynamic_min_edge(sport: str, base_min_edge: float, config: SportBetConfig) 
     return float(max(0.0, float(min_edge)))
 
 
+@dataclass(frozen=True)
+class NhlAnchorContext:
+    anchor_weight: float
+    effective_uncertainty: float
+    low_unc_applied: bool
+    base_weight: float
+    goalie_confirmed: bool
+
+
 def _dynamic_anchor_weight(sport: str, base_weight: float, config: SportBetConfig) -> float:
     if str(sport).lower() == "nhl":
         effective_uncertainty, _sample_size, _raw_uncertainty = _nhl_uncertainty_context(
             config, use_floor=False
         )
         mult = float(config.uncertainty_anchor_mult)
-        cap_add = float(os.getenv("NHL_ANCHOR_CAP_ADD", "0.08"))
+        try:
+            cap_add = float(os.getenv("NHL_ANCHOR_CAP_ADD", "0.08"))
+        except Exception:
+            cap_add = 0.08
         adjusted = float(base_weight) + float(mult) * float(effective_uncertainty)
         if cap_add > 0:
             adjusted = min(adjusted, float(base_weight) + float(cap_add))
+        try:
+            low_unc_mult = float(os.getenv("NHL_LOW_UNC_ANCHOR_MULT", "0.85"))
+        except Exception:
+            low_unc_mult = 0.85
+        try:
+            low_unc_threshold = float(os.getenv("NHL_LOW_UNC_THRESHOLD", "0.01"))
+        except Exception:
+            low_unc_threshold = 0.01
+        if effective_uncertainty < float(low_unc_threshold):
+            adjusted = float(adjusted) * float(low_unc_mult)
         return float(max(0.0, min(1.0, adjusted)))
     uncertainty = _uncertainty_value(sport)
     mult = float(config.uncertainty_anchor_mult)
@@ -304,6 +326,8 @@ def _nhl_goalie_confirmed(row: pd.Series) -> bool:
 
 
 def _nhl_anchor_base_weight(goalie_confirmed: bool) -> float:
+    if not goalie_confirmed and nhl_goalie_unconfirmed_edge_add(goalie_confirmed) > 0:
+        goalie_confirmed = True
     env_key = "NHL_ANCHOR_W" if goalie_confirmed else "NHL_ANCHOR_W_UNCONFIRMED"
     default = "0.50" if goalie_confirmed else "0.60"
     try:
@@ -312,10 +336,59 @@ def _nhl_anchor_base_weight(goalie_confirmed: bool) -> float:
         return float(default)
 
 
-def nhl_anchor_weight_for_row(row: pd.Series, config: SportBetConfig) -> float:
+def nhl_anchor_context_for_row(row: pd.Series, config: SportBetConfig) -> NhlAnchorContext:
     goalie_confirmed = _nhl_goalie_confirmed(row)
     base_weight = _nhl_anchor_base_weight(goalie_confirmed)
-    return _dynamic_anchor_weight("nhl", base_weight, config)
+    effective_uncertainty, _sample_size, _raw_uncertainty = _nhl_uncertainty_context(
+        config, use_floor=False
+    )
+    mult = float(config.uncertainty_anchor_mult)
+    try:
+        cap_add = float(os.getenv("NHL_ANCHOR_CAP_ADD", "0.08"))
+    except Exception:
+        cap_add = 0.08
+    adjusted = float(base_weight) + float(mult) * float(effective_uncertainty)
+    if cap_add > 0:
+        adjusted = min(adjusted, float(base_weight) + float(cap_add))
+    try:
+        low_unc_mult = float(os.getenv("NHL_LOW_UNC_ANCHOR_MULT", "0.85"))
+    except Exception:
+        low_unc_mult = 0.85
+    try:
+        low_unc_threshold = float(os.getenv("NHL_LOW_UNC_THRESHOLD", "0.01"))
+    except Exception:
+        low_unc_threshold = 0.01
+    low_unc_applied = bool(effective_uncertainty < float(low_unc_threshold))
+    if low_unc_applied:
+        adjusted = float(adjusted) * float(low_unc_mult)
+    anchor_weight = float(max(0.0, min(1.0, adjusted)))
+    return NhlAnchorContext(
+        anchor_weight=anchor_weight,
+        effective_uncertainty=float(effective_uncertainty),
+        low_unc_applied=low_unc_applied,
+        base_weight=float(base_weight),
+        goalie_confirmed=goalie_confirmed,
+    )
+
+
+def nhl_anchor_weight_for_row(row: pd.Series, config: SportBetConfig) -> float:
+    return nhl_anchor_context_for_row(row, config).anchor_weight
+
+
+def nhl_goalie_unconfirmed_edge_add(goalie_confirmed: bool) -> float:
+    if goalie_confirmed:
+        return 0.0
+    try:
+        return float(os.getenv("NHL_GOALIE_UNCONF_EDGE_ADD", "0.01"))
+    except Exception:
+        return 0.01
+
+
+def nhl_min_edge_cap_value() -> float:
+    try:
+        return float(os.getenv("NHL_MIN_EDGE_CAP", "0.055"))
+    except Exception:
+        return 0.055
 
 
 def _goalie_unconfirmed(
@@ -805,9 +878,7 @@ def _apply_goalie_shift(
 ) -> float:
     if shift is None or not np.isfinite(shift) or not np.isfinite(p_final):
         return p_final
-    unconfirmed = _goalie_unconfirmed(goalie_status, home_status, away_status)
-    weight = 0.5 if unconfirmed else 1.0
-    adj_shift = float(shift) * float(weight)
+    adj_shift = float(shift)
     return float(max(0.01, min(0.99, p_final + adj_shift)))
 
 
@@ -954,7 +1025,9 @@ def primary_metrics_for_row(
     )
 
     config = get_sport_bet_config(sport)
+    goalie_confirmed = None
     if str(sport).lower() == "nhl":
+        goalie_confirmed = _nhl_goalie_confirmed(row)
         nhl_anchor_weight = nhl_anchor_weight_for_row(row, config)
         if nhl_anchor_weight != config.anchor_weight:
             config = replace(config, anchor_weight=nhl_anchor_weight)
@@ -1022,8 +1095,6 @@ def primary_metrics_for_row(
         if sport.lower() == "nhl":
             goalie_shift = safe_float(row.get("goalie_prob_shift"))
             goalie_confirmed = _nhl_goalie_confirmed(row)
-            if not goalie_confirmed:
-                flags.append("GOALIE_UNCONFIRMED")
             if np.isfinite(p_model_final):
                 p_model_final = _apply_goalie_shift(
                     p_model_final,
@@ -1038,8 +1109,8 @@ def primary_metrics_for_row(
             if np.isfinite(p_model_final) and np.isfinite(p_market_val)
             else float("nan")
         )
-        if uncalibrated:
-            flags.append("UNCALIBRATED_FALLBACK")
+    if uncalibrated:
+        flags.append("UNCALIBRATED_FALLBACK")
 
     base_conf = confidence_tier_from_edge(edge_prob_final, config.min_edge_cal)
     injury_low = _injury_confidence_low(row)
@@ -1081,12 +1152,11 @@ def primary_metrics_for_row(
     min_edge_dynamic = _dynamic_min_edge(sport, config.min_edge_cal, config) + extra_edge
     if str(sport).lower() == "nhl":
         goalie_confirmed = _nhl_goalie_confirmed(row)
-        if not goalie_confirmed:
-            min_edge_dynamic += 0.01
-        try:
-            min_edge_cap = float(os.getenv("NHL_MIN_EDGE_CAP", "0.055"))
-        except Exception:
-            min_edge_cap = 0.055
+        if not goalie_confirmed and "GOALIE_UNCONFIRMED" not in decision_flags:
+            decision_flags.append("GOALIE_UNCONFIRMED")
+        min_edge_dynamic += nhl_goalie_unconfirmed_edge_add(goalie_confirmed)
+        min_edge_cap = nhl_min_edge_cap_value()
+        # Example: edge_prob_raw=0.043 -> edge_prob_final=0.034, min_edge ~0.064 -> capped at 0.055.
         min_edge_dynamic = min(float(min_edge_dynamic), float(min_edge_cap))
 
     return (
@@ -1208,6 +1278,15 @@ def decide_bet_from_row(
         min_play_edge_abs_used,
         min_primary_edge_abs_used,
     ) = primary_metrics_for_row(row, sport=sport, settings=settings)
+
+    if str(sport).lower() == "nhl":
+        anchor_ctx = nhl_anchor_context_for_row(row, config)
+        eff_unc = nhl_uncertainty_used if nhl_uncertainty_used is not None else anchor_ctx.effective_uncertainty
+        reason_parts.append(
+            "min_edge="
+            f"{min_primary_edge_abs_used:.3f} unc={uncertainty:.3f} eff_unc={eff_unc:.3f} "
+            f"goalie_confirmed={anchor_ctx.goalie_confirmed} anchor_w_used={anchor_ctx.anchor_weight:.3f}"
+        )
 
     if primary_market == "ATS" and (
         "ATS_UNCALIBRATED_MARGIN" in flags or "ATS_GATED_UNCALIBRATED_MARGIN" in flags
@@ -1672,6 +1751,7 @@ def add_betting_outputs(
     out["min_play_edge_abs_used"] = [m[16] for m in metrics]
     out["min_primary_edge_abs_used"] = [m[17] for m in metrics]
     if str(sport).lower() == "nhl":
+        anchor_contexts = [nhl_anchor_context_for_row(r, get_sport_bet_config("nhl")) for _, r in out.iterrows()]
         nhl_uncertainty_used, nhl_uncertainty_samples, nhl_uncertainty_raw = _nhl_uncertainty_context(
             get_sport_bet_config("nhl"), use_floor=True
         )
@@ -1682,12 +1762,24 @@ def add_betting_outputs(
         out["nhl_uncertainty_samples"] = (
             int(nhl_uncertainty_samples) if nhl_uncertainty_samples is not None else np.nan
         )
+        out["nhl_min_edge_cap_used"] = nhl_min_edge_cap_value()
+        out["nhl_anchor_w_used"] = [ctx.anchor_weight for ctx in anchor_contexts]
+        out["nhl_low_unc_applied"] = [ctx.low_unc_applied for ctx in anchor_contexts]
+        out["nhl_goalie_unconf_edge_add"] = [
+            nhl_goalie_unconfirmed_edge_add(ctx.goalie_confirmed) for ctx in anchor_contexts
+        ]
+        out["effective_uncertainty"] = [ctx.effective_uncertainty for ctx in anchor_contexts]
     else:
         out["nhl_uncertainty"] = np.nan
         out["nhl_uncertainty_n"] = np.nan
         out["nhl_uncertainty_effective"] = np.nan
         out["nhl_uncertainty_used"] = np.nan
         out["nhl_uncertainty_samples"] = np.nan
+        out["nhl_min_edge_cap_used"] = np.nan
+        out["nhl_anchor_w_used"] = np.nan
+        out["nhl_low_unc_applied"] = np.nan
+        out["nhl_goalie_unconf_edge_add"] = np.nan
+        out["effective_uncertainty"] = np.nan
 
     decisions = [
         decide_bet_from_row(
@@ -1733,6 +1825,16 @@ def add_betting_outputs(
     out["edge_prob_raw"] = [d.edge_prob_raw for d in decisions]
     out["edge_prob_cal"] = [d.edge_prob_cal for d in decisions]
     out["edge_prob_final"] = [d.edge_prob_final for d in decisions]
+    out["edge_shrink_factor"] = [
+        (float(fp) / float(fr))
+        if fp is not None
+        and fr is not None
+        and np.isfinite(fp)
+        and np.isfinite(fr)
+        and abs(float(fr)) > 1e-9
+        else np.nan
+        for fp, fr in zip(out["edge_prob_final"], out["edge_prob_raw"])
+    ]
     out["stake_dollars"] = out["units"] * out["unit_dollars"]
 
     return out
