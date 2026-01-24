@@ -217,7 +217,14 @@ def _dynamic_min_edge(sport: str, base_min_edge: float, config: SportBetConfig) 
         )
         mult = float(config.uncertainty_edge_mult)
         min_edge = float(base_min_edge) + float(mult) * float(effective_uncertainty)
-        cap = float(os.getenv("NHL_DYNAMIC_MIN_EDGE_CAP", "0.055"))
+        cap_env = os.getenv("NHL_DYNAMIC_MIN_EDGE_CAP")
+        if cap_env is not None and str(cap_env).strip() != "":
+            try:
+                cap = float(cap_env)
+            except Exception:
+                cap = float(base_min_edge) + 0.025
+        else:
+            cap = float(base_min_edge) + 0.025
         if cap > 0:
             min_edge = min(float(min_edge), cap)
         return float(max(0.0, float(min_edge)))
@@ -246,10 +253,29 @@ def _dynamic_anchor_weight(sport: str, base_weight: float, config: SportBetConfi
             config, use_floor=False
         )
         mult = float(config.uncertainty_anchor_mult)
-        return float(max(0.0, min(1.0, float(base_weight) + float(mult) * float(effective_uncertainty))))
+        cap_add = float(os.getenv("NHL_ANCHOR_CAP_ADD", "0.08"))
+        adjusted = float(base_weight) + float(mult) * float(effective_uncertainty)
+        if cap_add > 0:
+            adjusted = min(adjusted, float(base_weight) + float(cap_add))
+        return float(max(0.0, min(1.0, adjusted)))
     uncertainty = _uncertainty_value(sport)
     mult = float(config.uncertainty_anchor_mult)
     return float(max(0.0, min(1.0, float(base_weight) + float(mult) * float(uncertainty))))
+
+
+def _goalie_unconfirmed(
+    goalie_status: Optional[str],
+    home_status: Optional[str],
+    away_status: Optional[str],
+) -> bool:
+    status = str(goalie_status or "").upper().strip()
+    home_status = str(home_status or "").upper().strip()
+    away_status = str(away_status or "").upper().strip()
+    if home_status or away_status:
+        return home_status != "CONFIRMED" or away_status != "CONFIRMED"
+    if status:
+        return status != "OK"
+    return False
 
 
 def _ml_calibration_samples(sport: str) -> Optional[int]:
@@ -724,15 +750,8 @@ def _apply_goalie_shift(
 ) -> float:
     if shift is None or not np.isfinite(shift) or not np.isfinite(p_final):
         return p_final
-    weight = 1.0
-    status = str(goalie_status or "").upper().strip()
-    if status and status != "OK":
-        weight = float(os.getenv("NHL_GOALIE_UNCONFIRMED_MULT", "0.60"))
-    if home_status or away_status:
-        hs = str(home_status or "").upper()
-        aw = str(away_status or "").upper()
-        if hs != "CONFIRMED" or aw != "CONFIRMED":
-            weight = float(os.getenv("NHL_GOALIE_UNCONFIRMED_MULT", "0.60"))
+    unconfirmed = _goalie_unconfirmed(goalie_status, home_status, away_status)
+    weight = 0.5 if unconfirmed else 1.0
     adj_shift = float(shift) * float(weight)
     return float(max(0.01, min(0.99, p_final + adj_shift)))
 
@@ -940,6 +959,12 @@ def primary_metrics_for_row(
             )
         if sport.lower() == "nhl":
             goalie_shift = safe_float(row.get("goalie_prob_shift"))
+            if _goalie_unconfirmed(
+                row.get("goalie_status"),
+                row.get("goalie_home_status"),
+                row.get("goalie_away_status"),
+            ):
+                flags.append("GOALIE_UNCONFIRMED")
             if np.isfinite(p_model_final):
                 p_model_final = _apply_goalie_shift(
                     p_model_final,
