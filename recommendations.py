@@ -13,6 +13,7 @@ from sports.common.bet_rules import (
     _to_float,
     breakeven_prob_from_american,
     ev_per_dollar,
+    normalize_decision_flags,
     primary_metrics_for_row,
 )
 from sports.common.bet_config import get_sport_bet_config
@@ -426,7 +427,10 @@ def add_recommendations_to_df(
 
     for i in out.index:
         row = out.loc[i]
-        flags: List[str] = [f for f in str(row.get("decision_flags", "")).split(",") if f]
+        flags = [f for f in normalize_decision_flags(row.get("decision_flags", "")).split(",") if f]
+        market_type = str(row.get("market_type", "")).lower().strip()
+        allow_ats_flags = market_type in ("", "spread", "ats")
+        allow_total_flags = market_type in ("", "total", "totals")
 
         # ML EV (NFL/NBA/NHL): use model_home_prob + odds
         p_home = _to_float(
@@ -457,15 +461,16 @@ def add_recommendations_to_df(
         if bool(row.get("ats_gated", False)) or ats_calibrator_missing:
             ats_ev = np.nan
             ats_side = ""
-            if "ATS_GATED_INVALID_SPREAD" not in flags:
-                flags.append("ATS_GATED_INVALID_SPREAD")
-            out.loc[i, "decision_reason"] = (
-                f"{out.loc[i, 'decision_reason']} | ATS_GATED_INVALID_SPREAD"
-                if str(out.loc[i, "decision_reason"]).strip()
-                else "ATS_GATED_INVALID_SPREAD"
-            )
-            if ats_calibrator_missing and "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
-                flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
+            if allow_ats_flags:
+                if "ATS_GATED_INVALID_SPREAD" not in flags:
+                    flags.append("ATS_GATED_INVALID_SPREAD")
+                out.loc[i, "decision_reason"] = (
+                    f"{out.loc[i, 'decision_reason']} | ATS_GATED_INVALID_SPREAD"
+                    if str(out.loc[i, "decision_reason"]).strip()
+                    else "ATS_GATED_INVALID_SPREAD"
+                )
+                if ats_calibrator_missing and "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
+                    flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
         else:
             ats_ev_home = ev_per_dollar(p_home_cover, ats_price)
             ats_ev_away = ev_per_dollar(p_away_cover, ats_price)
@@ -485,15 +490,16 @@ def add_recommendations_to_df(
         if not ats_calibrated:
             ats_ev = np.nan
             ats_side = ""
-            if "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
-                flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
-            out.loc[i, "decision_reason"] = (
-                f"{out.loc[i, 'decision_reason']} | ATS_GATED_UNCALIBRATED_MARGIN"
-                if str(out.loc[i, "decision_reason"]).strip()
-                else "ATS_GATED_UNCALIBRATED_MARGIN"
-            )
-            if "ATS_UNCALIBRATED_MARGIN" not in flags:
-                flags.append("ATS_UNCALIBRATED_MARGIN")
+            if allow_ats_flags:
+                if "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
+                    flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
+                out.loc[i, "decision_reason"] = (
+                    f"{out.loc[i, 'decision_reason']} | ATS_GATED_UNCALIBRATED_MARGIN"
+                    if str(out.loc[i, "decision_reason"]).strip()
+                    else "ATS_GATED_UNCALIBRATED_MARGIN"
+                )
+                if "ATS_UNCALIBRATED_MARGIN" not in flags:
+                    flags.append("ATS_UNCALIBRATED_MARGIN")
 
         # TOTAL EV: compute probability of OVER/UNDER with fallbacks
         p_over = np.nan
@@ -522,21 +528,22 @@ def add_recommendations_to_df(
             total_ev = np.nan
             total_side = ""
             total_flag = "TOTAL_GATED_LOW_QUALITY"
-            if "total_decision_flags" in out.columns:
-                existing_total_flags = str(out.loc[i, "total_decision_flags"] or "")
-                if total_flag not in existing_total_flags:
-                    out.loc[i, "total_decision_flags"] = (
-                        f"{existing_total_flags},{total_flag}".strip(",")
-                        if existing_total_flags.strip()
-                        else total_flag
+            if allow_total_flags:
+                if "total_decision_flags" in out.columns:
+                    existing_total_flags = normalize_decision_flags(
+                        out.loc[i, "total_decision_flags"] or ""
                     )
-            if total_flag not in flags:
-                flags.append(total_flag)
-            out.loc[i, "decision_reason"] = (
-                f"{out.loc[i, 'decision_reason']} | {total_flag}"
-                if str(out.loc[i, "decision_reason"]).strip()
-                else total_flag
-            )
+                    if total_flag not in existing_total_flags:
+                        out.loc[i, "total_decision_flags"] = normalize_decision_flags(
+                            [existing_total_flags, total_flag]
+                        )
+                if total_flag not in flags:
+                    flags.append(total_flag)
+                out.loc[i, "decision_reason"] = (
+                    f"{out.loc[i, 'decision_reason']} | {total_flag}"
+                    if str(out.loc[i, "decision_reason"]).strip()
+                    else total_flag
+                )
 
         out.loc[i, "ml_ev_best"] = ml_ev
         out.loc[i, "ml_ev_side"] = ml_side
@@ -544,7 +551,7 @@ def add_recommendations_to_df(
         out.loc[i, "ats_ev_side"] = ats_side
         out.loc[i, "total_ev_best"] = total_ev
         out.loc[i, "total_ev_side"] = total_side
-        out.loc[i, "decision_flags"] = ",".join(flags)
+        out.loc[i, "decision_flags"] = normalize_decision_flags(flags)
 
         # Save best score (used for filtering)
         ev_options = [v for v in [ml_ev, ats_ev, total_ev] if np.isfinite(v)]

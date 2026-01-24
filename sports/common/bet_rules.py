@@ -62,6 +62,34 @@ def _to_float(x):
         return np.nan
 
 
+def normalize_decision_flags(flags: object) -> str:
+    if flags is None:
+        return ""
+    if isinstance(flags, str):
+        parts = flags.split(",")
+    elif isinstance(flags, (list, tuple, set)):
+        parts = []
+        for item in flags:
+            if item is None:
+                continue
+            if isinstance(item, str):
+                parts.extend(item.split(","))
+            else:
+                parts.append(str(item))
+    else:
+        parts = [str(flags)]
+
+    cleaned: List[str] = []
+    seen = set()
+    for part in parts:
+        item = str(part).strip()
+        if not item or item in seen:
+            continue
+        cleaned.append(item)
+        seen.add(item)
+    return ",".join(cleaned)
+
+
 _UNCERTAINTY_CACHE: Dict[str, Dict[str, float]] = {}
 
 
@@ -1013,7 +1041,7 @@ def primary_metrics_for_row(
 
     extra_edge = 0.0
     decision_flags = [f for f in flags]
-    existing_flags = str(row.get("decision_flags") or "")
+    existing_flags = normalize_decision_flags(row.get("decision_flags") or "")
     if "UNCALIBRATED_FALLBACK" in existing_flags and "UNCALIBRATED_FALLBACK" not in decision_flags:
         decision_flags.append("UNCALIBRATED_FALLBACK")
     if "UNCALIBRATED_FALLBACK" in decision_flags:
@@ -1036,7 +1064,7 @@ def primary_metrics_for_row(
         value_tier,
         primary_price,
         data_reason,
-        ",".join(decision_flags),
+        normalize_decision_flags(decision_flags),
         primary_ev,
         float(min_edge_dynamic),
         float(min_edge_dynamic),
