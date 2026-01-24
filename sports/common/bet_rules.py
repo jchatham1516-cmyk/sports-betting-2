@@ -11,7 +11,7 @@ import pandas as pd
 
 from sports.common.bankroll import bet_size_kelly_ml
 from sports.common.bet_config import SportBetConfig, get_sport_bet_config
-from sports.common.prob_calibration import calibrate_prob
+from sports.common.prob_calibration import calibrate_prob, load_calibrator
 from sports.common.prob_uncertainty import load_uncertainty
 from sports.common.util import safe_float
 
@@ -91,10 +91,12 @@ _NHL_SAMPLE_CACHE_CHECKED = False
 
 
 def _uncertainty_for_threshold(sport: str, config: SportBetConfig) -> float:
-    uncertainty = _uncertainty_value(sport)
-    if not np.isfinite(uncertainty) or float(uncertainty) <= 0.0:
-        uncertainty = float(config.uncertainty_floor)
-    return float(uncertainty)
+    effective_uncertainty, _sample_size, _raw_uncertainty = _effective_uncertainty(
+        sport, config, use_floor=True
+    )
+    if not np.isfinite(effective_uncertainty) or float(effective_uncertainty) <= 0.0:
+        return float(config.uncertainty_floor)
+    return float(effective_uncertainty)
 
 
 def _log_uncertainty_once(
@@ -129,6 +131,26 @@ def _uncertainty_samples_from_data(data: Optional[Dict[str, float]]) -> Optional
         if val is not None and np.isfinite(val) and val > 0:
             return int(val)
     return None
+
+
+def _effective_uncertainty(
+    sport: str,
+    config: SportBetConfig,
+    *,
+    use_floor: bool,
+) -> Tuple[float, Optional[int], float]:
+    raw_uncertainty = _uncertainty_value(sport)
+    if (not np.isfinite(raw_uncertainty) or raw_uncertainty <= 0.0) and use_floor:
+        raw_uncertainty = float(config.uncertainty_floor)
+
+    data = _load_uncertainty_data(sport)
+    sample_size = _uncertainty_samples_from_data(data)
+    sample_size_for_scaling = sample_size if sample_size is not None else 20
+    effective_uncertainty = float(raw_uncertainty)
+    if sample_size_for_scaling < 50:
+        scale = max(float(sample_size_for_scaling), 20.0) / 50.0
+        effective_uncertainty = float(raw_uncertainty) * float(scale)
+    return float(effective_uncertainty), sample_size, float(raw_uncertainty)
 
 
 def _read_nhl_samples_from_bet_log() -> Optional[int]:
@@ -175,7 +197,7 @@ def _nhl_uncertainty_context(config: SportBetConfig, *, use_floor: bool) -> Tupl
     sample_size_for_scaling = sample_size if sample_size is not None else 20
     effective_uncertainty = float(raw_uncertainty)
     if sample_size_for_scaling < 50:
-        scale = max(float(sample_size_for_scaling), 10.0) / 50.0
+        scale = max(float(sample_size_for_scaling), 20.0) / 50.0
         effective_uncertainty = float(raw_uncertainty) * float(scale)
     return float(effective_uncertainty), int(sample_size_for_scaling), float(raw_uncertainty)
 
@@ -199,10 +221,23 @@ def _dynamic_min_edge(sport: str, base_min_edge: float, config: SportBetConfig) 
         if cap > 0:
             min_edge = min(float(min_edge), cap)
         return float(max(0.0, float(min_edge)))
-    uncertainty = _uncertainty_for_threshold(sport, config)
-    _log_uncertainty_once(sport, uncertainty, base_min_edge, config)
+    effective_uncertainty, sample_size, raw_uncertainty = _effective_uncertainty(
+        sport, config, use_floor=True
+    )
+    _log_uncertainty_once(
+        sport,
+        raw_uncertainty,
+        base_min_edge,
+        config,
+        effective_uncertainty=effective_uncertainty,
+        sample_size=sample_size,
+    )
     mult = float(config.uncertainty_edge_mult)
-    return float(max(0.0, float(base_min_edge) + float(mult) * float(uncertainty)))
+    min_edge = float(base_min_edge) + float(mult) * float(effective_uncertainty)
+    cap_add = float(config.uncertainty_edge_cap_add)
+    if cap_add > 0:
+        min_edge = min(float(min_edge), float(base_min_edge) + float(cap_add))
+    return float(max(0.0, float(min_edge)))
 
 
 def _dynamic_anchor_weight(sport: str, base_weight: float, config: SportBetConfig) -> float:
@@ -803,6 +838,9 @@ def primary_metrics_for_row(
     p_model_raw_val = float(p_model_raw) if p_model_raw is not None and np.isfinite(p_model_raw) else float("nan")
     p_market_val = float(p_market) if p_market is not None and np.isfinite(p_market) else float("nan")
 
+    calibrator_missing = False
+    if str(primary_market).upper() == "ML":
+        calibrator_missing = load_calibrator(sport) is None
     p_model_cal = calibrate_prob(sport, p_model_raw_val, market_type=primary_market)
     if not np.isfinite(p_model_cal):
         p_model_cal = p_model_raw_val
@@ -837,7 +875,7 @@ def primary_metrics_for_row(
         p_model_cal = _side_prob(model_cal_home)
         p_model_final = _side_prob(model_final_home)
 
-        uncalibrated = not np.isfinite(p_model_cal) or not np.isfinite(p_model_final)
+        uncalibrated = not np.isfinite(p_model_cal) or not np.isfinite(p_model_final) or calibrator_missing
 
         if not np.isfinite(p_model_cal):
             p_model_cal = calibrate_prob(sport, p_model_raw_val, market_type=primary_market)
@@ -1029,10 +1067,8 @@ def decide_bet_from_row(
         min_primary_edge_abs_used,
     ) = primary_metrics_for_row(row, sport=sport, settings=settings)
 
-    if (
-        str(sport).lower() == "nba"
-        and primary_market == "ATS"
-        and "ATS_UNCALIBRATED_MARGIN" in flags
+    if primary_market == "ATS" and (
+        "ATS_UNCALIBRATED_MARGIN" in flags or "ATS_GATED_UNCALIBRATED_MARGIN" in flags
     ):
         decision = DecisionOutcome(
             "PASS",

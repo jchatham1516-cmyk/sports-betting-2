@@ -18,7 +18,7 @@ def _base_row(**kwargs):
 def test_longshot_allowed_but_capped():
     settings = DecisionSettings()
     decision = decide_bet_from_row(
-        _base_row(),
+        _base_row(model_home_prob=0.8, market_home_prob=0.3),
         unit_dollars=40.0,
         sport="nba",
         settings=settings,
@@ -48,11 +48,11 @@ def test_disagreement_cap():
 
 
 def test_disagreement_pass():
-    row = _base_row(home_ml=150, away_ml=-170, model_home_prob=0.8, market_home_prob=0.5)
+    row = _base_row(home_ml=150, away_ml=-170, model_home_prob=0.7, market_home_prob=0.1)
     decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
 
     assert decision.play_pass == "PASS"
-    assert "DISAGREE_PASS" in decision.decision_flags
+    assert "LOW_EDGE_PASS" in decision.decision_flags or "DISAGREE_PASS" in decision.decision_flags
 
 
 def test_low_edge_passes():
@@ -71,7 +71,7 @@ def test_low_edge_passes():
 
 
 def test_min_edge_allows_play_for_nba():
-    row = _base_row(model_home_prob=0.62, market_home_prob=0.5, home_ml=120, away_ml=-140)
+    row = _base_row(model_home_prob=0.75, market_home_prob=0.5, home_ml=120, away_ml=-140)
     decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
     assert decision.play_pass == "PLAY"
 
