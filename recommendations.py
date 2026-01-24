@@ -13,6 +13,9 @@ from sports.common.bet_rules import (
     _to_float,
     breakeven_prob_from_american,
     ev_per_dollar,
+    nhl_anchor_context_for_row,
+    nhl_goalie_unconfirmed_edge_add,
+    nhl_min_edge_cap_value,
     normalize_decision_flags,
     primary_metrics_for_row,
 )
@@ -623,6 +626,15 @@ def add_recommendations_to_df(
     out["edge_prob_final"] = [m[8] for m in metrics]
     out["abs_edge_prob"] = out["edge_prob_final"].abs()
 
+    def _safe_div(numerator: float, denominator: float) -> float:
+        if numerator is None or denominator is None:
+            return float("nan")
+        if not np.isfinite(numerator) or not np.isfinite(denominator):
+            return float("nan")
+        if abs(float(denominator)) < 1e-9:
+            return float("nan")
+        return float(numerator) / float(denominator)
+
     # why_bet quick explainer
     out["why_bet"] = out.get("why_bet", "")
     for i in out.index:
@@ -641,6 +653,27 @@ def add_recommendations_to_df(
             )
             + (f" | TOTAL edge_vs_be={_fmt(tev)}" if not pd.isna(tev) else "")
         )
+
+    if str(sport).lower() == "nhl":
+        config = get_sport_bet_config("nhl")
+        anchor_contexts = [nhl_anchor_context_for_row(r, config) for _, r in out.iterrows()]
+        out["nhl_min_edge_cap_used"] = nhl_min_edge_cap_value()
+        out["nhl_anchor_w_used"] = [ctx.anchor_weight for ctx in anchor_contexts]
+        out["nhl_low_unc_applied"] = [ctx.low_unc_applied for ctx in anchor_contexts]
+        out["nhl_goalie_unconf_edge_add"] = [
+            nhl_goalie_unconfirmed_edge_add(ctx.goalie_confirmed) for ctx in anchor_contexts
+        ]
+        out["effective_uncertainty"] = [ctx.effective_uncertainty for ctx in anchor_contexts]
+        out["edge_shrink_factor"] = [
+            _safe_div(out.loc[i, "edge_prob_final"], out.loc[i, "edge_prob_raw"]) for i in out.index
+        ]
+    else:
+        out["nhl_min_edge_cap_used"] = np.nan
+        out["nhl_anchor_w_used"] = np.nan
+        out["nhl_low_unc_applied"] = np.nan
+        out["nhl_goalie_unconf_edge_add"] = np.nan
+        out["effective_uncertainty"] = np.nan
+        out["edge_shrink_factor"] = np.nan
 
     debug_df = pd.DataFrame()
     return out, debug_df

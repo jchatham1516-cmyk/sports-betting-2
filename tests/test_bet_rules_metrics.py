@@ -142,3 +142,79 @@ def test_nhl_min_edge_cap_applied(monkeypatch):
     metrics = primary_metrics_for_row(row, sport="nhl")
     assert metrics[16] <= 0.02
     assert metrics[17] <= 0.02
+
+
+def test_nhl_min_edge_cap(monkeypatch):
+    monkeypatch.setenv("NHL_MIN_EDGE_CAP", "0.055")
+    monkeypatch.setenv("NHL_DYNAMIC_MIN_EDGE_CAP", "1.0")
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK: HOME ML",
+            "home_ml": -120,
+            "away_ml": 110,
+            "model_home_prob": 0.6,
+            "model_home_prob_final": 0.6,
+            "market_home_prob": 0.5,
+            "goalie_confirmed": True,
+            "goalie_status": "OK",
+            "goalie_home_status": "CONFIRMED",
+            "goalie_away_status": "CONFIRMED",
+        }
+    )
+    metrics = primary_metrics_for_row(row, sport="nhl")
+    assert metrics[16] <= 0.055
+    assert metrics[17] <= 0.055
+
+
+def test_low_unc_reduces_anchor(monkeypatch):
+    config = get_sport_bet_config("nhl")
+    monkeypatch.setenv("NHL_ANCHOR_W", "0.50")
+    monkeypatch.setenv("NHL_ANCHOR_W_UNCONFIRMED", "0.50")
+    monkeypatch.setenv("NHL_LOW_UNC_THRESHOLD", "0.01")
+    monkeypatch.setenv("NHL_LOW_UNC_ANCHOR_MULT", "0.85")
+
+    def _low_unc(_config, *, use_floor):
+        return 0.005, None, 0.005
+
+    def _high_unc(_config, *, use_floor):
+        return 0.02, None, 0.02
+
+    row = pd.Series({"goalie_confirmed": True})
+
+    monkeypatch.setattr(bet_rules, "_nhl_uncertainty_context", _low_unc)
+    low_anchor = bet_rules.nhl_anchor_context_for_row(row, config).anchor_weight
+
+    monkeypatch.setattr(bet_rules, "_nhl_uncertainty_context", _high_unc)
+    high_anchor = bet_rules.nhl_anchor_context_for_row(row, config).anchor_weight
+
+    assert low_anchor < high_anchor
+
+
+def test_goalie_unconfirmed_single_penalty(monkeypatch):
+    monkeypatch.setenv("NHL_GOALIE_UNCONF_EDGE_ADD", "0.01")
+    monkeypatch.setenv("NHL_MIN_EDGE_CAP", "1.0")
+    monkeypatch.setenv("NHL_ANCHOR_W", "0.50")
+    monkeypatch.setenv("NHL_ANCHOR_W_UNCONFIRMED", "0.50")
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK: HOME ML",
+            "home_ml": -120,
+            "away_ml": 110,
+            "model_home_prob": 0.6,
+            "model_home_prob_final": 0.6,
+            "market_home_prob": 0.5,
+            "goalie_status": "PROJECTED",
+            "goalie_home_status": "PROJECTED",
+            "goalie_away_status": "CONFIRMED",
+        }
+    )
+    confirmed = row.copy()
+    confirmed["goalie_confirmed"] = True
+    unconfirmed = row.copy()
+    unconfirmed["goalie_confirmed"] = False
+
+    metrics_confirmed = primary_metrics_for_row(confirmed, sport="nhl")
+    metrics_unconfirmed = primary_metrics_for_row(unconfirmed, sport="nhl")
+    assert "GOALIE_UNCONFIRMED" in metrics_unconfirmed[14]
+    diff = float(metrics_unconfirmed[16]) - float(metrics_confirmed[16])
+    assert abs(diff - 0.01) < 1e-6
