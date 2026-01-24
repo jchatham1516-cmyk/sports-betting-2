@@ -74,7 +74,8 @@ NHL_GOALIE_WEIGHT = float(os.getenv("NHL_GOALIE_WEIGHT", "1.0"))
 NHL_GOALIE_MAX_PROB_SHIFT = float(os.getenv("NHL_GOALIE_MAX_PROB_SHIFT", "0.03"))
 NHL_GOALIE_UNKNOWN_PENALTY = float(os.getenv("NHL_GOALIE_UNKNOWN_PENALTY", "0.01"))
 GOALIE_PROB_WEIGHT = float(os.getenv("NHL_GOALIE_PROB_WEIGHT", "0.02"))
-MAX_GOALIE_SHIFT = float(os.getenv("NHL_MAX_GOALIE_SHIFT", "0.03"))
+MAX_GOALIE_SHIFT = float(os.getenv("NHL_MAX_GOALIE_SHIFT", "0.035"))
+GOALIE_SHIFT_CAP = 0.035
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -538,7 +539,7 @@ def _compute_goalie_adjustment(
     goalie_home_status: str,
     goalie_away_status: str,
     season_label: str,
-) -> tuple[float, float, float, float, float, str, str, float, bool, bool]:
+) -> tuple[float, float, float, float, float, str, str, float, bool, bool, bool]:
     goalie_home_rating = NHL_LEAGUE_AVG_GOALIE_RATING
     goalie_away_rating = NHL_LEAGUE_AVG_GOALIE_RATING
     goalie_rating_diff = 0.0
@@ -555,6 +556,7 @@ def _compute_goalie_adjustment(
         conf_w = float(status_w_home * status_w_away)
     else:
         conf_w = 0.5
+    goalie_confirmed = goalie_home_status == "CONFIRMED" and goalie_away_status == "CONFIRMED"
     if goalie_home_name:
         goalie_home_rating, home_found, _ = get_goalie_rating_with_meta(goalie_home_name, season_label)
     if goalie_away_name:
@@ -572,6 +574,7 @@ def _compute_goalie_adjustment(
             conf_w,
             home_found,
             away_found,
+            goalie_confirmed,
         )
 
     partial_found = home_found ^ away_found
@@ -596,7 +599,10 @@ def _compute_goalie_adjustment(
     partial_factor = 0.65 if partial_found else 1.0
     confidence_weight = conf_w * partial_factor
     raw_shift = GOALIE_PROB_WEIGHT * goalie_rating_diff * confidence_weight
-    base_shift = _clamp(raw_shift, -MAX_GOALIE_SHIFT, MAX_GOALIE_SHIFT)
+    cap = min(float(MAX_GOALIE_SHIFT), float(GOALIE_SHIFT_CAP))
+    base_shift = _clamp(raw_shift, -cap, cap)
+    if not goalie_confirmed:
+        base_shift = float(base_shift) * 0.5
     goalie_prob_shift = base_shift
     goalie_adj = float(abs(goalie_prob_shift))
     if goalie_home_name and goalie_away_name and os.getenv("NHL_GOALIES_DEBUG") == "1":
@@ -621,6 +627,7 @@ def _compute_goalie_adjustment(
         confidence_weight,
         home_found,
         away_found,
+        goalie_confirmed,
     )
 
 
@@ -820,6 +827,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             goalie_confidence_weight,
             goalie_home_found,
             goalie_away_found,
+            goalie_confirmed,
         ) = _compute_goalie_adjustment(
             goalie_home_name=goalie_home_name,
             goalie_away_name=goalie_away_name,
@@ -1006,6 +1014,13 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
             total_flags.append("TOTAL_EDGE_TOO_SMALL")
             total_recommendation = "No total bet (edge too small)"
 
+        goalie_source = "|".join(
+            [
+                f"home:{goalie_home_info.source or 'unknown'}",
+                f"away:{goalie_away_info.source or 'unknown'}",
+            ]
+        )
+
         rows.append(
             {
                 "date": game_date_str,
@@ -1014,6 +1029,7 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "model_home_prob": float(p_home),
                 "model_home_prob_raw": float(p_raw),
                 "goalie_adj": float(goalie_adj),
+                "goalie_adj_prob": float(goalie_prob_shift),
                 "goalie_status": goalie_status,
                 "goalie_home_status": goalie_home_status,
                 "goalie_away_status": goalie_away_status,
@@ -1021,6 +1037,8 @@ def run_daily_nhl(game_date_str: str, *, odds_dict: dict) -> pd.DataFrame:
                 "goalie_away_name": goalie_away_name,
                 "goalie_home_found": bool(goalie_home_found),
                 "goalie_away_found": bool(goalie_away_found),
+                "goalie_confirmed": bool(goalie_confirmed),
+                "goalie_source": goalie_source,
                 "goalie_confidence_weight": float(goalie_confidence_weight),
                 "goalie_home_rating": float(goalie_home_rating),
                 "goalie_away_rating": float(goalie_away_rating),

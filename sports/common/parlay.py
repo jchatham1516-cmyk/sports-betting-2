@@ -140,6 +140,8 @@ def build_weekly_parlay(
         "low_edge": 0,
         "uncalibrated": 0,
         "disagreement": 0,
+        "missing_model": 0,
+        "goalie_unconfirmed": 0,
     }
 
     legs: List[ParlayLeg] = []
@@ -147,7 +149,14 @@ def build_weekly_parlay(
         sport = str(row.get("sport", row.get("league", ""))).lower()
         config = get_sport_bet_config(sport)
         edge_prob = _safe_float(row.get("edge_prob_final"))
-        if not np.isfinite(edge_prob) or edge_prob < float(config.parlay_min_edge):
+        if sport == "nhl":
+            nhl_min_edge = config.nhl_parlay_min_edge
+            if nhl_min_edge is None:
+                nhl_min_edge = config.parlay_min_edge
+            min_edge = float(nhl_min_edge)
+        else:
+            min_edge = float(config.parlay_min_edge)
+        if not np.isfinite(edge_prob) or edge_prob < float(min_edge):
             filtered_counts["low_edge"] += 1
             continue
 
@@ -162,6 +171,16 @@ def build_weekly_parlay(
         if disagreement > float(config.parlay_disagree_cap) and edge_prob < float(config.parlay_disagree_huge_edge):
             filtered_counts["disagreement"] += 1
             continue
+
+        if sport == "nhl":
+            p_model_final = _safe_float(row.get("p_model_final"))
+            if not np.isfinite(p_model_final):
+                filtered_counts["missing_model"] += 1
+                continue
+            flags = str(row.get("decision_flags") or "")
+            if "GOALIE_UNCONFIRMED" in flags and edge_prob < float(config.parlay_disagree_huge_edge):
+                filtered_counts["goalie_unconfirmed"] += 1
+                continue
 
         market = _market_from_row(row)
         side = str(row.get("primary_side", "")).upper()

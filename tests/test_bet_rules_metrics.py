@@ -1,5 +1,7 @@
 import pandas as pd
 
+from sports.common.bet_config import get_sport_bet_config
+from sports.common import bet_rules
 from sports.common.bet_rules import (
     breakeven_prob_from_american,
     implied_prob_american,
@@ -81,3 +83,41 @@ def test_confidence_from_edge_prob():
     assert confidence_tier_from_edge(0.06, 0.03) == "HIGH"
     assert confidence_tier_from_edge(0.04, 0.03) == "MEDIUM"
     assert confidence_tier_from_edge(0.01, 0.03) == "LOW"
+
+
+def test_nhl_uncertainty_scaling_reduces_min_edge(monkeypatch):
+    config = get_sport_bet_config("nhl")
+    monkeypatch.setenv("NHL_DYNAMIC_MIN_EDGE_CAP", "0.2")
+    sample = {"uncertainty": 0.12, "n": 20}
+
+    def _mock_uncertainty(_sport):
+        return dict(sample)
+
+    monkeypatch.setattr(bet_rules, "load_uncertainty", _mock_uncertainty)
+    bet_rules._UNCERTAINTY_CACHE.clear()
+    min_edge_small = bet_rules._dynamic_min_edge("nhl", config.min_edge_cal, config)
+
+    sample["n"] = 60
+    bet_rules._UNCERTAINTY_CACHE.clear()
+    min_edge_large = bet_rules._dynamic_min_edge("nhl", config.min_edge_cal, config)
+
+    assert min_edge_small < min_edge_large
+
+
+def test_goalie_unconfirmed_flag_added_to_decisions():
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK: HOME ML",
+            "home_ml": -120,
+            "away_ml": 110,
+            "model_home_prob": 0.55,
+            "market_home_prob": 0.5,
+            "model_home_prob_final": 0.55,
+            "goalie_status": "PARTIAL",
+            "goalie_home_status": "PROJECTED",
+            "goalie_away_status": "CONFIRMED",
+        }
+    )
+    metrics = primary_metrics_for_row(row, sport="nhl")
+    flags = metrics[14]
+    assert "GOALIE_UNCONFIRMED" in flags

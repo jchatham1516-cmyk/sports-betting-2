@@ -31,6 +31,7 @@ class SportBetConfig:
     parlay_min_edge: float = 0.045
     parlay_disagree_cap: float = 0.20
     parlay_disagree_huge_edge: float = 0.12
+    nhl_parlay_min_edge: float | None = None
 
 
 SPORT_BET_CONFIGS = {
@@ -53,6 +54,7 @@ SPORT_BET_CONFIGS = {
         parlay_min_edge=float(os.getenv("NBA_PARLAY_MIN_EDGE", "0.055")),
         parlay_disagree_cap=float(os.getenv("NBA_PARLAY_DISAGREE_CAP", "0.20")),
         parlay_disagree_huge_edge=float(os.getenv("NBA_PARLAY_HUGE_EDGE", "0.12")),
+        nhl_parlay_min_edge=None,
     ),
     "nfl": SportBetConfig(
         min_edge_cal=0.04,
@@ -73,6 +75,7 @@ SPORT_BET_CONFIGS = {
         parlay_min_edge=float(os.getenv("NFL_PARLAY_MIN_EDGE", "0.05")),
         parlay_disagree_cap=float(os.getenv("NFL_PARLAY_DISAGREE_CAP", "0.20")),
         parlay_disagree_huge_edge=float(os.getenv("NFL_PARLAY_HUGE_EDGE", "0.12")),
+        nhl_parlay_min_edge=None,
     ),
     "nhl": SportBetConfig(
         min_edge_cal=float(os.getenv("NHL_MIN_EDGE_CAL", "0.04")),
@@ -93,6 +96,7 @@ SPORT_BET_CONFIGS = {
         parlay_min_edge=float(os.getenv("NHL_PARLAY_MIN_EDGE", "0.045")),
         parlay_disagree_cap=float(os.getenv("NHL_PARLAY_DISAGREE_CAP", "0.18")),
         parlay_disagree_huge_edge=float(os.getenv("NHL_PARLAY_HUGE_EDGE", "0.1")),
+        nhl_parlay_min_edge=float(os.getenv("NHL_PARLAY_MIN_EDGE", "0.045")),
     ),
 }
 

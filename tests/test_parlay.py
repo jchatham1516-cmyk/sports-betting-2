@@ -23,6 +23,26 @@ def _base_row(idx: int, *, home: str, away: str, edge: float = 0.06) -> dict:
     }
 
 
+def _nhl_row(*, home: str, away: str, edge: float, flags: str, p_model_final: float | None) -> dict:
+    return {
+        "sport": "nhl",
+        "play_pass": "PLAY",
+        "edge_prob_final": edge,
+        "decision_flags": flags,
+        "p_model_cal": 0.56,
+        "p_market": 0.48,
+        "p_model_final": p_model_final,
+        "primary_market": "ML",
+        "primary_side": "HOME",
+        "home": home,
+        "away": away,
+        "date": "2025-01-01",
+        "home_ml": -110,
+        "away_ml": 100,
+        "confidence": "HIGH",
+    }
+
+
 def test_weekly_parlay_refuses_under_min_legs():
     rows = [_base_row(i, home=f"Home{i}", away=f"Away{i}") for i in range(5)]
     df = pd.DataFrame(rows)
@@ -51,3 +71,30 @@ def test_parlay_builder_enforces_game_and_team_limits():
 
     teams = [leg["team"] for leg in legs]
     assert len(teams) == len(set(teams))
+
+
+def test_parlay_rejects_unconfirmed_goalie_without_huge_edge():
+    row = _nhl_row(
+        home="TeamA",
+        away="TeamB",
+        edge=0.06,
+        flags="GOALIE_UNCONFIRMED",
+        p_model_final=0.56,
+    )
+    df = pd.DataFrame([row])
+    result = build_weekly_parlay(df, min_legs=1, max_legs=1)
+    assert result["status"] == "NO_PARLAY_THIS_WEEK"
+    assert "goalie_unconfirmed=1" in result["reasons"]
+
+
+def test_parlay_allows_unconfirmed_goalie_with_huge_edge():
+    row = _nhl_row(
+        home="TeamC",
+        away="TeamD",
+        edge=0.15,
+        flags="GOALIE_UNCONFIRMED",
+        p_model_final=0.65,
+    )
+    df = pd.DataFrame([row])
+    result = build_weekly_parlay(df, min_legs=1, max_legs=1)
+    assert result["status"] == "PARLAY_READY"
