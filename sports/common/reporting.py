@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import os
 import math
-from typing import Dict, Optional
+import importlib.util
+from typing import Dict, Optional, Iterable, List
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ import pandas as pd
 from sports.common.teams import canon_team
 from sports.common.util import american_to_decimal, normalize_result_label
 from sports.common.bet_config import get_sport_bet_config
+from sports.common.prob_uncertainty import load_uncertainty
 
 
 ODDS_BUCKETS = [
@@ -404,3 +406,376 @@ def daily_bet_report(
         )
 
     return report
+
+
+def _get_tabulate():
+    if importlib.util.find_spec("tabulate") is None:
+        return None
+    import tabulate
+
+    return tabulate.tabulate
+
+
+def _fmt_float(value: object, decimals: int = 3) -> str:
+    try:
+        val = float(value)
+    except Exception:
+        return ""
+    if not np.isfinite(val):
+        return ""
+    return f"{val:.{decimals}f}"
+
+
+def _fmt_line(value: object) -> str:
+    try:
+        val = float(value)
+    except Exception:
+        return ""
+    if not np.isfinite(val):
+        return ""
+    if float(val).is_integer():
+        return f"{int(val)}"
+    return f"{val:.1f}"
+
+
+def _fmt_price(value: object) -> str:
+    try:
+        val = float(value)
+    except Exception:
+        return ""
+    if not np.isfinite(val):
+        return ""
+    return f"{val:+.0f}"
+
+
+def _confidence_score(value: object) -> float:
+    tier = str(value or "").upper().strip()
+    if "HIGH" in tier:
+        return 3.0
+    if "MED" in tier:
+        return 2.0
+    if "LOW" in tier:
+        return 1.0
+    return float("nan")
+
+
+def _norm_cdf(z: float) -> float:
+    return 0.5 * (1.0 + math.erf(float(z) / math.sqrt(2.0)))
+
+
+def _prob_for_total(row: pd.Series, side: str) -> float:
+    p_over = np.nan
+    total_sd = _safe_float(row.get("total_sd"))
+    model_total = _safe_float(row.get("model_total_final", row.get("model_total")))
+    total_points = _safe_float(row.get("total_points"))
+
+    if np.isfinite(total_sd) and total_sd > 1e-6 and np.isfinite(model_total) and np.isfinite(total_points):
+        z = (total_points - model_total) / total_sd
+        p_over = 1.0 - _norm_cdf(z)
+    else:
+        pick_side = str(row.get("total_pick_side", "")).upper().strip()
+        pick_prob = _safe_float(row.get("total_pick_prob"))
+        if np.isfinite(pick_prob):
+            if pick_side == "OVER":
+                p_over = pick_prob
+            elif pick_side == "UNDER":
+                p_over = 1.0 - pick_prob
+
+    if not np.isfinite(p_over):
+        return float("nan")
+
+    if side == "OVER":
+        return float(p_over)
+    if side == "UNDER":
+        return float(1.0 - p_over)
+    return float("nan")
+
+
+def build_display_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+
+    def _display_market(row: pd.Series) -> str:
+        market = str(row.get("primary_market", row.get("market_type", ""))).upper().strip()
+        if "SPREAD" in market:
+            market = "ATS"
+        if market in {"MONEYLINE", "ML"}:
+            return "ML"
+        if market in {"ATS", "SPREAD"}:
+            return "ATS"
+        if market in {"TOTAL", "TOTALS"}:
+            return "TOTAL"
+        return market
+
+    def _display_pick(row: pd.Series, market: str) -> str:
+        side = str(row.get("primary_side", "")).upper().strip()
+        if market == "ML":
+            price = row.get("primary_price")
+            if not np.isfinite(_safe_float(price)):
+                if side == "HOME":
+                    price = row.get("home_ml")
+                elif side == "AWAY":
+                    price = row.get("away_ml")
+            price_str = _fmt_price(price)
+            if price_str:
+                return f"{side} {price_str}"
+            return side
+        if market == "ATS":
+            line = row.get("home_spread")
+            line_val = _safe_float(line)
+            if np.isfinite(line_val) and side == "AWAY":
+                line_val = -line_val
+            line_str = _fmt_line(line_val)
+            price_str = _fmt_price(row.get("spread_price"))
+            if price_str:
+                return f"{side} {line_str} ({price_str})".strip()
+            if line_str:
+                return f"{side} {line_str}".strip()
+            return side
+        if market == "TOTAL":
+            line_str = _fmt_line(row.get("total_points"))
+            price = row.get("total_over_price") if side == "OVER" else row.get("total_under_price")
+            price_str = _fmt_price(price)
+            if price_str:
+                return f"{side} {line_str} ({price_str})".strip()
+            if line_str:
+                return f"{side} {line_str}".strip()
+            return side
+        return side
+
+    def _p_win_display(row: pd.Series, market: str) -> float:
+        side = str(row.get("primary_side", row.get("total_pick_side", ""))).upper().strip()
+        if market == "ML":
+            p_model_final = _safe_float(row.get("p_model_final"))
+            if np.isfinite(p_model_final):
+                return float(p_model_final)
+            p_model = _safe_float(row.get("model_prob"))
+            if np.isfinite(p_model):
+                return float(p_model)
+            p_home = _safe_float(row.get("model_home_prob_final", row.get("model_home_prob")))
+            if np.isfinite(p_home):
+                if side == "AWAY":
+                    return float(1.0 - p_home)
+                return float(p_home)
+            return float("nan")
+        if market == "ATS":
+            p_cover = _safe_float(row.get("p_cover_final"))
+            if not np.isfinite(p_cover):
+                p_cover = _safe_float(row.get("p_home_cover", row.get("ats_home_cover_prob")))
+            if not np.isfinite(p_cover):
+                return float("nan")
+            if side == "AWAY":
+                return float(1.0 - p_cover)
+            return float(p_cover)
+        if market == "TOTAL":
+            if side not in {"OVER", "UNDER"}:
+                return float("nan")
+            return _prob_for_total(row, side)
+        return float("nan")
+
+    def _edge_display(row: pd.Series) -> float:
+        edge = _safe_float(row.get("edge_prob_final"))
+        if np.isfinite(edge):
+            return float(edge)
+        edge = _safe_float(row.get("edge"))
+        if np.isfinite(edge):
+            return float(edge)
+        return float("nan")
+
+    def _reason_short(row: pd.Series) -> str:
+        reason = str(row.get("decision_reason", "") or "").replace("\n", " ").strip()
+        if len(reason) > 80:
+            return reason[:77] + "..."
+        return reason
+
+    out["display_market"] = out.apply(_display_market, axis=1)
+    out["display_pick"] = out.apply(lambda r: _display_pick(r, r["display_market"]), axis=1)
+    out["p_win_display"] = out.apply(lambda r: _p_win_display(r, r["display_market"]), axis=1)
+    out["edge_display"] = out.apply(_edge_display, axis=1)
+    out["reason_short"] = out.apply(_reason_short, axis=1)
+
+    return out
+
+
+def build_rankings(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    if "p_win_display" not in out.columns or "edge_display" not in out.columns:
+        out = build_display_columns(out)
+
+    out["_confidence_score"] = out["confidence"].apply(_confidence_score) if "confidence" in out.columns else np.nan
+    out["_p_win_display"] = out["p_win_display"].apply(_safe_float)
+    out["_edge_display"] = out["edge_display"].apply(_safe_float)
+    out["_primary_ev"] = out["primary_ev"].apply(_safe_float) if "primary_ev" in out.columns else np.nan
+    out["_abs_edge_prob"] = out["abs_edge_prob"].apply(_safe_float) if "abs_edge_prob" in out.columns else np.nan
+
+    accuracy_sorted = out.sort_values(
+        by=["_p_win_display", "_confidence_score", "_edge_display"],
+        ascending=[False, False, False],
+        kind="mergesort",
+        na_position="last",
+    )
+    value_sorted = out.sort_values(
+        by=["_primary_ev", "_abs_edge_prob", "_confidence_score"],
+        ascending=[False, False, False],
+        kind="mergesort",
+        na_position="last",
+    )
+
+    out["rank_accuracy"] = pd.Series(
+        range(1, len(accuracy_sorted) + 1), index=accuracy_sorted.index
+    ).reindex(out.index)
+    out["rank_value"] = pd.Series(
+        range(1, len(value_sorted) + 1), index=value_sorted.index
+    ).reindex(out.index)
+
+    out = out.drop(columns=["_confidence_score", "_p_win_display", "_edge_display", "_primary_ev", "_abs_edge_prob"])
+    return out
+
+
+def _format_table(rows: List[List[object]], headers: Iterable[str]) -> str:
+    tabulate = _get_tabulate()
+    if tabulate is not None:
+        return tabulate(rows, headers=headers, tablefmt="github")
+
+    headers_list = list(headers)
+    str_rows: List[List[str]] = []
+    for row in rows:
+        str_rows.append([
+            _fmt_float(cell) if isinstance(cell, float) else ("" if cell is None else str(cell))
+            for cell in row
+        ])
+
+    col_widths = [len(str(h)) for h in headers_list]
+    for row in str_rows:
+        for idx, cell in enumerate(row):
+            col_widths[idx] = max(col_widths[idx], len(cell))
+
+    def _fmt_row(row_vals: List[str]) -> str:
+        return " | ".join(val.ljust(col_widths[i]) for i, val in enumerate(row_vals))
+
+    lines = [_fmt_row([str(h) for h in headers_list])]
+    lines.append("-+-".join("-" * w for w in col_widths))
+    for row in str_rows:
+        lines.append(_fmt_row(row))
+    return "\n".join(lines)
+
+
+def render_console_report(
+    df: pd.DataFrame,
+    sport: str,
+    date: str,
+    *,
+    debug: bool = False,
+    sort_by: str = "value",
+) -> None:
+    if df is None or df.empty:
+        print(f"[report] {str(sport).upper()} {date} -> no rows")
+        return
+
+    report_df = build_rankings(build_display_columns(df))
+
+    play_pass_series = (
+        report_df["play_pass"].astype(str)
+        if "play_pass" in report_df.columns
+        else pd.Series([""] * len(report_df), index=report_df.index)
+    )
+    plays_mask = play_pass_series == "PLAY"
+    plays_count = int(plays_mask.sum())
+    pass_count = int((play_pass_series == "PASS").sum())
+    total_games = int(len(report_df))
+
+    sort_label = str(sort_by or "value").lower()
+    sort_label = "accuracy" if sort_label == "accuracy" else "value"
+
+    print("\n=== Summary ===")
+    print(
+        f"{str(sport).upper()} | {date} | games={total_games} plays={plays_count} passes={pass_count} "
+        f"| sort={sort_label}"
+    )
+
+    top_plays = report_df[plays_mask].sort_values(
+        by=["rank_value", "rank_accuracy"],
+        ascending=[True, True],
+        kind="mergesort",
+    ).head(10)
+
+    print("\n=== Top Plays ===")
+    top_columns = [
+        "rank_value",
+        "display_market",
+        "display_pick",
+        "p_win_display",
+        "edge_display",
+        "primary_ev",
+        "confidence",
+        "value_tier",
+        "reason_short",
+    ]
+    top_rows = top_plays.reindex(columns=[c for c in top_columns if c in top_plays.columns]).values.tolist()
+    top_headers = [c for c in top_columns if c in top_plays.columns]
+    print(_format_table(top_rows, top_headers) if top_rows else "No PLAY rows.")
+
+    accuracy_df = report_df.copy()
+    accuracy_df = accuracy_df[np.isfinite(accuracy_df["p_win_display"].astype(float))]
+    accuracy_df = accuracy_df.sort_values(
+        by=["rank_accuracy"], ascending=[True], kind="mergesort"
+    ).head(15)
+
+    print("\n=== Accuracy Ranking ===")
+    accuracy_columns = [
+        "rank_accuracy",
+        "display_market",
+        "display_pick",
+        "p_win_display",
+        "edge_display",
+        "confidence",
+        "play_pass",
+    ]
+    accuracy_rows = accuracy_df.reindex(columns=[c for c in accuracy_columns if c in accuracy_df.columns]).values.tolist()
+    accuracy_headers = [c for c in accuracy_columns if c in accuracy_df.columns]
+    print(_format_table(accuracy_rows, accuracy_headers) if accuracy_rows else "No rows with p_win_display.")
+
+    value_df = report_df.sort_values(by=["rank_value"], ascending=[True], kind="mergesort").head(15)
+    print("\n=== Value Ranking ===")
+    value_columns = [
+        "rank_value",
+        "display_market",
+        "display_pick",
+        "primary_ev",
+        "edge_display",
+        "confidence",
+        "play_pass",
+    ]
+    value_rows = value_df.reindex(columns=[c for c in value_columns if c in value_df.columns]).values.tolist()
+    value_headers = [c for c in value_columns if c in value_df.columns]
+    print(_format_table(value_rows, value_headers) if value_rows else "No rows.")
+
+    if debug:
+        debug_df = report_df.copy()
+        uncertainty = load_uncertainty(sport)
+        if uncertainty and np.isfinite(_safe_float(uncertainty.get("uncertainty"))):
+            debug_df["prob_uncertainty"] = float(uncertainty.get("uncertainty"))
+
+        debug_columns = [
+            "display_market",
+            "display_pick",
+            "decision_flags",
+            "ats_cal_used",
+            "margin_calibrated",
+            "model_home_prob_cal",
+            "model_home_prob_final",
+            "injury_confidence",
+            "inj_points_home",
+            "inj_points_away",
+            "inj_total_adj",
+            "prob_uncertainty",
+        ]
+        debug_columns = [c for c in debug_columns if c in debug_df.columns]
+        debug_rows = debug_df.reindex(columns=debug_columns).head(15).values.tolist()
+        print("\n=== Debug Columns ===")
+        print(_format_table(debug_rows, debug_columns) if debug_rows else "No debug columns available.")

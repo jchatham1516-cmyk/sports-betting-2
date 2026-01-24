@@ -33,8 +33,11 @@ from sports.common.bet_rules import (
 from sports.common.prob_calibration import fit_calibrator, update_daily_ml_calibration
 from sports.common.history_builder import build_historical_dataset, season_string_for_date
 from sports.common.reporting import (
+    build_display_columns,
+    build_rankings,
     daily_bet_report,
     generate_backtest_report,
+    render_console_report,
     self_check_recent_bets,
 )
 from sports.common.parlay import build_weekly_parlay, load_recent_predictions
@@ -155,8 +158,16 @@ def main(argv=None):
     parser.add_argument("--build-history", action="store_true", help="Build full-season historical dataset.")
     parser.add_argument("--fit-calibration", action="store_true", help="Fit Platt calibration from historical data.")
     parser.add_argument("--season", type=str, default=None, help="Season string like 2025-2026.")
-    parser.add_argument("--report", action="store_true", help="Print a quick self-check report from recent bets.")
-    parser.add_argument("--report_n", type=int, default=200, help="Number of recent bets to include in --report.")
+    parser.add_argument(
+        "--report",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Print a structured console report for the current slate.",
+    )
+    parser.add_argument("--debug", action="store_true", help="Include debug columns in the console report.")
+    parser.add_argument("--sort", type=str, default="value", choices=["value", "accuracy"])
+    parser.add_argument("--self-check", action="store_true", help="Print a quick self-check report from recent bets.")
+    parser.add_argument("--self-check-n", type=int, default=200, help="Number of recent bets to include in --self-check.")
     parser.add_argument("--daily-report", action="store_true", help="Print daily accuracy/calibration report.")
     parser.add_argument("--weekly-parlay", action="store_true", help="Build a weekly parlay from recent plays.")
     parser.add_argument("--parlay-legs", type=int, default=6, help="Number of parlay legs (6 or 7).")
@@ -457,6 +468,23 @@ def main(argv=None):
         )
 
     os.makedirs("results", exist_ok=True)
+    if not results_df.empty:
+        results_df = build_display_columns(results_df)
+        results_df = build_rankings(results_df)
+
+        sort_key = "rank_value" if args.sort == "value" else "rank_accuracy"
+        if sort_key in results_df.columns:
+            results_df = results_df.sort_values(sort_key, kind="mergesort", na_position="last")
+
+        if args.report:
+            render_console_report(
+                results_df,
+                sport=args.sport,
+                date=game_date,
+                debug=bool(args.debug),
+                sort_by=args.sort,
+            )
+
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
     print(f"[save] writing {len(results_df)} rows -> {out_name}")
     results_df.to_csv(out_name, index=False)
@@ -464,9 +492,6 @@ def main(argv=None):
     if debug_df is not None and not debug_df.empty:
         dbg_name = f"results/debug_why_ml_vs_ats_{args.sport}_{game_date.replace('/', '-')}.csv"
         debug_df.to_csv(dbg_name, index=False)
-
-    with pd.option_context("display.max_columns", None):
-        print(results_df)
 
     print(f"\nSaved predictions to {out_name}")
     print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
@@ -561,8 +586,8 @@ def main(argv=None):
             if graded_path:
                 print(f"[tracking] Wrote graded results to {graded_path}")
 
-    if args.report:
-        self_check_recent_bets(bet_log_path=bet_log_path, last_n=int(args.report_n))
+    if args.self_check:
+        self_check_recent_bets(bet_log_path=bet_log_path, last_n=int(args.self_check_n))
 
     try:
         hist_path = f"data/historical/{args.sport}_{season}.csv"
