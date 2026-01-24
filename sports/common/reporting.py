@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import math
 from typing import Dict, Optional
 
 import numpy as np
@@ -279,5 +280,127 @@ def self_check_recent_bets(
         )
     if thin_edge_rate > 0.4:
         print(f"[self-check] WARNING: {thin_edge_rate:.0%} of recent bets are thin-edge (<min_edge_cal).")
+
+    return report
+
+
+def daily_bet_report(
+    *,
+    bet_log_path: str = "results/tracking/bet_log.csv",
+    thin_edge_warn_pct: float = 0.4,
+    bucket_size: float = 0.05,
+) -> Optional[Dict[str, object]]:
+    if not os.path.exists(bet_log_path):
+        print(f"[daily-report] No bet log at {bet_log_path}; skipping.")
+        return None
+
+    bets = pd.read_csv(bet_log_path)
+    if bets.empty:
+        print("[daily-report] Bet log empty; skipping.")
+        return None
+
+    bets = bets.copy()
+    bets["result"] = bets["result"].apply(normalize_result_label)
+    bets = bets[bets["result"].isin(["WIN", "LOSS", "PUSH"])]
+    if bets.empty:
+        print("[daily-report] No graded bets; skipping.")
+        return None
+
+    bets["units"] = bets["units"].apply(_safe_float)
+    bets["unit_dollars"] = bets["unit_dollars"].apply(_safe_float)
+    bets["stake"] = bets["units"] * bets["unit_dollars"]
+    bets["price"] = bets["price_at_bet"].apply(_safe_float)
+    bets["profit"] = bets.apply(
+        lambda r: _profit_from_row(r["price"], r["result"], r["stake"]),
+        axis=1,
+    )
+
+    def _summary(df: pd.DataFrame) -> Dict[str, float]:
+        stake = df["stake"].sum()
+        profit = df["profit"].sum()
+        wins = int((df["result"] == "WIN").sum())
+        losses = int((df["result"] == "LOSS").sum())
+        pushes = int((df["result"] == "PUSH").sum())
+        bets_count = wins + losses + pushes
+        win_pct = wins / (wins + losses) if wins + losses > 0 else 0.0
+        roi = profit / stake if stake > 0 else 0.0
+        return {
+            "bets": bets_count,
+            "wins": wins,
+            "losses": losses,
+            "pushes": pushes,
+            "win_rate": win_pct,
+            "roi": roi,
+            "units": float(df["units"].sum()),
+        }
+
+    by_sport = {
+        str(sport): _summary(group)
+        for sport, group in bets.groupby(bets["sport"].fillna("UNKNOWN"))
+    }
+    by_market = {
+        str(market): _summary(group)
+        for market, group in bets.groupby(bets["market_type"].fillna("UNKNOWN"))
+    }
+
+    prob_col = "model_prob" if "model_prob" in bets.columns else "p_model_final"
+    bets["prob_used"] = bets.get(prob_col, np.nan).apply(_safe_float)
+    bets = bets[bets["prob_used"].notna()]
+    bets["prob_used"] = bets["prob_used"].clip(0.0, 1.0)
+
+    def _bucket_label(p: float) -> str:
+        lo = math.floor(float(p) / bucket_size) * bucket_size
+        hi = lo + bucket_size
+        return f"{lo:.2f}-{hi:.2f}"
+
+    bets["prob_bucket"] = bets["prob_used"].apply(_bucket_label)
+    calib = {}
+    for bucket, group in bets.groupby("prob_bucket"):
+        wins = int((group["result"] == "WIN").sum())
+        losses = int((group["result"] == "LOSS").sum())
+        win_rate = wins / (wins + losses) if wins + losses > 0 else 0.0
+        calib[str(bucket)] = {
+            "bets": int(len(group)),
+            "avg_prob": float(group["prob_used"].mean()),
+            "win_rate": float(win_rate),
+        }
+
+    def _thin_edge_flag(row: pd.Series) -> bool:
+        sport = str(row.get("sport", "")).lower()
+        config = get_sport_bet_config(sport)
+        edge = row.get("abs_edge_prob")
+        if not np.isfinite(edge):
+            return False
+        return float(edge) < float(config.min_edge_cal) + 0.01
+
+    thin_edge_rate = float(bets.apply(_thin_edge_flag, axis=1).mean())
+
+    report = {
+        "by_sport": by_sport,
+        "by_market": by_market,
+        "calibration": calib,
+        "thin_edge_rate": thin_edge_rate,
+    }
+
+    print("[daily-report] Summary by sport:")
+    for sport, stats in by_sport.items():
+        print(
+            f"  {sport}: units={stats['units']:.2f} win_rate={stats['win_rate']:.3f} ROI={stats['roi']:.3f}"
+        )
+    print("[daily-report] Summary by market:")
+    for market, stats in by_market.items():
+        print(
+            f"  {market}: units={stats['units']:.2f} win_rate={stats['win_rate']:.3f} ROI={stats['roi']:.3f}"
+        )
+    print("[daily-report] Calibration buckets:")
+    for bucket, stats in calib.items():
+        print(
+            f"  {bucket}: bets={stats['bets']} avg_prob={stats['avg_prob']:.3f} win_rate={stats['win_rate']:.3f}"
+        )
+    if thin_edge_rate > float(thin_edge_warn_pct):
+        print(
+            f"[daily-report] WARNING: {thin_edge_rate:.0%} of bets are thin edges "
+            f"(<min_edge+0.01)."
+        )
 
     return report

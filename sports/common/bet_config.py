@@ -27,6 +27,10 @@ class SportBetConfig:
     disagree_pass_edge: float = 0.25
     disagree_pass_min_edge: float = 0.08
     disagree_pass_max_units: float = 0.10
+    uncertainty_edge_cap_add: float = 0.04
+    parlay_min_edge: float = 0.045
+    parlay_disagree_cap: float = 0.20
+    parlay_disagree_huge_edge: float = 0.12
 
 
 SPORT_BET_CONFIGS = {
@@ -45,6 +49,10 @@ SPORT_BET_CONFIGS = {
         total_sd_min=float(os.getenv("NBA_TOTAL_SD_MIN", "8.0")),
         uncertainty_flat_threshold=float(os.getenv("NBA_UNCERTAINTY_FLAT_THRESHOLD", "0.06")),
         flat_units_when_uncertain=float(os.getenv("NBA_FLAT_UNITS_WHEN_UNCERTAIN", "0.5")),
+        uncertainty_edge_cap_add=float(os.getenv("NBA_UNCERTAINTY_EDGE_CAP_ADD", "0.04")),
+        parlay_min_edge=float(os.getenv("NBA_PARLAY_MIN_EDGE", "0.055")),
+        parlay_disagree_cap=float(os.getenv("NBA_PARLAY_DISAGREE_CAP", "0.20")),
+        parlay_disagree_huge_edge=float(os.getenv("NBA_PARLAY_HUGE_EDGE", "0.12")),
     ),
     "nfl": SportBetConfig(
         min_edge_cal=0.04,
@@ -61,6 +69,10 @@ SPORT_BET_CONFIGS = {
         total_sd_min=float(os.getenv("NFL_TOTAL_SD_MIN", "6.0")),
         uncertainty_flat_threshold=float(os.getenv("NFL_UNCERTAINTY_FLAT_THRESHOLD", "0.06")),
         flat_units_when_uncertain=float(os.getenv("NFL_FLAT_UNITS_WHEN_UNCERTAIN", "0.5")),
+        uncertainty_edge_cap_add=float(os.getenv("NFL_UNCERTAINTY_EDGE_CAP_ADD", "0.035")),
+        parlay_min_edge=float(os.getenv("NFL_PARLAY_MIN_EDGE", "0.05")),
+        parlay_disagree_cap=float(os.getenv("NFL_PARLAY_DISAGREE_CAP", "0.20")),
+        parlay_disagree_huge_edge=float(os.getenv("NFL_PARLAY_HUGE_EDGE", "0.12")),
     ),
     "nhl": SportBetConfig(
         min_edge_cal=float(os.getenv("NHL_MIN_EDGE_CAL", "0.04")),
@@ -77,6 +89,10 @@ SPORT_BET_CONFIGS = {
         total_sd_min=float(os.getenv("NHL_TOTAL_SD_MIN", "0.9")),
         uncertainty_flat_threshold=float(os.getenv("NHL_UNCERTAINTY_FLAT_THRESHOLD", "0.06")),
         flat_units_when_uncertain=float(os.getenv("NHL_FLAT_UNITS_WHEN_UNCERTAIN", "0.5")),
+        uncertainty_edge_cap_add=float(os.getenv("NHL_UNCERTAINTY_EDGE_CAP_ADD", "0.03")),
+        parlay_min_edge=float(os.getenv("NHL_PARLAY_MIN_EDGE", "0.045")),
+        parlay_disagree_cap=float(os.getenv("NHL_PARLAY_DISAGREE_CAP", "0.18")),
+        parlay_disagree_huge_edge=float(os.getenv("NHL_PARLAY_HUGE_EDGE", "0.1")),
     ),
 }
 

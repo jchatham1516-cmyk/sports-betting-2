@@ -9,8 +9,16 @@ from typing import Optional, Tuple, Dict, List
 import numpy as np
 import pandas as pd
 
-from sports.common.bet_rules import _to_float, breakeven_prob_from_american, ev_per_dollar
+from sports.common.bet_rules import (
+    _to_float,
+    breakeven_prob_from_american,
+    ev_per_dollar,
+    primary_metrics_for_row,
+)
 from sports.common.bet_config import get_sport_bet_config
+from sports.common.ats_calibration import load_ats_calibrator
+from sports.common.margin_calibration import load as load_margin_cal
+from sports.common.prob_calibration import load_calibrator
 
 
 @dataclass
@@ -216,6 +224,13 @@ def add_recommendations_to_df(
     out = df.copy()
     sport = str(sport or "nba").lower().strip()
     config = get_sport_bet_config(sport)
+    ml_calibrator_missing = load_calibrator(sport) is None
+    ats_calibrator_missing = False
+    if sport == "nba":
+        ats_calibrator_missing = load_ats_calibrator(sport) is None
+    else:
+        margin_cal_path = f"results/margin_cal_{sport}.json"
+        ats_calibrator_missing = load_margin_cal(margin_cal_path) is None
 
     # Ensure market_home_prob exists if MLs exist
     if "market_home_prob" not in out.columns:
@@ -251,6 +266,8 @@ def add_recommendations_to_df(
         if col not in out.columns:
             out[col] = np.nan
     fallback_mask = out["model_home_prob_cal"].isna() | out["model_home_prob_final"].isna()
+    if ml_calibrator_missing:
+        fallback_mask = fallback_mask | out["model_home_prob_raw"].notna()
     if "model_home_prob" in out.columns:
         for i in out.index:
             base = out.loc[i, "model_home_prob"]
@@ -404,11 +421,11 @@ def add_recommendations_to_df(
                     else "UNCALIBRATED_FALLBACK"
                 )
 
-        # ATS EV: use ats_home_cover_prob + spread price
+        # ATS EV: use ats_home_cover_prob + spread price (p_model_final)
         p_home_cover = _to_float(row.get("ats_home_cover_prob", row.get("p_home_cover", np.nan)))
         p_away_cover = 1.0 - _to_float(p_home_cover) if np.isfinite(_to_float(p_home_cover)) else np.nan
         ats_price = row.get("spread_price")
-        if bool(row.get("ats_gated", False)):
+        if bool(row.get("ats_gated", False)) or ats_calibrator_missing:
             ats_ev = np.nan
             ats_side = ""
             if "ATS_GATED_INVALID_SPREAD" not in flags:
@@ -418,6 +435,8 @@ def add_recommendations_to_df(
                 if str(out.loc[i, "decision_reason"]).strip()
                 else "ATS_GATED_INVALID_SPREAD"
             )
+            if ats_calibrator_missing and "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
+                flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
         else:
             ats_ev_home = ev_per_dollar(p_home_cover, ats_price)
             ats_ev_away = ev_per_dollar(p_away_cover, ats_price)
@@ -428,10 +447,12 @@ def add_recommendations_to_df(
         margin_calibrated = row.get("margin_calibrated")
         margin_calibrated = bool(margin_calibrated) if not pd.isna(margin_calibrated) else False
         ats_calibrated = ats_cal_used if sport == "nba" else margin_calibrated
-        ats_edge_prob = np.nan
         be_prob = breakeven_prob_from_american(ats_price)
-        if np.isfinite(p_home_cover) and np.isfinite(be_prob):
-            ats_edge_prob = float(p_home_cover - be_prob)
+        ats_edge_prob = (
+            float(p_home_cover - be_prob)
+            if np.isfinite(p_home_cover) and np.isfinite(be_prob)
+            else float("nan")
+        )
         if not ats_calibrated:
             ats_ev = np.nan
             ats_side = ""
@@ -551,6 +572,20 @@ def add_recommendations_to_df(
             f"Primary={chosen} (EV={_fmt_ev(evs.get(chosen))} "
             f"ML={_fmt_ev(evs['ML'])} ATS={_fmt_ev(evs['ATS'])} TOTAL={_fmt_ev(evs['TOTAL'])})"
         )
+
+    metrics = [primary_metrics_for_row(r, sport=sport) for _, r in out.iterrows()]
+    out["primary_market"] = [m[0] for m in metrics]
+    out["primary_side"] = [m[1] for m in metrics]
+    out["p_model_raw"] = [m[2] for m in metrics]
+    out["p_model_cal"] = [m[3] for m in metrics]
+    out["p_model_final"] = [m[4] for m in metrics]
+    out["p_market"] = [m[5] for m in metrics]
+    out["p_model_used"] = out["p_model_final"]
+    out["p_market_used"] = out["p_market"]
+    out["edge_prob_raw"] = [m[6] for m in metrics]
+    out["edge_prob_cal"] = [m[7] for m in metrics]
+    out["edge_prob_final"] = [m[8] for m in metrics]
+    out["abs_edge_prob"] = out["edge_prob_final"].abs()
 
     # why_bet quick explainer
     out["why_bet"] = out.get("why_bet", "")

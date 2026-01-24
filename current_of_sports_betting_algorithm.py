@@ -32,7 +32,12 @@ from sports.common.bet_rules import (
 )
 from sports.common.prob_calibration import fit_calibrator, update_daily_ml_calibration
 from sports.common.history_builder import build_historical_dataset, season_string_for_date
-from sports.common.reporting import generate_backtest_report, self_check_recent_bets
+from sports.common.reporting import (
+    daily_bet_report,
+    generate_backtest_report,
+    self_check_recent_bets,
+)
+from sports.common.parlay import build_weekly_parlay, load_recent_predictions
 from sports.common.prob_uncertainty import load_uncertainty
 
 from sports.nba.bdl_client import (
@@ -58,8 +63,8 @@ def _cap_to_top_plays(df: pd.DataFrame, max_plays: int | None) -> pd.DataFrame:
     if plays.empty:
         return df
 
-    if "edge_prob_cal" in df.columns:
-        plays = plays.assign(_score=plays["edge_prob_cal"].astype(float))
+    if "edge_prob_final" in df.columns:
+        plays = plays.assign(_score=plays["edge_prob_final"].astype(float))
         plays = plays.sort_values("_score", ascending=False)
     elif "abs_edge_prob" in df.columns:
         plays = plays.assign(_score=plays["abs_edge_prob"].astype(float))
@@ -152,8 +157,43 @@ def main(argv=None):
     parser.add_argument("--season", type=str, default=None, help="Season string like 2025-2026.")
     parser.add_argument("--report", action="store_true", help="Print a quick self-check report from recent bets.")
     parser.add_argument("--report_n", type=int, default=200, help="Number of recent bets to include in --report.")
+    parser.add_argument("--daily-report", action="store_true", help="Print daily accuracy/calibration report.")
+    parser.add_argument("--weekly-parlay", action="store_true", help="Build a weekly parlay from recent plays.")
+    parser.add_argument("--parlay-legs", type=int, default=6, help="Number of parlay legs (6 or 7).")
 
     args = parser.parse_args(argv)
+
+    if args.daily_report:
+        daily_bet_report(bet_log_path="results/tracking/bet_log.csv")
+        return 0
+
+    if args.weekly_parlay:
+        requested_legs = int(args.parlay_legs)
+        if requested_legs not in {6, 7}:
+            raise ValueError("--parlay-legs must be 6 or 7")
+        recent_preds = load_recent_predictions(preds_dir="results", days_back=7)
+        parlay_result = build_weekly_parlay(
+            recent_preds,
+            min_legs=6,
+            max_legs=requested_legs,
+        )
+        os.makedirs("results", exist_ok=True)
+        date_tag = datetime.utcnow().strftime("%Y-%m-%d")
+        json_path = f"results/parlay_weekly_{date_tag}.json"
+        csv_path = f"results/parlay_weekly_{date_tag}.csv"
+        pd.DataFrame(parlay_result.get("legs", [])).to_csv(csv_path, index=False)
+        with open(json_path, "w", encoding="utf-8") as f:
+            import json
+
+            json.dump(parlay_result, f, indent=2)
+        status = parlay_result.get("status", "UNKNOWN")
+        if status != "PARLAY_READY":
+            print("NO PARLAY THIS WEEK")
+            print(f"[parlay] reasons={parlay_result.get('reasons', [])}")
+        else:
+            print(f"[parlay] Built weekly parlay with {len(parlay_result.get('legs', []))} legs.")
+        print(f"[parlay] wrote {json_path} and {csv_path}")
+        return 0
 
     game_date = datetime.utcnow().strftime("%m/%d/%Y") if args.date is None else args.date
     season = args.season
