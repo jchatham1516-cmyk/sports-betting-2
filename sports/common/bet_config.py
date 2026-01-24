@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,12 @@ class SportBetConfig:
     parlay_disagree_cap: float = 0.20
     parlay_disagree_huge_edge: float = 0.12
     nhl_parlay_min_edge: float | None = None
+    parlay_min_pwin: float = 0.57
+    parlay_max_disagreement: float = 0.12
+    parlay_big_edge_override: float = 0.10
+    parlay_reliability_weights: dict[str, float] = field(
+        default_factory=lambda: {"ML": 1.0, "ATS": 0.7, "TOTAL": 0.6}
+    )
 
 
 SPORT_BET_CONFIGS = {
@@ -51,10 +57,14 @@ SPORT_BET_CONFIGS = {
         uncertainty_flat_threshold=float(os.getenv("NBA_UNCERTAINTY_FLAT_THRESHOLD", "0.06")),
         flat_units_when_uncertain=float(os.getenv("NBA_FLAT_UNITS_WHEN_UNCERTAIN", "0.5")),
         uncertainty_edge_cap_add=float(os.getenv("NBA_UNCERTAINTY_EDGE_CAP_ADD", "0.04")),
-        parlay_min_edge=float(os.getenv("NBA_PARLAY_MIN_EDGE", "0.055")),
+        parlay_min_edge=float(os.getenv("NBA_PARLAY_MIN_EDGE", "0.06")),
         parlay_disagree_cap=float(os.getenv("NBA_PARLAY_DISAGREE_CAP", "0.20")),
         parlay_disagree_huge_edge=float(os.getenv("NBA_PARLAY_HUGE_EDGE", "0.12")),
         nhl_parlay_min_edge=None,
+        parlay_min_pwin=float(os.getenv("NBA_PARLAY_MIN_PWIN", "0.57")),
+        parlay_max_disagreement=float(os.getenv("NBA_PARLAY_MAX_DISAGREE", "0.12")),
+        parlay_big_edge_override=float(os.getenv("NBA_PARLAY_BIG_EDGE", "0.10")),
+        parlay_reliability_weights={"ML": 1.0, "ATS": 0.7, "TOTAL": 0.6},
     ),
     "nfl": SportBetConfig(
         min_edge_cal=0.04,
@@ -76,6 +86,10 @@ SPORT_BET_CONFIGS = {
         parlay_disagree_cap=float(os.getenv("NFL_PARLAY_DISAGREE_CAP", "0.20")),
         parlay_disagree_huge_edge=float(os.getenv("NFL_PARLAY_HUGE_EDGE", "0.12")),
         nhl_parlay_min_edge=None,
+        parlay_min_pwin=float(os.getenv("NFL_PARLAY_MIN_PWIN", "0.57")),
+        parlay_max_disagreement=float(os.getenv("NFL_PARLAY_MAX_DISAGREE", "0.12")),
+        parlay_big_edge_override=float(os.getenv("NFL_PARLAY_BIG_EDGE", "0.10")),
+        parlay_reliability_weights={"ML": 1.0, "ATS": 0.7, "TOTAL": 0.6},
     ),
     "nhl": SportBetConfig(
         min_edge_cal=float(os.getenv("NHL_MIN_EDGE_CAL", "0.04")),
@@ -93,10 +107,14 @@ SPORT_BET_CONFIGS = {
         uncertainty_flat_threshold=float(os.getenv("NHL_UNCERTAINTY_FLAT_THRESHOLD", "0.06")),
         flat_units_when_uncertain=float(os.getenv("NHL_FLAT_UNITS_WHEN_UNCERTAIN", "0.5")),
         uncertainty_edge_cap_add=float(os.getenv("NHL_UNCERTAINTY_EDGE_CAP_ADD", "0.03")),
-        parlay_min_edge=float(os.getenv("NHL_PARLAY_MIN_EDGE", "0.045")),
+        parlay_min_edge=float(os.getenv("NHL_PARLAY_MIN_EDGE", "0.05")),
         parlay_disagree_cap=float(os.getenv("NHL_PARLAY_DISAGREE_CAP", "0.18")),
         parlay_disagree_huge_edge=float(os.getenv("NHL_PARLAY_HUGE_EDGE", "0.1")),
-        nhl_parlay_min_edge=float(os.getenv("NHL_PARLAY_MIN_EDGE", "0.045")),
+        nhl_parlay_min_edge=float(os.getenv("NHL_PARLAY_MIN_EDGE", "0.05")),
+        parlay_min_pwin=float(os.getenv("NHL_PARLAY_MIN_PWIN", "0.57")),
+        parlay_max_disagreement=float(os.getenv("NHL_PARLAY_MAX_DISAGREE", "0.12")),
+        parlay_big_edge_override=float(os.getenv("NHL_PARLAY_BIG_EDGE", "0.10")),
+        parlay_reliability_weights={"ML": 1.0, "ATS": 0.7, "TOTAL": 0.6},
     ),
 }
 

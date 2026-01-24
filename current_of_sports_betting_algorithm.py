@@ -40,7 +40,7 @@ from sports.common.reporting import (
     render_console_report,
     self_check_recent_bets,
 )
-from sports.common.parlay import build_weekly_parlay, load_recent_predictions
+from sports.common.parlay import build_daily_parlay, build_weekly_parlay, load_recent_predictions, render_parlay_card
 from sports.common.prob_uncertainty import load_uncertainty
 
 from sports.nba.bdl_client import (
@@ -171,6 +171,9 @@ def main(argv=None):
     parser.add_argument("--daily-report", action="store_true", help="Print daily accuracy/calibration report.")
     parser.add_argument("--weekly-parlay", action="store_true", help="Build a weekly parlay from recent plays.")
     parser.add_argument("--parlay-legs", type=int, default=6, help="Number of parlay legs (6 or 7).")
+    parser.add_argument("--parlay", action="store_true", help="Build a daily parlay from today's plays.")
+    parser.add_argument("--parlay-min-legs", type=int, default=4, help="Minimum daily parlay legs.")
+    parser.add_argument("--parlay-max-legs", type=int, default=7, help="Maximum daily parlay legs.")
 
     args = parser.parse_args(argv)
 
@@ -495,6 +498,30 @@ def main(argv=None):
 
     print(f"\nSaved predictions to {out_name}")
     print(f"Bankroll=${float(args.bankroll):.2f} | 1 unit={UNIT_PCT*100:.1f}% = ${unit_dollars:.2f}")
+
+    if args.parlay:
+        if int(args.parlay_max_legs) < int(args.parlay_min_legs):
+            raise ValueError("--parlay-max-legs must be >= --parlay-min-legs")
+        try:
+            date_tag = datetime.strptime(game_date, "%m/%d/%Y").strftime("%Y-%m-%d")
+        except Exception:
+            date_tag = datetime.utcnow().strftime("%Y-%m-%d")
+        parlay_result = build_daily_parlay(
+            results_df,
+            min_legs=int(args.parlay_min_legs),
+            max_legs=int(args.parlay_max_legs),
+            date_tag=date_tag,
+        )
+        os.makedirs("results", exist_ok=True)
+        json_path = f"results/parlay_{date_tag}.json"
+        csv_path = f"results/parlay_{date_tag}.csv"
+        pd.DataFrame(parlay_result.get("legs", [])).to_csv(csv_path, index=False)
+        with open(json_path, "w", encoding="utf-8") as f:
+            import json
+
+            json.dump(parlay_result, f, indent=2)
+        render_parlay_card(parlay_result)
+        print(f"[parlay] wrote {json_path} and {csv_path}")
 
     if "date" not in results_df.columns:
         results_df["date"] = game_date
