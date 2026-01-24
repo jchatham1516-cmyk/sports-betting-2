@@ -28,7 +28,8 @@ def test_primary_priority_order():
     assert "ML" in p and "(strong)" in p
 
 
-def test_end_to_end_ml_does_not_inherit_ats():
+def test_end_to_end_ml_does_not_inherit_ats(monkeypatch):
+    monkeypatch.setattr("recommendations.load_ats_calibrator", lambda sport: object())
     df = pd.DataFrame([{
         "date": "12/12/2025",
         "home": "HomeTeam",
@@ -38,6 +39,7 @@ def test_end_to_end_ml_does_not_inherit_ats():
         "away_ml": 200,
         "home_spread": +8.0,
         "model_spread_home": +3.0,
+        "ats_edge_vs_be": float("nan"),
     }])
 
     out, debug = add_recommendations_to_df(df, model_spread_home_col="model_spread_home")
@@ -47,3 +49,43 @@ def test_end_to_end_ml_does_not_inherit_ats():
 
     # ATS edge is +5 => should recommend HOME ATS
     assert "HOME" in out.loc[0, "spread_recommendation"]
+
+
+def test_market_type_limits_decision_flags():
+    df = pd.DataFrame(
+        [
+            {
+                "date": "12/12/2025",
+                "home": "HomeTeam",
+                "away": "AwayTeam",
+                "market_type": "moneyline",
+                "model_home_prob": 0.52,
+                "home_ml": -250,
+                "away_ml": 200,
+                "home_spread": +8.0,
+                "model_spread_home": +3.0,
+                "ats_gated": True,
+                "total_sd": 0.0,
+            },
+            {
+                "date": "12/12/2025",
+                "home": "HomeTeam",
+                "away": "AwayTeam",
+                "market_type": "spread",
+                "model_home_prob": 0.52,
+                "home_ml": -250,
+                "away_ml": 200,
+                "home_spread": +8.0,
+                "model_spread_home": +3.0,
+                "ats_gated": True,
+            },
+        ]
+    )
+
+    out, _ = add_recommendations_to_df(df, model_spread_home_col="model_spread_home")
+    ml_flags = str(out.loc[0, "decision_flags"])
+    assert "ATS_" not in ml_flags
+    assert "TOTAL_" not in ml_flags
+
+    spread_flags = str(out.loc[1, "decision_flags"])
+    assert "ATS_" in spread_flags
