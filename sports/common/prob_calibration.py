@@ -129,7 +129,7 @@ def load_calibrator(sport: str) -> Optional[Dict[str, float]]:
     sport_key = str(sport).lower()
     if sport_key in _CALIBRATOR_CACHE:
         cal = _CALIBRATOR_CACHE[sport_key]
-        return {"a": cal.a, "b": cal.b}
+        return {"a": cal.a, "b": cal.b, "n_samples": int(cal.n_samples)}
 
     path = _calibration_path(sport_key)
     legacy_path = _legacy_calibration_path(sport_key)
@@ -145,7 +145,13 @@ def load_calibrator(sport: str) -> Optional[Dict[str, float]]:
 
     cal = PlattCalibrator.from_dict(payload)
     _CALIBRATOR_CACHE[sport_key] = cal
-    return {"a": cal.a, "b": cal.b}
+    return {
+        "a": cal.a,
+        "b": cal.b,
+        "n_samples": int(payload.get("n_samples", cal.n_samples)),
+        "window": payload.get("window"),
+        "method": payload.get("method"),
+    }
 
 
 def fit_calibrator(sport: str, rows_df: pd.DataFrame) -> Optional[PlattCalibrator]:

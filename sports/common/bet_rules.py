@@ -252,6 +252,43 @@ def _dynamic_anchor_weight(sport: str, base_weight: float, config: SportBetConfi
     return float(max(0.0, min(1.0, float(base_weight) + float(mult) * float(uncertainty))))
 
 
+def _ml_calibration_samples(sport: str) -> Optional[int]:
+    params = load_calibrator(sport)
+    if not params:
+        return None
+    try:
+        n = params.get("n_samples")
+        if n is None:
+            return None
+        return int(n)
+    except Exception:
+        return None
+
+
+def _apply_ml_sample_shrink(
+    p_final: float,
+    p_market: float,
+    *,
+    sport: str,
+) -> Tuple[float, Optional[int], float]:
+    if not np.isfinite(p_final):
+        return p_final, None, 1.0
+    n_samples = _ml_calibration_samples(sport)
+    if n_samples is None:
+        return p_final, None, 1.0
+    try:
+        n0 = float(os.getenv(f"{str(sport).upper()}_ML_CAL_SHRINK_N0", "200"))
+    except Exception:
+        n0 = 200.0
+    if n0 <= 0:
+        return p_final, n_samples, 1.0
+    weight = float(n_samples) / (float(n_samples) + float(n0))
+    weight = float(max(0.0, min(1.0, weight)))
+    anchor = float(p_market) if np.isfinite(p_market) else 0.5
+    shrunk = float(weight * float(p_final) + (1.0 - weight) * anchor)
+    return shrunk, n_samples, weight
+
+
 def american_to_decimal(odds: float) -> float:
     try:
         odds = float(odds)
@@ -727,6 +764,11 @@ def _ml_probabilities_for_side(
     p_final, capped = _apply_underdog_cap(p_final, p_market, config)
     if capped:
         flags.append("UNDERDOG_CAP")
+    p_final, _ml_cal_n, _ml_shrink_w = _apply_ml_sample_shrink(
+        p_final,
+        p_market,
+        sport=sport,
+    )
 
     return p_raw, p_cal, p_final, p_market, flags
 
@@ -874,6 +916,7 @@ def primary_metrics_for_row(
         p_model_raw_val = _side_prob(model_raw_home)
         p_model_cal = _side_prob(model_cal_home)
         p_model_final = _side_prob(model_final_home)
+        model_final_available = np.isfinite(p_model_final)
 
         uncalibrated = not np.isfinite(p_model_cal) or not np.isfinite(p_model_final) or calibrator_missing
 
@@ -889,6 +932,12 @@ def primary_metrics_for_row(
             p_model_final, capped = _apply_underdog_cap(p_model_final, p_market_val, config)
             if capped:
                 flags.append("UNDERDOG_CAP")
+        if np.isfinite(p_model_final) and not model_final_available:
+            p_model_final, _ml_cal_n, _ml_shrink_w = _apply_ml_sample_shrink(
+                p_model_final,
+                p_market_val,
+                sport=sport,
+            )
         if sport.lower() == "nhl":
             goalie_shift = safe_float(row.get("goalie_prob_shift"))
             if np.isfinite(p_model_final):
