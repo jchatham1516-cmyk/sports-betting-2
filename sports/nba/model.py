@@ -28,7 +28,7 @@ from sports.common.eval import build_game_key
 from sports.common.ats_calibration import get_ats_calibrator
 from sports.common.margin_calibration import load as load_margin_cal, save as save_margin_cal, fit as fit_margin
 from sports.common.calibration import load_nba_calibrator, update_and_save_nba_calibration
-from sports.common.prob_calibration import update_prob_calibration
+from sports.common.prob_calibration import load_calibrator, update_prob_calibration
 from sports.common.prob_uncertainty import update_uncertainty, load_uncertainty
 
 # BallDontLie client (already in your repo)
@@ -100,6 +100,7 @@ TOTAL_INJ_ADJ_MAX = float(os.getenv("NBA_TOTAL_INJ_ADJ_MAX", "8.0"))
 # ATS (kept simple)
 ATS_SD_PTS = float(os.getenv("NBA_ATS_SD_PTS", "13.5"))
 ATS_DEFAULT_PRICE = float(os.getenv("NBA_ATS_DEFAULT_PRICE", "-110.0"))
+NBA_SPREAD_ANCHOR_W = float(os.getenv("NBA_SPREAD_ANCHOR_W", "0.55"))
 
 # blowout-aware margin distribution (mixture normal)
 MARGIN_SD_BASE = float(os.getenv("NBA_MARGIN_SD_BASE", str(ATS_SD_PTS)))
@@ -139,6 +140,23 @@ def _safe_float(x, default=np.nan) -> float:
 
 def _phi(z: float) -> float:
     return 0.5 * (1.0 + math.erf(float(z) / math.sqrt(2.0)))
+
+
+def _clip_prob(p: float, lo: float = 0.01, hi: float = 0.99) -> float:
+    if p is None or np.isnan(p):
+        return float("nan")
+    return float(_clamp(p, lo, hi))
+
+
+def _anchor_spread(
+    model_spread_raw: float, home_spread: float, anchor_w: float
+) -> Tuple[float, bool]:
+    if np.isnan(model_spread_raw):
+        return float("nan"), False
+    if np.isnan(home_spread):
+        return float(model_spread_raw), False
+    w = float(_clamp(anchor_w, 0.0, 1.0))
+    return float(w * home_spread + (1.0 - w) * model_spread_raw), True
 
 
 def _normal_ci(mu: float, sd: float, z: float = 1.96) -> Tuple[float, float]:
@@ -738,6 +756,8 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         st = backfill_nba_elo_state()
     uncertainty, margin_cal = _load_calibrators()
     ats_cal = get_ats_calibrator(sport="nba")
+    ml_cal = load_calibrator("nba") or {}
+    ml_cal_n = int(ml_cal.get("n_samples", 0)) if ml_cal else 0
 
     form_adjs = _build_form_adjustments(stats_df) if stats_df is not None else {}
 
@@ -1077,40 +1097,40 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         home_spread = _safe_float((oi or {}).get("home_spread"))
         spread_price = _safe_float((oi or {}).get("spread_price"), default=ATS_DEFAULT_PRICE)
 
-        # --- NEW: anchor spread to market ---
-        SPREAD_ANCHOR_W = float(os.getenv("NBA_SPREAD_ANCHOR_W", "0.55"))
         model_spread_raw = float(model_spread_home)
-        if not np.isnan(home_spread):
-            w = float(_clamp(SPREAD_ANCHOR_W, 0.0, 1.0))
-            model_spread_home = float(w * home_spread + (1.0 - w) * model_spread_raw)
+        model_spread_home, _ = _anchor_spread(
+            model_spread_raw, home_spread, NBA_SPREAD_ANCHOR_W
+        )
 
-        spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) else float("nan")
+        spread_edge_home = (
+            float(home_spread - model_spread_home)
+            if not np.isnan(home_spread) and not np.isnan(model_spread_home)
+            else float("nan")
+        )
 
-        # --- NEW: use dynamic margin SD for ATS prob ---
         ats_sd = float(margin_sd) if (not np.isnan(margin_sd) and margin_sd > 1e-6) else float(ATS_SD_PTS)
         p_home_cover_raw = (
-            float(_clamp(_phi((spread_edge_home / ats_sd)), 0.001, 0.999))
+            float(_phi((spread_edge_home / ats_sd)))
             if not np.isnan(spread_edge_home)
             else float("nan")
         )
 
-        # --- NEW: edge vs breakeven ---
-        be_spread = _breakeven_prob_from_american(spread_price)
-        if np.isnan(be_spread):
-            be_spread = 0.5238
-        ats_edge_vs_be = float(p_home_cover_raw - be_spread) if not np.isnan(p_home_cover_raw) else float("nan")
-        spread_edge_home = float(home_spread - model_spread_home) if not np.isnan(home_spread) and not np.isnan(model_spread_home) else float("nan")
-        p_home_cover_raw = (
-            float(_clamp(_phi((spread_edge_home / ATS_SD_PTS)), 0.001, 0.999))
-            if not np.isnan(spread_edge_home)
-            else float("nan")
-        )
         ats_cal_used = ats_cal is not None and np.isfinite(spread_edge_home)
         if ats_cal_used:
-            ats_x = float(mu_margin_home + home_spread)
+            ats_x = float((-model_spread_home) + home_spread)
             p_home_cover = float(ats_cal.predict_prob_cover(ats_x))
         else:
             p_home_cover = p_home_cover_raw
+        p_home_cover = _clip_prob(p_home_cover, 0.01, 0.99)
+
+        be_spread = _breakeven_prob_from_american(spread_price)
+        if np.isnan(be_spread):
+            be_spread = 0.5238
+        ats_edge_vs_be = float(p_home_cover - be_spread) if np.isfinite(p_home_cover) else float("nan")
+
+        decision_flags: list[str] = []
+        if ats_cal is None:
+            decision_flags.append("ATS_UNCALIBRATED_MARGIN")
 
         market_home_delta = (
             float(mkt_home_p - p_home_imp)
@@ -1147,6 +1167,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "injury_source": str(injury_source),
                 "elo_diff": float(elo_diff),
                 "model_spread_home": float(model_spread_home),
+                "model_spread_raw": float(model_spread_raw),
                 "fallback_spread_home": float(fallback_spread_home),
                 "model_margin_home": float(mu_margin_home),
                 "margin_sd": float(margin_sd),
@@ -1161,9 +1182,18 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
                 "spread_price": float(spread_price) if not np.isnan(spread_price) else np.nan,
                 "spread_edge_home": float(spread_edge_home) if not np.isnan(spread_edge_home) else np.nan,
                 "p_home_cover": float(p_home_cover) if not np.isnan(p_home_cover) else np.nan,
+                "ats_edge_vs_be": float(ats_edge_vs_be) if not np.isnan(ats_edge_vs_be) else np.nan,
                 "ats_cal_used": bool(ats_cal_used),
                 "ats_cal_a": float(ats_cal.a) if ats_cal_used else np.nan,
                 "ats_cal_b": float(ats_cal.b) if ats_cal_used else np.nan,
+                "decision_flags": ",".join(decision_flags),
+                "nba_ml_cal_n": int(ml_cal_n),
+                "nba_ml_uncertainty_used": float(resid_sd),
+                "nba_spread_anchor_w": float(_clamp(NBA_SPREAD_ANCHOR_W, 0.0, 1.0))
+                if not np.isnan(home_spread)
+                else np.nan,
+                "nba_ats_sd_used": float(ats_sd) if not np.isnan(ats_sd) else np.nan,
+                "nba_ats_cal_used": bool(ats_cal_used),
                 "pace_factor": float(pace_factor) if not np.isnan(pace_factor) else np.nan,
                 "pace_reason": str(pace_reason),
                 "inj_total_adj": float(inj_total_adj),

@@ -30,6 +30,8 @@ class Thresholds:
     # ATS (points/goals edge, not prob edge)
     ats_edge_strong_pts: float = 3.0
     ats_edge_lean_pts: float = 1.5
+    ats_edge_strong_prob: float = 0.03
+    ats_edge_lean_prob: float = 0.015
 
     # Confidence labels from abs_edge_home (or similar)
     conf_high: float = 0.18
@@ -190,6 +192,20 @@ def _ats_pick(model_spread_home: float, market_home_spread: float, th: Threshold
     return "Too close to call ATS (edge too small)"
 
 
+def _ats_pick_prob(edge_vs_be: float, th: Thresholds) -> str:
+    if np.isnan(edge_vs_be):
+        return "No ATS bet (missing spread)"
+    if edge_vs_be >= th.ats_edge_strong_prob:
+        return "Model PICK ATS: HOME (strong)"
+    if edge_vs_be >= th.ats_edge_lean_prob:
+        return "Model PICK ATS: HOME (lean)"
+    if edge_vs_be <= -th.ats_edge_strong_prob:
+        return "Model PICK ATS: AWAY (strong)"
+    if edge_vs_be <= -th.ats_edge_lean_prob:
+        return "Model PICK ATS: AWAY (lean)"
+    return "Too close to call ATS (edge too small)"
+
+
 def _is_real_pick(s: str) -> bool:
     return isinstance(s, str) and s.startswith("Model PICK")
 
@@ -302,9 +318,19 @@ def add_recommendations_to_df(
             if bool(out.get("ats_gated", pd.Series(False, index=out.index)).loc[i]):
                 out.loc[i, "spread_recommendation"] = "No ATS bet (gated): invalid spread model"
                 continue
+            decision_flags = str(out.loc[i, "decision_flags"] or "")
+            if sport == "nba" and (
+                ats_calibrator_missing or "ATS_UNCALIBRATED_MARGIN" in decision_flags
+            ):
+                out.loc[i, "spread_recommendation"] = "No ATS bet (gated): uncalibrated ATS"
+                continue
             ms = float(out.loc[i, model_spread_home_col]) if not pd.isna(out.loc[i, model_spread_home_col]) else float("nan")
             hs = float(out.loc[i, "home_spread"]) if not pd.isna(out.loc[i, "home_spread"]) else float("nan")
-            out.loc[i, "spread_recommendation"] = _ats_pick(ms, hs, thresholds)
+            ats_edge_vs_be = _to_float(out.loc[i, "ats_edge_vs_be"])
+            if np.isfinite(ats_edge_vs_be):
+                out.loc[i, "spread_recommendation"] = _ats_pick_prob(ats_edge_vs_be, thresholds)
+            else:
+                out.loc[i, "spread_recommendation"] = _ats_pick(ms, hs, thresholds)
 
         # Helpful numeric edge (pts) for debugging
         if "spread_edge_home" not in out.columns:
@@ -336,6 +362,7 @@ def add_recommendations_to_df(
         total_edge_vs_be = _to_float(row.get("total_edge_vs_be", np.nan))
         total_edge_goals = _to_float(row.get("total_edge_goals", np.nan))
         spread_edge_home = _to_float(row.get("spread_edge_home", np.nan))
+        ats_edge_vs_be = _to_float(row.get("ats_edge_vs_be", np.nan))
         total_reco = str(row.get("total_recommendation", ""))
         spread_reco = str(row.get("spread_recommendation", ""))
 
@@ -343,6 +370,8 @@ def add_recommendations_to_df(
             conf_edge = abs(float(total_edge_vs_be))
         elif total_reco.startswith("Model PICK TOTAL") and np.isfinite(total_edge_goals):
             conf_edge = abs(float(total_edge_goals))
+        elif spread_reco.startswith("Model PICK ATS") and np.isfinite(ats_edge_vs_be):
+            conf_edge = abs(float(ats_edge_vs_be))
         elif spread_reco.startswith("Model PICK ATS") and np.isfinite(spread_edge_home):
             conf_edge = abs(float(spread_edge_home))
         else:
@@ -594,10 +623,15 @@ def add_recommendations_to_df(
         mk = out.loc[i, "market_home_prob"] if "market_home_prob" in out.columns else np.nan
         eh = out.loc[i, "edge_home"] if "edge_home" in out.columns else np.nan
         se = out.loc[i, "spread_edge_home"] if "spread_edge_home" in out.columns else np.nan
+        ats_edge_vs_be = out.loc[i, "ats_edge_vs_be"] if "ats_edge_vs_be" in out.columns else np.nan
         tev = out.loc[i, "total_edge_vs_be"] if "total_edge_vs_be" in out.columns else np.nan
         out.loc[i, "why_bet"] = (
             f"ML edge={_fmt(eh)} (model {_fmt(mp)} vs mkt {_fmt(mk)})"
-            + (f" | ATS edge={_fmt(se)}pts" if not pd.isna(se) else "")
+            + (
+                f" | ATS edge_vs_be={_fmt(ats_edge_vs_be)}"
+                if not pd.isna(ats_edge_vs_be)
+                else (f" | ATS edge={_fmt(se)}pts" if not pd.isna(se) else "")
+            )
             + (f" | TOTAL edge_vs_be={_fmt(tev)}" if not pd.isna(tev) else "")
         )
 

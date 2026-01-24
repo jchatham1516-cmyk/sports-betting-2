@@ -118,6 +118,8 @@ def load_ats_calibrator(sport: str) -> Optional[ATSCalibrator]:
     except Exception:
         return None
     cal = ATSCalibrator.from_dict(payload)
+    if int(cal.n_samples) < int(ATS_MIN_SAMPLES):
+        return None
     _ATS_CAL_CACHE[sport_key] = cal
     return cal
 
