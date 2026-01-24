@@ -291,6 +291,33 @@ def _dynamic_anchor_weight(sport: str, base_weight: float, config: SportBetConfi
     return float(max(0.0, min(1.0, float(base_weight) + float(mult) * float(uncertainty))))
 
 
+def _nhl_goalie_confirmed(row: pd.Series) -> bool:
+    if "goalie_confirmed" in row:
+        val = row.get("goalie_confirmed")
+        if val is not None and not pd.isna(val):
+            return bool(val)
+    return not _goalie_unconfirmed(
+        row.get("goalie_status"),
+        row.get("goalie_home_status"),
+        row.get("goalie_away_status"),
+    )
+
+
+def _nhl_anchor_base_weight(goalie_confirmed: bool) -> float:
+    env_key = "NHL_ANCHOR_W" if goalie_confirmed else "NHL_ANCHOR_W_UNCONFIRMED"
+    default = "0.50" if goalie_confirmed else "0.60"
+    try:
+        return float(os.getenv(env_key, default))
+    except Exception:
+        return float(default)
+
+
+def nhl_anchor_weight_for_row(row: pd.Series, config: SportBetConfig) -> float:
+    goalie_confirmed = _nhl_goalie_confirmed(row)
+    base_weight = _nhl_anchor_base_weight(goalie_confirmed)
+    return _dynamic_anchor_weight("nhl", base_weight, config)
+
+
 def _goalie_unconfirmed(
     goalie_status: Optional[str],
     home_status: Optional[str],
@@ -824,7 +851,10 @@ def ml_probabilities_for_row(row: pd.Series, sport: str = "nba") -> Dict[str, fl
     model_home = safe_float(row.get("model_home_prob_raw", row.get("model_home_prob")))
     market_home = safe_float(row.get("market_home_prob"))
     config = get_sport_bet_config(sport)
-    anchor_weight = _dynamic_anchor_weight(sport, config.anchor_weight, config)
+    if str(sport).lower() == "nhl":
+        anchor_weight = nhl_anchor_weight_for_row(row, config)
+    else:
+        anchor_weight = _dynamic_anchor_weight(sport, config.anchor_weight, config)
     if anchor_weight != config.anchor_weight:
         config = replace(config, anchor_weight=anchor_weight)
 
@@ -924,6 +954,10 @@ def primary_metrics_for_row(
     )
 
     config = get_sport_bet_config(sport)
+    if str(sport).lower() == "nhl":
+        nhl_anchor_weight = nhl_anchor_weight_for_row(row, config)
+        if nhl_anchor_weight != config.anchor_weight:
+            config = replace(config, anchor_weight=nhl_anchor_weight)
     p_model_raw_val = float(p_model_raw) if p_model_raw is not None and np.isfinite(p_model_raw) else float("nan")
     p_market_val = float(p_market) if p_market is not None and np.isfinite(p_market) else float("nan")
 
@@ -987,11 +1021,8 @@ def primary_metrics_for_row(
             )
         if sport.lower() == "nhl":
             goalie_shift = safe_float(row.get("goalie_prob_shift"))
-            if _goalie_unconfirmed(
-                row.get("goalie_status"),
-                row.get("goalie_home_status"),
-                row.get("goalie_away_status"),
-            ):
+            goalie_confirmed = _nhl_goalie_confirmed(row)
+            if not goalie_confirmed:
                 flags.append("GOALIE_UNCONFIRMED")
             if np.isfinite(p_model_final):
                 p_model_final = _apply_goalie_shift(
@@ -1048,6 +1079,15 @@ def primary_metrics_for_row(
         extra_edge = float(config.uncalibrated_edge_add)
 
     min_edge_dynamic = _dynamic_min_edge(sport, config.min_edge_cal, config) + extra_edge
+    if str(sport).lower() == "nhl":
+        goalie_confirmed = _nhl_goalie_confirmed(row)
+        if not goalie_confirmed:
+            min_edge_dynamic += 0.01
+        try:
+            min_edge_cap = float(os.getenv("NHL_MIN_EDGE_CAP", "0.055"))
+        except Exception:
+            min_edge_cap = 0.055
+        min_edge_dynamic = min(float(min_edge_dynamic), float(min_edge_cap))
 
     return (
         primary_market,

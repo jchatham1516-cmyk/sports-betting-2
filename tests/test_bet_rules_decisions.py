@@ -76,6 +76,28 @@ def test_min_edge_allows_play_for_nba():
     assert decision.play_pass == "PLAY"
 
 
+def test_nhl_unconfirmed_goalie_play_with_edge(monkeypatch):
+    monkeypatch.setenv("NHL_MIN_EDGE_CAP", "0.055")
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK: HOME ML",
+            "home_ml": -110,
+            "away_ml": 100,
+            "model_home_prob": 0.56,
+            "model_home_prob_final": 0.56,
+            "market_home_prob": 0.5,
+            "goalie_confirmed": False,
+            "goalie_status": "PROJECTED",
+            "goalie_home_status": "PROJECTED",
+            "goalie_away_status": "CONFIRMED",
+        }
+    )
+    decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nhl")
+
+    assert decision.play_pass == "PLAY"
+    assert "GOALIE_UNCONFIRMED" in decision.decision_flags
+
+
 def test_missing_odds_passes():
     row = _base_row(home_ml=None, away_ml=None)
     settings = DecisionSettings()

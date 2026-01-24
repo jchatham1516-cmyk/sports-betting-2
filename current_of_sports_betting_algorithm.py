@@ -28,8 +28,10 @@ from sports.common.bet_rules import (
     decide_bet_from_row,
     format_decision_trace,
     ml_probabilities_for_row,
+    nhl_anchor_weight_for_row,
     primary_metrics_for_row,
 )
+from sports.common.bet_config import get_sport_bet_config
 from sports.common.prob_calibration import fit_calibrator, update_daily_ml_calibration
 from sports.common.history_builder import build_historical_dataset, season_string_for_date
 from sports.common.reporting import (
@@ -109,6 +111,21 @@ def _top_n_default_for_sport(sport: str) -> int:
         return int(legacy)
     defaults = {"nba": 5, "nhl": 2, "nfl": 2}
     return int(defaults.get(sport, 3))
+
+
+def _edge_shrink_factor(row: pd.Series) -> float:
+    edge_raw = row.get("edge_prob_raw")
+    edge_final = row.get("edge_prob_final")
+    try:
+        edge_raw_val = float(edge_raw)
+        edge_final_val = float(edge_final)
+    except Exception:
+        return float("nan")
+    if not np.isfinite(edge_raw_val) or abs(edge_raw_val) < 1e-9:
+        return float("nan")
+    if not np.isfinite(edge_final_val):
+        return float("nan")
+    return float(edge_final_val / edge_raw_val)
 
 
 def _maybe_load_results_csv(sport: str, game_date: str) -> pd.DataFrame:
@@ -404,6 +421,12 @@ def main(argv=None):
         results_df["primary_ev"] = [m[15] for m in metrics]
         results_df["min_play_edge_abs_used"] = [m[16] for m in metrics]
         results_df["min_primary_edge_abs_used"] = [m[17] for m in metrics]
+        if args.sport == "nhl":
+            nhl_config = get_sport_bet_config("nhl")
+            results_df["nhl_anchor_w_used"] = [
+                nhl_anchor_weight_for_row(r, nhl_config) for _, r in results_df.iterrows()
+            ]
+            results_df["edge_shrink_factor"] = results_df.apply(_edge_shrink_factor, axis=1)
 
         decisions = [
             decide_bet_from_row(

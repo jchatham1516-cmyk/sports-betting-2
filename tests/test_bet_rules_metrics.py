@@ -121,3 +121,24 @@ def test_goalie_unconfirmed_flag_added_to_decisions():
     metrics = primary_metrics_for_row(row, sport="nhl")
     flags = metrics[14]
     assert "GOALIE_UNCONFIRMED" in flags
+
+
+def test_nhl_min_edge_cap_applied(monkeypatch):
+    monkeypatch.setenv("NHL_MIN_EDGE_CAP", "0.02")
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK: HOME ML",
+            "home_ml": -120,
+            "away_ml": 110,
+            "model_home_prob": 0.55,
+            "model_home_prob_final": 0.55,
+            "market_home_prob": 0.5,
+            "goalie_confirmed": True,
+            "goalie_status": "OK",
+            "goalie_home_status": "CONFIRMED",
+            "goalie_away_status": "CONFIRMED",
+        }
+    )
+    metrics = primary_metrics_for_row(row, sport="nhl")
+    assert metrics[16] <= 0.02
+    assert metrics[17] <= 0.02
