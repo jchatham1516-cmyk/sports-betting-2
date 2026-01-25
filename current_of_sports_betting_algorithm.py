@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import argparse
+import subprocess
 from datetime import datetime, timedelta, timezone
 from typing import List
 
@@ -282,6 +283,7 @@ def main(argv=None):
         default=None,
         help='Comma-separated sports list for parlay (e.g. "nba,nhl"). Defaults to today\'s run sport.',
     )
+    parser.add_argument("--dashboard", action="store_true", help="Build performance dashboards from bet_log.")
 
     args = parser.parse_args(argv)
 
@@ -462,6 +464,9 @@ def main(argv=None):
         results_df["model_away_prob_final"] = [p["model_away_prob_final"] for p in ml_probs]
         results_df["market_home_prob"] = [p["market_home_prob"] for p in ml_probs]
         results_df["market_away_prob"] = [p["market_away_prob"] for p in ml_probs]
+        results_df["goalie_shift_used"] = [p.get("goalie_shift_used") for p in ml_probs]
+        results_df["goalie_shift_mult"] = [p.get("goalie_shift_mult") for p in ml_probs]
+        results_df["goalie_shift_cap_hit"] = [p.get("goalie_shift_cap_hit") for p in ml_probs]
 
         uncertainty_data = load_uncertainty(args.sport)
         if uncertainty_data:
@@ -712,6 +717,15 @@ def main(argv=None):
     bet_log_path = "results/tracking/bet_log.csv"
     new_bets = append_plays_to_bet_log(results_df, args.sport, bet_log_path=bet_log_path)
     print(f"[bet_log] Added {new_bets} new bets to {bet_log_path}")
+
+    if args.dashboard:
+        try:
+            subprocess.run(
+                ["python", "scripts/perf_dashboard.py", "--bet-log", bet_log_path],
+                check=True,
+            )
+        except Exception as e:
+            print(f"[dashboard] WARNING: failed to build perf dashboard: {e}")
 
     # Evaluation/sanity checks
     eval_date = None
