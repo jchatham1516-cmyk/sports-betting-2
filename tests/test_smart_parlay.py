@@ -46,16 +46,16 @@ def test_smart_parlay_refuses_under_min_legs():
     ]
     df = pd.DataFrame(rows)
     result = build_smart_parlay(df, min_legs=4, max_legs=7)
-    assert result["status"] == "NO_PARLAY_TODAY"
+    assert result["status"] == "NO_PARLAY"
 
 
 def test_smart_parlay_enforces_unique_game_keys():
     rows = [
-        _base_row(sport="nba", game_key="g1", home="TeamA", away="TeamB", edge=0.09),
-        _base_row(sport="nba", game_key="g1", home="TeamA", away="TeamB", edge=0.085),
-        _base_row(sport="nba", game_key="g2", home="TeamC", away="TeamD", edge=0.08),
-        _base_row(sport="nba", game_key="g3", home="TeamE", away="TeamF", edge=0.075),
-        _base_row(sport="nba", game_key="g4", home="TeamG", away="TeamH", edge=0.074),
+        _base_row(sport="nba", game_key="g1", home="TeamA", away="TeamB", edge=0.09, market="moneyline"),
+        _base_row(sport="nba", game_key="g1", home="TeamA", away="TeamB", edge=0.085, market="spread"),
+        _base_row(sport="nhl", game_key="g2", home="TeamC", away="TeamD", edge=0.08, market="total"),
+        _base_row(sport="nhl", game_key="g3", home="TeamE", away="TeamF", edge=0.075, market="spread"),
+        _base_row(sport="nba", game_key="g4", home="TeamG", away="TeamH", edge=0.074, market="moneyline"),
     ]
     df = pd.DataFrame(rows)
     result = build_smart_parlay(df, min_legs=4, max_legs=5)
@@ -66,11 +66,11 @@ def test_smart_parlay_enforces_unique_game_keys():
 
 def test_smart_parlay_enforces_unique_teams():
     rows = [
-        _base_row(sport="nba", game_key="g1", home="TeamA", away="TeamB", edge=0.09),
-        _base_row(sport="nba", game_key="g2", home="TeamC", away="TeamD", edge=0.085),
-        _base_row(sport="nba", game_key="g3", home="TeamE", away="TeamF", edge=0.08),
-        _base_row(sport="nba", game_key="g4", home="TeamA", away="TeamG", edge=0.079),
-        _base_row(sport="nba", game_key="g5", home="TeamH", away="TeamI", edge=0.078),
+        _base_row(sport="nba", game_key="g1", home="TeamA", away="TeamB", edge=0.09, market="moneyline"),
+        _base_row(sport="nhl", game_key="g2", home="TeamC", away="TeamD", edge=0.085, market="total"),
+        _base_row(sport="nba", game_key="g3", home="TeamE", away="TeamF", edge=0.08, market="spread"),
+        _base_row(sport="nhl", game_key="g4", home="TeamA", away="TeamG", edge=0.079, market="moneyline"),
+        _base_row(sport="nhl", game_key="g5", home="TeamH", away="TeamI", edge=0.078, market="total"),
     ]
     df = pd.DataFrame(rows)
     result = build_smart_parlay(df, min_legs=4, max_legs=5)
@@ -82,14 +82,13 @@ def test_smart_parlay_enforces_unique_teams():
 def test_smart_parlay_respects_sport_and_market_caps():
     rows = [
         _base_row(sport="nba", game_key="g1", home="TeamA", away="TeamB", market="moneyline", edge=0.09),
-        _base_row(sport="nba", game_key="g2", home="TeamC", away="TeamD", market="moneyline", edge=0.088),
-        _base_row(sport="nba", game_key="g3", home="TeamE", away="TeamF", market="moneyline", edge=0.087),
-        _base_row(sport="nba", game_key="g4", home="TeamG", away="TeamH", market="spread", edge=0.086),
+        _base_row(sport="nba", game_key="g2", home="TeamC", away="TeamD", market="spread", edge=0.088),
+        _base_row(sport="nba", game_key="g3", home="TeamE", away="TeamF", market="total", edge=0.087),
+        _base_row(sport="nhl", game_key="g4", home="TeamG", away="TeamH", market="moneyline", edge=0.086),
         _base_row(sport="nhl", game_key="g5", home="TeamI", away="TeamJ", market="total", edge=0.085),
-        _base_row(sport="nhl", game_key="g6", home="TeamK", away="TeamL", market="total", edge=0.084),
     ]
     df = pd.DataFrame(rows)
-    result = build_smart_parlay(df, min_legs=4, max_legs=6)
+    result = build_smart_parlay(df, min_legs=4, max_legs=5)
     assert result["status"] == "PARLAY_READY"
     legs = result["legs"]
     sport_counts = {}

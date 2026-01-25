@@ -47,6 +47,8 @@ EXTREME_EDGE_REQUIREMENT = float(os.getenv("EXTREME_ML_EDGE_REQUIREMENT", "0.12"
 ATS_UNCALIBRATED_EDGE_ADD = float(os.getenv("ATS_UNCALIBRATED_EDGE_ADD", "0.02"))
 ATS_UNCALIBRATED_MAX_UNITS = float(os.getenv("ATS_UNCALIBRATED_MAX_UNITS", "0.5"))
 ATS_UNCALIBRATED_EDGE_OVERRIDE = float(os.getenv("ATS_UNCALIBRATED_EDGE_OVERRIDE", "0.08"))
+NBA_ATS_SHRINK = float(os.getenv("NBA_ATS_SHRINK", "1.25"))
+NBA_ML_MIN_EDGE_OVERRIDE = os.getenv("NBA_ML_MIN_EDGE_OVERRIDE")
 
 
 def _edge_thresholds_for_sport(sport: str) -> Tuple[float, float]:
@@ -898,6 +900,15 @@ def _apply_underdog_cap(p_final: float, p_market: float, config: SportBetConfig)
     return float(capped), capped < p_final - 1e-9
 
 
+def _apply_nba_ats_shrink(p_final: float) -> float:
+    if not np.isfinite(p_final):
+        return p_final
+    shrink = float(NBA_ATS_SHRINK)
+    if not np.isfinite(shrink) or shrink <= 0:
+        return p_final
+    return 0.5 + (float(p_final) - 0.5) / float(shrink)
+
+
 def _apply_goalie_shift(
     p_final: float,
     shift: Optional[float],
@@ -910,6 +921,54 @@ def _apply_goalie_shift(
         return p_final
     adj_shift = float(shift)
     return float(max(0.01, min(0.99, p_final + adj_shift)))
+
+
+def _goalie_shift_multiplier(
+    goalie_status: Optional[str],
+    home_status: Optional[str],
+    away_status: Optional[str],
+) -> float:
+    def _normalize(status: Optional[str]) -> str:
+        return str(status or "").strip().upper()
+
+    def _mult_for_status(status: str) -> float:
+        if status in {"CONFIRMED", "OK"}:
+            return 1.0
+        if status in {"PROBABLE", "LIKELY"}:
+            return 0.75
+        if status in {"PROJECTED", "EXPECTED"}:
+            return 0.55
+        if not status:
+            return 0.40
+        return 0.40
+
+    home_norm = _normalize(home_status)
+    away_norm = _normalize(away_status)
+    if home_norm or away_norm:
+        return min(_mult_for_status(home_norm), _mult_for_status(away_norm))
+    return _mult_for_status(_normalize(goalie_status))
+
+
+def _goalie_shift_context(
+    shift: Optional[float],
+    *,
+    goalie_status: Optional[str],
+    home_status: Optional[str],
+    away_status: Optional[str],
+) -> Tuple[float, float, bool]:
+    if shift is None or not np.isfinite(shift):
+        return float("nan"), float("nan"), False
+    mult = _goalie_shift_multiplier(goalie_status, home_status, away_status)
+    try:
+        cap = float(os.getenv("NHL_GOALIE_SHIFT_CAP", "0.020"))
+    except Exception:
+        cap = 0.02
+    scaled = float(shift) * float(mult)
+    cap_hit = False
+    if np.isfinite(cap) and cap > 0 and abs(scaled) > float(cap):
+        cap_hit = True
+        scaled = float(np.sign(scaled) * float(cap))
+    return float(scaled), float(mult), bool(cap_hit)
 
 
 def _ml_probabilities_for_side(
@@ -981,17 +1040,26 @@ def ml_probabilities_for_row(row: pd.Series, sport: str = "nba") -> Dict[str, fl
         goalie_status = row.get("goalie_status")
         home_status = row.get("goalie_home_status")
         away_status = row.get("goalie_away_status")
+        goalie_shift_used = float("nan")
+        goalie_shift_mult = float("nan")
+        goalie_shift_cap_hit = False
         if goalie_shift is not None and np.isfinite(goalie_shift):
+            goalie_shift_used, goalie_shift_mult, goalie_shift_cap_hit = _goalie_shift_context(
+                goalie_shift,
+                goalie_status=goalie_status,
+                home_status=home_status,
+                away_status=away_status,
+            )
             home_final = _apply_goalie_shift(
                 home_final,
-                goalie_shift,
+                goalie_shift_used,
                 goalie_status=goalie_status,
                 home_status=home_status,
                 away_status=away_status,
             )
             away_final = _apply_goalie_shift(
                 away_final,
-                -goalie_shift,
+                -goalie_shift_used,
                 goalie_status=goalie_status,
                 home_status=home_status,
                 away_status=away_status,
@@ -1008,7 +1076,8 @@ def ml_probabilities_for_row(row: pd.Series, sport: str = "nba") -> Dict[str, fl
             "[goalie impact] "
             f"{row.get('home')} vs {row.get('away')} | "
             f"z_home={_fmt(z_home)} z_away={_fmt(z_away)} diff={_fmt(diff)} "
-            f"shift={_fmt(goalie_shift)} p_before={_fmt(p_before)} p_after={_fmt(p_after)}"
+            f"shift={_fmt(goalie_shift)} mult={_fmt(goalie_shift_mult)} "
+            f"shift_used={_fmt(goalie_shift_used)} p_before={_fmt(p_before)} p_after={_fmt(p_after)}"
         )
 
     return {
@@ -1022,6 +1091,9 @@ def ml_probabilities_for_row(row: pd.Series, sport: str = "nba") -> Dict[str, fl
         "model_away_prob_final": away_final,
         "market_home_prob": home_market,
         "market_away_prob": away_market,
+        "goalie_shift_used": goalie_shift_used if sport.lower() == "nhl" else float("nan"),
+        "goalie_shift_mult": goalie_shift_mult if sport.lower() == "nhl" else float("nan"),
+        "goalie_shift_cap_hit": goalie_shift_cap_hit if sport.lower() == "nhl" else False,
     }
 
 
@@ -1151,9 +1223,15 @@ def primary_metrics_for_row(
             goalie_shift = safe_float(row.get("goalie_prob_shift"))
             goalie_confirmed = _nhl_goalie_confirmed(row)
             if np.isfinite(p_model_final):
+                goalie_shift_used, _goalie_mult, _goalie_cap = _goalie_shift_context(
+                    goalie_shift,
+                    goalie_status=row.get("goalie_status"),
+                    home_status=row.get("goalie_home_status"),
+                    away_status=row.get("goalie_away_status"),
+                )
                 p_model_final = _apply_goalie_shift(
                     p_model_final,
-                    goalie_shift,
+                    goalie_shift_used,
                     goalie_status=row.get("goalie_status"),
                     home_status=row.get("goalie_home_status"),
                     away_status=row.get("goalie_away_status"),
@@ -1183,6 +1261,8 @@ def primary_metrics_for_row(
             p_model_cal = p_model_raw_val
         if not np.isfinite(p_model_final):
             p_model_final = p_model_cal
+        if str(sport).lower() == "nba" and np.isfinite(p_model_final):
+            p_model_final = _apply_nba_ats_shrink(p_model_final)
         if np.isfinite(p_model_final) and np.isfinite(p_market_val):
             edge_prob_final = float(p_model_final) - float(p_market_val)
     if uncalibrated:
@@ -1463,6 +1543,23 @@ def decide_bet_from_row(
                     min_edge_dyn=min_primary_edge_abs_used,
                 )
                 return decision
+
+    if str(sport).lower() == "nba" and primary_market == "ML":
+        decision_conf = str(_conf or "").upper()
+        is_extreme = False
+        if primary_price is not None and np.isfinite(primary_price):
+            is_extreme = (float(primary_price) >= float(EXTREME_ML_POS_ODDS)) or (
+                float(primary_price) <= float(EXTREME_ML_NEG_ODDS)
+            )
+        if decision_conf == "HIGH" and not is_extreme:
+            override_val = 0.045
+            if NBA_ML_MIN_EDGE_OVERRIDE is not None and str(NBA_ML_MIN_EDGE_OVERRIDE).strip():
+                try:
+                    override_val = float(NBA_ML_MIN_EDGE_OVERRIDE)
+                except Exception:
+                    override_val = 0.045
+            if np.isfinite(override_val) and override_val > 0:
+                min_primary_edge_abs_used = min(float(min_primary_edge_abs_used), float(override_val))
 
     if not np.isfinite(abs_edge) or abs_edge < float(min_primary_edge_abs_used):
         uncertainty_note = ""
