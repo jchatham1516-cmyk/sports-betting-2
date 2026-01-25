@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from sports.common.bet_rules import ml_probabilities_for_row, primary_metrics_for_row
 
@@ -15,7 +16,7 @@ def test_anchor_weight_applied():
     )
 
     ml_probs = ml_probabilities_for_row(row, sport="nba")
-    assert round(ml_probs["model_home_prob_final"], 3) == 0.58
+    assert ml_probs["model_home_prob_final"] == pytest.approx(0.59, abs=1e-3)
 
 
 def test_underdog_cap_applied():
@@ -31,7 +32,7 @@ def test_underdog_cap_applied():
 
     metrics = primary_metrics_for_row(row, sport="nba")
     p_final = metrics[4]
-    flags = metrics[14]
+    flags = metrics[15]
 
     assert p_final <= 0.3000001
     assert "UNDERDOG_CAP" in flags

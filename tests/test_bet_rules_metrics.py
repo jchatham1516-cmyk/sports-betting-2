@@ -119,7 +119,7 @@ def test_goalie_unconfirmed_flag_added_to_decisions():
         }
     )
     metrics = primary_metrics_for_row(row, sport="nhl")
-    flags = metrics[14]
+    flags = metrics[15]
     assert "GOALIE_UNCONFIRMED" in flags
 
 
@@ -140,8 +140,8 @@ def test_nhl_min_edge_cap_applied(monkeypatch):
         }
     )
     metrics = primary_metrics_for_row(row, sport="nhl")
-    assert metrics[16] <= 0.02
     assert metrics[17] <= 0.02
+    assert metrics[18] <= 0.02
 
 
 def test_nhl_min_edge_cap(monkeypatch):
@@ -162,8 +162,8 @@ def test_nhl_min_edge_cap(monkeypatch):
         }
     )
     metrics = primary_metrics_for_row(row, sport="nhl")
-    assert metrics[16] <= 0.055
     assert metrics[17] <= 0.055
+    assert metrics[18] <= 0.055
 
 
 def test_low_unc_reduces_anchor(monkeypatch):
@@ -215,9 +215,52 @@ def test_goalie_unconfirmed_single_penalty(monkeypatch):
 
     metrics_confirmed = primary_metrics_for_row(confirmed, sport="nhl")
     metrics_unconfirmed = primary_metrics_for_row(unconfirmed, sport="nhl")
-    assert "GOALIE_UNCONFIRMED" in metrics_unconfirmed[14]
-    diff = float(metrics_unconfirmed[16]) - float(metrics_confirmed[16])
+    assert "GOALIE_UNCONFIRMED" in metrics_unconfirmed[15]
+    diff = float(metrics_unconfirmed[17]) - float(metrics_confirmed[17])
     assert abs(diff - 0.01) < 1e-6
+
+
+def test_primary_metrics_safe_for_minimal_nhl_ml_row():
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK: HOME ML",
+            "home_ml": -120,
+            "away_ml": 110,
+            "model_home_prob": 0.55,
+            "market_home_prob": 0.5,
+        }
+    )
+    metrics = primary_metrics_for_row(row, sport="nhl")
+    assert str(metrics[11]).strip()
+    assert isinstance(metrics[12], bool)
+
+
+def test_primary_metrics_safe_for_missing_ats_fields():
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK: HOME ATS",
+            "primary_market": "ATS",
+            "primary_side": "HOME",
+        }
+    )
+    metrics = primary_metrics_for_row(row, sport="nba")
+    assert str(metrics[11]).strip()
+    assert isinstance(metrics[12], bool)
+
+
+def test_primary_metrics_safe_when_value_tier_inputs_missing():
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK: AWAY ML",
+            "home_ml": -115,
+            "away_ml": 105,
+            "model_home_prob": 0.48,
+            "market_home_prob": 0.52,
+        }
+    )
+    metrics = primary_metrics_for_row(row, sport="nba")
+    assert str(metrics[11]).strip()
+    assert isinstance(metrics[12], bool)
 
 
 def test_primary_metrics_handles_uncalibrated_ats():
@@ -234,6 +277,6 @@ def test_primary_metrics_handles_uncalibrated_ats():
         }
     )
     metrics = primary_metrics_for_row(row, sport="nba")
-    flags = metrics[14]
+    flags = metrics[15]
     assert "ATS_UNCALIBRATED" in flags
     assert "UNCALIBRATED_FALLBACK" in flags

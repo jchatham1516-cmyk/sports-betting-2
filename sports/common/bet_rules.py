@@ -746,15 +746,21 @@ def _downgrade_confidence_tier(tier: str) -> str:
     return order[max(0, order.index(tier) - 1)]
 
 
-def _downgrade_value_tier(tier: str) -> str:
-    t = (tier or "").upper()
+def _safe_value_tier(v: Optional[str]) -> str:
+    if v is None or str(v).strip() == "":
+        return "NO VALUE"
+    return str(v)
+
+
+def _downgrade_value_tier(tier: Optional[str]) -> str:
+    t = _safe_value_tier(tier).upper()
     if "HIGH" in t:
         return "MED VALUE"
     if "MED" in t:
         return "LOW VALUE"
-    if "LOW" in t:
-        return "NO BET"
-    return tier
+    if "LOW" in t or "NO" in t:
+        return "NO VALUE"
+    return _safe_value_tier(tier)
 
 
 def _tier_rank(tier: str) -> int:
@@ -1033,9 +1039,11 @@ def primary_metrics_for_row(
     float,
     float,
     float,
+    float,
     str,
     str,
     str,
+    bool,
     Optional[float],
     Optional[str],
     str,
@@ -1043,6 +1051,15 @@ def primary_metrics_for_row(
     float,
     float,
 ]:
+    uncalibrated = False
+    value_tier = "NO VALUE"
+    conf = "LOW"
+    primary_market = "NONE"
+    primary_side = "NONE"
+    primary_ev = float("nan")
+    abs_edge = float("nan")
+    decision_flags: List[str] = []
+
     primary_market, primary_side = _primary_market_and_side(row)
     p_model_raw, p_market, primary_price, opp_price, data_reason = _primary_probabilities(
         row, primary_market, primary_side
@@ -1063,7 +1080,6 @@ def primary_metrics_for_row(
 
     calibrator_missing = False
     calibrator_samples = None
-    uncalibrated = False
     if str(primary_market).upper() == "ML":
         calibrator_params = load_calibrator(sport)
         calibrator_missing = calibrator_params is None
@@ -1174,6 +1190,7 @@ def primary_metrics_for_row(
         if primary_market == "ATS":
             flags.append("ATS_UNCALIBRATED")
 
+    value_tier = value_tier_from_edge(edge_prob_final, config.min_edge_cal)
     base_conf = confidence_tier_from_edge(edge_prob_final, config.min_edge_cal)
     injury_low = _injury_confidence_low(row)
     conf, penalties = _apply_confidence_penalties(
@@ -1189,7 +1206,7 @@ def primary_metrics_for_row(
         goalie_confirmed = _nhl_goalie_confirmed(row)
         if not goalie_confirmed:
             conf = _downgrade_confidence_tier(conf)
-            value_tier = _downgrade_value_tier(value_tier)
+            value_tier = _downgrade_value_tier(_safe_value_tier(value_tier))
             if conf_reason:
                 conf_reason = f"{conf_reason}, GOALIE_UNCONFIRMED"
             else:
@@ -1200,7 +1217,6 @@ def primary_metrics_for_row(
             conf_reason = f"{conf_reason}, UNCALIBRATED_CONF_DOWN"
         else:
             conf_reason = "UNCALIBRATED_CONF_DOWN"
-    value_tier = value_tier_from_edge(edge_prob_final, config.min_edge_cal)
 
     edge_shift = (
         abs(float(edge_prob_raw - edge_prob_final))
@@ -1209,7 +1225,7 @@ def primary_metrics_for_row(
     )
     if edge_shift >= float(EDGE_SHIFT_DOWNGRADE):
         conf = _downgrade_confidence_tier(conf)
-        value_tier = _downgrade_value_tier(value_tier)
+        value_tier = _downgrade_value_tier(_safe_value_tier(value_tier))
         flags.append("EDGE_SHIFT_DOWNGRADE")
 
     primary_ev = (
@@ -1252,6 +1268,7 @@ def primary_metrics_for_row(
         conf,
         conf_reason,
         value_tier,
+        bool(uncalibrated),
         primary_price,
         data_reason,
         normalize_decision_flags(decision_flags),
@@ -1351,6 +1368,7 @@ def decide_bet_from_row(
         _conf,
         _conf_reason,
         value_tier,
+        _uncalibrated,
         primary_price,
         data_reason,
         metric_flags,
@@ -1814,10 +1832,11 @@ def add_betting_outputs(
     out["confidence"] = [m[9] for m in metrics]
     out["confidence_reason"] = [m[10] for m in metrics]
     out["value_tier"] = [m[11] for m in metrics]
-    out["primary_price"] = [m[12] for m in metrics]
-    out["primary_ev"] = [m[15] for m in metrics]
-    out["min_play_edge_abs_used"] = [m[16] for m in metrics]
-    out["min_primary_edge_abs_used"] = [m[17] for m in metrics]
+    out["uncalibrated"] = [m[12] for m in metrics]
+    out["primary_price"] = [m[13] for m in metrics]
+    out["primary_ev"] = [m[16] for m in metrics]
+    out["min_play_edge_abs_used"] = [m[17] for m in metrics]
+    out["min_primary_edge_abs_used"] = [m[18] for m in metrics]
     if str(sport).lower() == "nhl":
         anchor_contexts = [nhl_anchor_context_for_row(r, get_sport_bet_config("nhl")) for _, r in out.iterrows()]
         nhl_uncertainty_used, nhl_uncertainty_samples, nhl_uncertainty_raw = _nhl_uncertainty_context(

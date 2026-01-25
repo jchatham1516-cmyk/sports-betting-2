@@ -503,10 +503,11 @@ def main(argv=None):
         results_df["confidence"] = [m[9] for m in metrics]
         results_df["confidence_reason"] = [m[10] for m in metrics]
         results_df["value_tier"] = [m[11] for m in metrics]
-        results_df["primary_price"] = [m[12] for m in metrics]
-        results_df["primary_ev"] = [m[15] for m in metrics]
-        results_df["min_play_edge_abs_used"] = [m[16] for m in metrics]
-        results_df["min_primary_edge_abs_used"] = [m[17] for m in metrics]
+        results_df["uncalibrated"] = [m[12] for m in metrics]
+        results_df["primary_price"] = [m[13] for m in metrics]
+        results_df["primary_ev"] = [m[16] for m in metrics]
+        results_df["min_play_edge_abs_used"] = [m[17] for m in metrics]
+        results_df["min_primary_edge_abs_used"] = [m[18] for m in metrics]
         if args.sport == "nhl":
             nhl_config = get_sport_bet_config("nhl")
             results_df["nhl_anchor_w_used"] = [
