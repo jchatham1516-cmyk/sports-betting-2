@@ -1252,8 +1252,15 @@ def primary_metrics_for_row(
             decision_flags.append("GOALIE_UNCONFIRMED")
         min_edge_dynamic += nhl_goalie_unconfirmed_edge_add(goalie_confirmed)
         min_edge_cap = nhl_min_edge_cap_value()
+        min_edge_dynamic_before_cap = float(min_edge_dynamic)
         # Example: edge_prob_raw=0.043 -> edge_prob_final=0.034, min_edge ~0.064 -> capped at 0.055.
-        min_edge_dynamic = min(float(min_edge_dynamic), float(min_edge_cap))
+        min_edge_dynamic = min(float(min_edge_dynamic_before_cap), float(min_edge_cap))
+        if min_edge_dynamic_before_cap > float(min_edge_cap) + 1e-6:
+            print(
+                "[nhl min edge cap] "
+                f"pre_cap={min_edge_dynamic_before_cap:.6f} cap={float(min_edge_cap):.6f}"
+            )
+        assert float(min_edge_dynamic) <= float(min_edge_cap) + 1e-6
 
     return (
         primary_market,
@@ -1856,6 +1863,7 @@ def add_betting_outputs(
             nhl_goalie_unconfirmed_edge_add(ctx.goalie_confirmed) for ctx in anchor_contexts
         ]
         out["effective_uncertainty"] = [ctx.effective_uncertainty for ctx in anchor_contexts]
+        out["nhl_effective_uncertainty"] = [ctx.effective_uncertainty for ctx in anchor_contexts]
     else:
         out["nhl_uncertainty"] = np.nan
         out["nhl_uncertainty_n"] = np.nan
@@ -1867,6 +1875,7 @@ def add_betting_outputs(
         out["nhl_low_unc_applied"] = np.nan
         out["nhl_goalie_unconf_edge_add"] = np.nan
         out["effective_uncertainty"] = np.nan
+        out["nhl_effective_uncertainty"] = np.nan
 
     decisions = [
         decide_bet_from_row(
