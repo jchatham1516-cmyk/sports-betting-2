@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import argparse
 from datetime import datetime, timedelta, timezone
+from typing import List
 
 import numpy as np
 import pandas as pd
@@ -48,7 +49,14 @@ from sports.common.reporting import (
     render_console_report,
     self_check_recent_bets,
 )
-from sports.common.parlay import build_daily_parlay, build_weekly_parlay, load_recent_predictions, render_parlay_card
+from sports.common.parlay import (
+    build_smart_parlay,
+    build_weekly_parlay,
+    load_daily_picks,
+    load_recent_predictions,
+    print_parlay_card,
+    save_parlay_outputs,
+)
 from sports.common.prob_uncertainty import load_uncertainty, update_uncertainty
 
 from sports.nba.bdl_client import (
@@ -268,6 +276,12 @@ def main(argv=None):
     parser.add_argument("--parlay", action="store_true", help="Build a daily parlay from today's plays.")
     parser.add_argument("--parlay-min-legs", type=int, default=4, help="Minimum daily parlay legs.")
     parser.add_argument("--parlay-max-legs", type=int, default=7, help="Maximum daily parlay legs.")
+    parser.add_argument(
+        "--parlay-sports",
+        type=str,
+        default=None,
+        help='Comma-separated sports list for parlay (e.g. "nba,nhl"). Defaults to today\'s run sport.',
+    )
 
     args = parser.parse_args(argv)
 
@@ -664,26 +678,32 @@ def main(argv=None):
     if args.parlay:
         if int(args.parlay_max_legs) < int(args.parlay_min_legs):
             raise ValueError("--parlay-max-legs must be >= --parlay-min-legs")
-        try:
-            date_tag = datetime.strptime(game_date, "%m/%d/%Y").strftime("%Y-%m-%d")
-        except Exception:
-            date_tag = datetime.utcnow().strftime("%Y-%m-%d")
-        parlay_result = build_daily_parlay(
-            results_df,
+        date_tag = game_date.replace("/", "-")
+        parlay_sports = (
+            [s.strip().lower() for s in str(args.parlay_sports).split(",") if s.strip()]
+            if args.parlay_sports
+            else [args.sport]
+        )
+        picks_frames: List[pd.DataFrame] = []
+        if not results_df.empty and args.sport in parlay_sports:
+            df_current = results_df.copy()
+            if "sport" not in df_current.columns:
+                df_current["sport"] = args.sport
+            picks_frames.append(df_current)
+            parlay_sports = [s for s in parlay_sports if s != args.sport]
+        if parlay_sports:
+            picks_frames.append(load_daily_picks(date_tag, parlay_sports))
+        valid_frames = [df for df in picks_frames if df is not None and not df.empty]
+        picks_df = pd.concat(valid_frames, ignore_index=True) if valid_frames else pd.DataFrame()
+        parlay_result = build_smart_parlay(
+            picks_df,
             min_legs=int(args.parlay_min_legs),
             max_legs=int(args.parlay_max_legs),
-            date_tag=date_tag,
+            config={"unit_dollars": unit_dollars},
         )
-        os.makedirs("results", exist_ok=True)
-        json_path = f"results/parlay_{date_tag}.json"
-        csv_path = f"results/parlay_{date_tag}.csv"
-        pd.DataFrame(parlay_result.get("legs", [])).to_csv(csv_path, index=False)
-        with open(json_path, "w", encoding="utf-8") as f:
-            import json
-
-            json.dump(parlay_result, f, indent=2)
-        render_parlay_card(parlay_result)
-        print(f"[parlay] wrote {json_path} and {csv_path}")
+        save_parlay_outputs(date_tag, parlay_result)
+        print_parlay_card(parlay_result)
+        print(f"[parlay] wrote results/parlay_{date_tag}.json and results/parlay_{date_tag}.csv")
 
     if "date" not in results_df.columns:
         results_df["date"] = game_date

@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from sports.common.bet_config import get_sport_bet_config
-from sports.common.bet_rules import american_to_decimal, implied_prob_american
+from sports.common.bet_rules import DEFAULT_UNIT_DOLLARS, american_to_decimal, implied_prob_american
 
 
 CONFIDENCE_WEIGHTS = {
@@ -29,6 +29,39 @@ MARKET_LIMITS = {
     "TOTAL": 3,
     "ATS": 4,
 }
+
+SMART_PARLAY_MARKET_WEIGHTS = {
+    "moneyline": 1.00,
+    "spread": 0.70,
+    "total": 0.60,
+}
+
+SMART_PARLAY_CONFIDENCE_WEIGHTS = {
+    "HIGH": 1.00,
+    "MEDIUM": 0.90,
+    "LOW": 0.80,
+}
+
+SMART_PARLAY_DEFAULTS = {
+    "min_edge_by_sport": {"nba": 0.055, "nhl": 0.050},
+    "min_pwin_by_sport": {"nba": 0.58, "nhl": 0.56},
+    "min_ev": 0.02,
+    "allow_goalie_unconfirmed": False,
+    "goalie_min_edge_bump": 0.02,
+    "goalie_min_pwin_bump": 0.02,
+    "preferred_max_legs": 6,
+    "high_score_ratio": 0.85,
+}
+
+SMART_PARLAY_BLOCKED_FLAGS = {
+    "UNCALIBRATED_FALLBACK",
+    "ATS_UNCALIBRATED_MARGIN",
+    "ATS_GATED_INVALID_SPREAD",
+    "TOTAL_GATED_LOW_QUALITY",
+    "GOALIE_UNCONFIRMED",
+}
+
+SMART_PARLAY_ALLOWED_MARKETS = {"moneyline", "spread", "total"}
 
 
 @dataclass
@@ -600,3 +633,429 @@ def load_recent_predictions(
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
+
+
+def _normalize_primary_market(value: object) -> str:
+    market = str(value or "").strip().lower()
+    if market in {"ml", "moneyline", "money line"}:
+        return "moneyline"
+    if market in {"spread", "ats", "against the spread"}:
+        return "spread"
+    if market in {"total", "totals", "over/under", "ou"}:
+        return "total"
+    return market
+
+
+def _normalize_confidence(value: object) -> str:
+    return str(value or "").strip().upper()
+
+
+def _safe_float_or_nan(value: object) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float("nan")
+
+
+def _is_finite(value: object) -> bool:
+    try:
+        return bool(np.isfinite(float(value)))
+    except Exception:
+        return False
+
+
+def _parlay_game_key(row: pd.Series) -> str:
+    for key in ("game_key", "event_id"):
+        val = row.get(key)
+        if pd.notna(val) and str(val).strip():
+            return str(val)
+    home = str(row.get("home", "")).strip()
+    away = str(row.get("away", "")).strip()
+    date = str(row.get("date", "")).strip()
+    return f"{date}|{away}@{home}".strip("|")
+
+
+def _teams_for_row(row: pd.Series) -> Tuple[str, str]:
+    home = str(row.get("home", "")).strip()
+    away = str(row.get("away", "")).strip()
+    return home, away
+
+
+def _leg_price(row: pd.Series) -> float:
+    for col in ("primary_price", "price", "line_price"):
+        if col in row.index:
+            price = _safe_float_or_nan(row.get(col))
+            if np.isfinite(price):
+                return float(price)
+    return float("nan")
+
+
+def _leg_line(row: pd.Series, market: str, side: str) -> object:
+    for col in ("line", "primary_line"):
+        if col in row.index and pd.notna(row.get(col)):
+            return row.get(col)
+    market = str(market).lower()
+    side = str(side).upper()
+    if market == "spread":
+        line = row.get("home_spread")
+        if side == "AWAY" and line is not None and pd.notna(line):
+            try:
+                return -float(line)
+            except Exception:
+                return line
+        return line
+    if market == "total":
+        return row.get("total_points")
+    return ""
+
+
+def _leg_score(p_win: float, edge_prob: float, market: str, confidence: str) -> float:
+    if not np.isfinite(p_win) or not np.isfinite(edge_prob):
+        return float("nan")
+    rel_weight = SMART_PARLAY_MARKET_WEIGHTS.get(str(market).lower(), 0.60)
+    conf_weight = SMART_PARLAY_CONFIDENCE_WEIGHTS.get(_normalize_confidence(confidence), 0.85)
+    return float(p_win) ** 1.6 * (1.0 + 2.0 * max(float(edge_prob), 0.0)) * float(rel_weight) * float(conf_weight)
+
+
+def load_daily_picks(date_str: str, sports_list: Iterable[str]) -> pd.DataFrame:
+    date_tag = str(date_str).replace("/", "-")
+    frames: List[pd.DataFrame] = []
+    for sport in sports_list:
+        sport_key = str(sport).strip().lower()
+        if not sport_key:
+            continue
+        path = Path("results") / f"picks_{sport_key}_{date_tag}.csv"
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        if "sport" not in df.columns:
+            df = df.copy()
+            df["sport"] = sport_key
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def build_smart_parlay(
+    picks_df: pd.DataFrame,
+    *,
+    min_legs: int = 4,
+    max_legs: int = 7,
+    config: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    if picks_df is None or picks_df.empty:
+        return {"status": "NO_PARLAY_TODAY", "reason": "no candidates", "legs": []}
+
+    cfg = {**SMART_PARLAY_DEFAULTS, **(config or {})}
+    min_edge_by_sport = cfg.get("min_edge_by_sport", {})
+    min_pwin_by_sport = cfg.get("min_pwin_by_sport", {})
+    min_ev = float(cfg.get("min_ev", SMART_PARLAY_DEFAULTS["min_ev"]))
+    allow_goalie_unconfirmed = bool(cfg.get("allow_goalie_unconfirmed", False))
+    goalie_edge_bump = float(cfg.get("goalie_min_edge_bump", SMART_PARLAY_DEFAULTS["goalie_min_edge_bump"]))
+    goalie_pwin_bump = float(cfg.get("goalie_min_pwin_bump", SMART_PARLAY_DEFAULTS["goalie_min_pwin_bump"]))
+    preferred_max_legs = int(cfg.get("preferred_max_legs", SMART_PARLAY_DEFAULTS["preferred_max_legs"]))
+    high_score_ratio = float(cfg.get("high_score_ratio", SMART_PARLAY_DEFAULTS["high_score_ratio"]))
+
+    work = picks_df.copy()
+    work["play_pass"] = work.get("play_pass", "").astype(str).str.upper()
+    work = work[work["play_pass"] == "PLAY"].copy()
+    if work.empty:
+        return {"status": "NO_PARLAY_TODAY", "reason": "no PLAY candidates", "legs": []}
+
+    eligible_legs: List[Dict[str, object]] = []
+    for _, row in work.iterrows():
+        sport = str(row.get("sport", "")).lower()
+        market = _normalize_primary_market(row.get("primary_market"))
+        if market not in SMART_PARLAY_ALLOWED_MARKETS:
+            continue
+        p_model_final = _safe_float_or_nan(row.get("p_model_final"))
+        p_market_used = _safe_float_or_nan(row.get("p_market_used"))
+        edge_prob = _safe_float_or_nan(row.get("edge_prob_final"))
+        primary_ev = _safe_float_or_nan(row.get("primary_ev"))
+        if not np.isfinite(p_model_final) or not np.isfinite(p_market_used) or not np.isfinite(edge_prob):
+            continue
+        if not np.isfinite(primary_ev) or primary_ev < min_ev:
+            continue
+
+        abs_edge = _safe_float_or_nan(row.get("abs_edge_prob"))
+        if not np.isfinite(abs_edge):
+            abs_edge = abs(edge_prob)
+
+        min_edge = float(min_edge_by_sport.get(sport, SMART_PARLAY_DEFAULTS["min_edge_by_sport"].get(sport, 0.055)))
+        min_pwin = float(min_pwin_by_sport.get(sport, SMART_PARLAY_DEFAULTS["min_pwin_by_sport"].get(sport, 0.58)))
+
+        flags = {f.strip() for f in str(row.get("decision_flags") or "").split(",") if f.strip()}
+        blocked_flags = SMART_PARLAY_BLOCKED_FLAGS.copy()
+        if allow_goalie_unconfirmed:
+            blocked_flags.discard("GOALIE_UNCONFIRMED")
+
+        if flags.intersection(blocked_flags):
+            continue
+
+        if "GOALIE_UNCONFIRMED" in flags and allow_goalie_unconfirmed:
+            min_edge = min_edge + goalie_edge_bump
+            min_pwin = min_pwin + goalie_pwin_bump
+
+        if abs_edge < min_edge:
+            continue
+        if p_model_final < min_pwin:
+            continue
+
+        price = _leg_price(row)
+        decimal_odds = american_to_decimal(price) if np.isfinite(price) else float("nan")
+        leg_score = _leg_score(p_model_final, edge_prob, market, row.get("confidence"))
+        game_key = _parlay_game_key(row)
+        home, away = _teams_for_row(row)
+        eligible_legs.append(
+            {
+                "sport": sport,
+                "game_key": game_key,
+                "market": market,
+                "side": str(row.get("primary_side", "")).upper(),
+                "home": home,
+                "away": away,
+                "matchup": f"{away} @ {home}".strip(),
+                "line": _leg_line(row, market, row.get("primary_side", "")),
+                "price": price,
+                "decimal_odds": decimal_odds,
+                "p_model_final": p_model_final,
+                "p_market_used": p_market_used,
+                "edge_prob_final": edge_prob,
+                "primary_ev": primary_ev,
+                "confidence": str(row.get("confidence", "")),
+                "value_tier": str(row.get("value_tier", "")),
+                "decision_flags": str(row.get("decision_flags", "")),
+                "reason_short": str(row.get("reason_short", row.get("decision_reason", ""))),
+                "leg_score": leg_score,
+            }
+        )
+
+    if len(eligible_legs) < min_legs:
+        return {
+            "status": "NO_PARLAY_TODAY",
+            "reason": "insufficient qualified legs",
+            "legs": [],
+        }
+
+    def _sort_key(leg: Dict[str, object]) -> Tuple[float, str, str, str, str, str]:
+        score = leg.get("leg_score")
+        score_val = float(score) if _is_finite(score) else -1e9
+        return (-score_val, str(leg.get("sport", "")), str(leg.get("game_key", "")), str(leg.get("market", "")),
+                str(leg.get("side", "")), str(leg.get("matchup", "")))
+
+    eligible_legs = sorted(eligible_legs, key=_sort_key)
+    available_sports = {leg["sport"] for leg in eligible_legs if leg.get("sport")}
+    available_markets = {leg["market"] for leg in eligible_legs if leg.get("market")}
+
+    selected: List[Dict[str, object]] = []
+    used_games: set[str] = set()
+    used_teams: set[str] = set()
+    sport_counts: Dict[str, int] = {}
+    market_counts: Dict[str, int] = {}
+    cap_denominator = max(min_legs, min(preferred_max_legs, max_legs))
+    top_score = None
+    for leg in eligible_legs:
+        if len(selected) >= max_legs:
+            break
+        if len(selected) >= preferred_max_legs and len(selected) >= min_legs:
+            if top_score is not None:
+                current_score = float(leg.get("leg_score")) if _is_finite(leg.get("leg_score")) else -1e9
+                if current_score < top_score * high_score_ratio:
+                    break
+
+        game_key = str(leg.get("game_key") or "")
+        if game_key and game_key in used_games:
+            continue
+        home = str(leg.get("home") or "")
+        away = str(leg.get("away") or "")
+        if home and home in used_teams:
+            continue
+        if away and away in used_teams:
+            continue
+
+        new_total = len(selected) + 1
+        new_sport_count = sport_counts.get(leg["sport"], 0) + 1
+        if len(available_sports) > 1 and new_total > 1:
+            if new_sport_count / cap_denominator > 0.60:
+                continue
+        new_market_count = market_counts.get(leg["market"], 0) + 1
+        if len(available_markets) > 1 and new_total > 1:
+            if new_market_count / cap_denominator > 0.60:
+                continue
+
+        selected.append(leg)
+        if top_score is None and _is_finite(leg.get("leg_score")):
+            top_score = float(leg["leg_score"])
+        if game_key:
+            used_games.add(game_key)
+        if home:
+            used_teams.add(home)
+        if away:
+            used_teams.add(away)
+        sport_counts[leg["sport"]] = new_sport_count
+        market_counts[leg["market"]] = new_market_count
+
+    if len(selected) < min_legs:
+        return {
+            "status": "NO_PARLAY_TODAY",
+            "reason": "correlation filters reduced legs below minimum",
+            "legs": [],
+        }
+
+    combined_decimal_odds = 1.0
+    combined_model_prob = 1.0
+    combined_market_prob = 1.0
+    for leg in selected:
+        decimal = leg.get("decimal_odds")
+        if np.isfinite(decimal):
+            combined_decimal_odds *= float(decimal)
+        combined_model_prob *= float(leg["p_model_final"])
+        combined_market_prob *= float(leg["p_market_used"])
+
+    correlation_penalty = 1.0 - 0.03 * max(len(selected) - 1, 0)
+    combined_model_prob_adj = combined_model_prob * correlation_penalty
+    combined_model_prob_adj = float(np.clip(combined_model_prob_adj, 0.0001, 0.999))
+    parlay_ev_estimate = combined_model_prob_adj * combined_decimal_odds - 1.0
+    parlay_score = float(np.mean([leg["leg_score"] for leg in selected if _is_finite(leg.get("leg_score"))]))
+
+    num_legs = len(selected)
+    base_units = min(0.25, 0.05 * num_legs)
+    max_units = float(os.getenv("PARLAY_MAX_UNITS", "0.5"))
+    parlay_units = min(base_units, max_units)
+    unit_dollars = float(cfg.get("unit_dollars", DEFAULT_UNIT_DOLLARS))
+    stake_dollars = parlay_units * unit_dollars
+
+    sports_used = {leg["sport"] for leg in selected if leg.get("sport")}
+    why = f"Found {num_legs} qualified legs across {len(sports_used)} sport(s) after correlation filters."
+
+    return {
+        "status": "PARLAY_READY",
+        "n_legs": num_legs,
+        "legs": selected,
+        "combined_model_prob": combined_model_prob,
+        "combined_model_prob_adj": combined_model_prob_adj,
+        "combined_market_implied_prob": combined_market_prob,
+        "combined_decimal_odds": combined_decimal_odds,
+        "parlay_score": parlay_score,
+        "parlay_ev_estimate": parlay_ev_estimate,
+        "parlay_units": parlay_units,
+        "stake_dollars": stake_dollars,
+        "why": why,
+    }
+
+
+def save_parlay_outputs(date_str: str, parlay_dict: Dict[str, object]) -> None:
+    date_tag = str(date_str).replace("/", "-")
+    os.makedirs("results", exist_ok=True)
+    json_path = Path("results") / f"parlay_{date_tag}.json"
+    csv_path = Path("results") / f"parlay_{date_tag}.csv"
+
+    import json
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(parlay_dict, f, indent=2)
+
+    legs = parlay_dict.get("legs", [])
+    rows: List[Dict[str, object]] = []
+    if parlay_dict.get("status") != "PARLAY_READY":
+        rows.append(
+            {
+                "date": date_tag,
+                "leg_num": "",
+                "sport": "",
+                "matchup": "NO PARLAY TODAY",
+                "market": "",
+                "side": "",
+                "line": "",
+                "price": "",
+                "decimal_odds": "",
+                "p_model_final": "",
+                "p_market_used": "",
+                "edge_prob_final": "",
+                "primary_ev": "",
+                "confidence": "",
+                "value_tier": "",
+                "decision_flags": "",
+                "reason_short": parlay_dict.get("reason", ""),
+            }
+        )
+    else:
+        for idx, leg in enumerate(legs, start=1):
+            rows.append(
+                {
+                    "date": date_tag,
+                    "leg_num": idx,
+                    "sport": leg.get("sport"),
+                    "matchup": leg.get("matchup"),
+                    "market": leg.get("market"),
+                    "side": leg.get("side"),
+                    "line": leg.get("line"),
+                    "price": leg.get("price"),
+                    "decimal_odds": leg.get("decimal_odds"),
+                    "p_model_final": leg.get("p_model_final"),
+                    "p_market_used": leg.get("p_market_used"),
+                    "edge_prob_final": leg.get("edge_prob_final"),
+                    "primary_ev": leg.get("primary_ev"),
+                    "confidence": leg.get("confidence"),
+                    "value_tier": leg.get("value_tier"),
+                    "decision_flags": leg.get("decision_flags"),
+                    "reason_short": leg.get("reason_short"),
+                }
+            )
+        rows.append(
+            {
+                "date": date_tag,
+                "leg_num": "SUMMARY",
+                "sport": "",
+                "matchup": "",
+                "market": "",
+                "side": "",
+                "line": "",
+                "price": "",
+                "decimal_odds": parlay_dict.get("combined_decimal_odds"),
+                "p_model_final": parlay_dict.get("combined_model_prob_adj"),
+                "p_market_used": parlay_dict.get("combined_market_implied_prob"),
+                "edge_prob_final": "",
+                "primary_ev": parlay_dict.get("parlay_ev_estimate"),
+                "confidence": "",
+                "value_tier": "",
+                "decision_flags": "",
+                "reason_short": "",
+            }
+        )
+
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+
+def print_parlay_card(parlay_dict: Dict[str, object]) -> None:
+    print("\nPARLAY CARD")
+    status = parlay_dict.get("status", "UNKNOWN")
+    if status != "PARLAY_READY":
+        print("NO PARLAY TODAY")
+        reason = parlay_dict.get("reason")
+        if reason:
+            print(f"[parlay] reason={reason}")
+        return
+    legs = parlay_dict.get("legs", [])
+    print(f"Legs: {len(legs)} | Units: {parlay_dict.get('parlay_units')} | Stake: ${parlay_dict.get('stake_dollars')}")
+    for i, leg in enumerate(legs, start=1):
+        print(
+            f"{i}. {str(leg.get('sport', '')).upper()} {leg.get('matchup')} "
+            f"{leg.get('market')} {leg.get('side')} line={leg.get('line')} price={leg.get('price')} "
+            f"p_win={leg.get('p_model_final')}"
+        )
+    print(
+        "Combined: "
+        f"model_prob={parlay_dict.get('combined_model_prob_adj')} "
+        f"market_prob={parlay_dict.get('combined_market_implied_prob')} "
+        f"decimal_odds={parlay_dict.get('combined_decimal_odds')}"
+    )
+    why = parlay_dict.get("why")
+    if why:
+        print(f"Why this parlay exists today: {why}")
