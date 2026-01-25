@@ -134,6 +134,77 @@ def _edge_shrink_factor(row: pd.Series) -> float:
     return float(edge_final_val / edge_raw_val)
 
 
+def _confidence_rank_value(confidence: object) -> int:
+    rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+    key = str(confidence or "").upper()
+    return rank.get(key, -1)
+
+
+def _primary_pass_reason(row: pd.Series) -> str:
+    mapping = {
+        "LOW_EDGE_PASS": "EDGE_TOO_SMALL",
+        "LOW_EV_PASS": "LOW_EV",
+        "MISSING_DATA_PASS": "MISSING_DATA",
+        "EXTREME_ODDS_PASS": "EXTREME_ODDS",
+        "DISAGREE_PASS": "DISAGREE_PASS",
+        "LOW_CONFIDENCE_PASS": "LOW_CONFIDENCE",
+        "NO_PICK": "NO_PICK",
+        "UNCALIBRATED_FALLBACK": "UNCALIBRATED",
+        "UNCALIBRATED_ZERO_SAMPLES": "UNCALIBRATED_ZERO_SAMPLES",
+        "GOALIE_UNCONFIRMED": "GOALIE_UNCONFIRMED",
+    }
+    flags = str(row.get("decision_flags", "") or "")
+    parts = [p.strip() for p in flags.split(",") if p.strip()]
+    for flag in parts:
+        if flag in mapping:
+            return mapping[flag]
+    if parts:
+        return parts[0]
+    reason = str(row.get("decision_reason", "") or "").strip()
+    if reason:
+        if reason.upper().startswith("NO BET:"):
+            reason = reason.split(":", 1)[-1].strip()
+        return reason.split()[0].upper()
+    return "UNKNOWN"
+
+
+def _pass_reason_counts(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "play_pass" not in df.columns:
+        return pd.DataFrame(columns=["reason", "count"])
+    passes = df[df["play_pass"].astype(str) == "PASS"]
+    if passes.empty:
+        return pd.DataFrame(columns=["reason", "count"])
+    reasons = passes.apply(_primary_pass_reason, axis=1)
+    counts = reasons.value_counts().reset_index()
+    counts.columns = ["reason", "count"]
+    return counts
+
+
+def _ranked_nhl_picks(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    work = df.copy()
+    work["_confidence_rank"] = work.get("confidence", "").apply(_confidence_rank_value)
+    for col in ("primary_ev", "abs_edge_prob"):
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.sort_values(
+        ["primary_ev", "_confidence_rank", "abs_edge_prob"],
+        ascending=[False, False, False],
+        kind="mergesort",
+        na_position="last",
+    )
+    work = work.drop(columns=["_confidence_rank"])
+    return work
+
+
+def _fmt_float(val: object) -> str:
+    try:
+        return f"{float(val):.3f}"
+    except Exception:
+        return "nan"
+
+
 def _maybe_load_results_csv(sport: str, game_date: str) -> pd.DataFrame:
     """Attempt to load a local scores/results CSV for the given sport/date."""
     hyphen_date = game_date.replace("/", "-")
@@ -311,6 +382,15 @@ def main(argv=None):
         results_df = run_daily_nfl(game_date, odds_dict=odds_dict)
 
     elif args.sport == "nhl":
+        try:
+            update_daily_ml_calibration(
+                "nhl",
+                days_back=int(os.getenv("NHL_PROB_CAL_DAYS", "45")),
+                min_samples=int(os.getenv("NHL_PROB_CAL_MIN_SAMPLES", "120")),
+            )
+        except Exception as e:
+            print(f"[calibration] WARNING: NHL ML calibration update failed: {e}")
+
         before_count = len(odds_dict)
         filtered_odds = {}
         try:
@@ -484,10 +564,15 @@ def main(argv=None):
         results_df = _cap_to_top_plays(results_df, max_plays)
 
     if args.sport == "nhl":
-        abs_edges = results_df["edge_prob_cal"].abs().astype(float)
-        abs_edges = abs_edges.replace([np.inf, -np.inf], np.nan).dropna()
-        plays = (results_df["play_pass"].astype(str) == "PLAY").sum()
-        passes = (results_df["play_pass"].astype(str) == "PASS").sum()
+        abs_edges = pd.Series(dtype=float)
+        if "edge_prob_cal" in results_df.columns:
+            abs_edges = results_df["edge_prob_cal"].abs().astype(float)
+            abs_edges = abs_edges.replace([np.inf, -np.inf], np.nan).dropna()
+        play_series = (
+            results_df["play_pass"].astype(str) if "play_pass" in results_df.columns else pd.Series([], dtype=str)
+        )
+        plays = int((play_series == "PLAY").sum())
+        passes = int((play_series == "PASS").sum())
         mean_edge = float(np.nanmean(abs_edges)) if not abs_edges.empty else 0.0
         median_edge = float(np.nanmedian(abs_edges)) if not abs_edges.empty else 0.0
         p90_edge = float(np.nanpercentile(abs_edges, 90)) if not abs_edges.empty else 0.0
@@ -498,6 +583,29 @@ def main(argv=None):
             f"abs_edge_cal mean={mean_edge:.4f} median={median_edge:.4f} "
             f"p90={p90_edge:.4f} max={max_edge:.4f}"
         )
+        ranked_plays = _ranked_nhl_picks(results_df)
+        if "play_pass" in ranked_plays.columns:
+            top_plays = ranked_plays[ranked_plays["play_pass"].astype(str) == "PLAY"].head(5)
+        else:
+            top_plays = pd.DataFrame()
+        if not top_plays.empty:
+            print("[nhl top plays]")
+            for _, row in top_plays.iterrows():
+                print(
+                    "  "
+                    f"{row.get('away', '')} @ {row.get('home', '')} | "
+                    f"{row.get('primary_recommendation', '')} "
+                    f"ev={_fmt_float(row.get('primary_ev'))} "
+                    f"conf={row.get('confidence', '')} "
+                    f"edge={_fmt_float(row.get('edge_prob_final'))}"
+                )
+        else:
+            print("[nhl top plays] none")
+        reason_counts = _pass_reason_counts(results_df)
+        if not reason_counts.empty:
+            print("[nhl pass reasons]")
+            for _, row in reason_counts.iterrows():
+                print(f"  {row['reason']}: {int(row['count'])}")
 
     os.makedirs("results", exist_ok=True)
     if not results_df.empty:
@@ -531,6 +639,15 @@ def main(argv=None):
                 print(f"[save] wrote ranked bet card -> {picks_path}")
             except Exception as e:
                 print(f"[save] WARNING: failed to write bet card: {e}")
+        if args.sport == "nhl":
+            date_tag = game_date.replace("/", "-")
+            picks_path = f"results/picks_nhl_{date_tag}.csv"
+            try:
+                nhl_ranked = _ranked_nhl_picks(results_df)
+                nhl_ranked.to_csv(picks_path, index=False)
+                print(f"[save] wrote ranked NHL picks -> {picks_path}")
+            except Exception as e:
+                print(f"[save] WARNING: failed to write NHL picks: {e}")
 
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
     print(f"[save] writing {len(results_df)} rows -> {out_name}")
@@ -619,8 +736,13 @@ def main(argv=None):
         print(f"[eval history] WARNING: bet history update failed: {e}")
 
     try:
-        if args.sport == "nba" and not eval_bets.empty:
-            ml_hist = eval_bets[eval_bets.get("market_type", "").astype(str).str.upper() == "ML"].copy()
+        if args.sport in {"nba", "nhl"} and not eval_bets.empty:
+            sport_key = str(args.sport).lower()
+            ml_hist = eval_bets[
+                eval_bets.get("market_type", "").astype(str).str.upper() == "ML"
+            ].copy()
+            if "sport" in ml_hist.columns:
+                ml_hist = ml_hist[ml_hist["sport"].astype(str).str.lower() == sport_key].copy()
             ml_hist["model_prob_raw"] = pd.to_numeric(ml_hist.get("model_prob_raw"), errors="coerce")
             ml_hist["model_prob"] = pd.to_numeric(ml_hist.get("model_prob"), errors="coerce")
             ml_hist["actual_result"] = pd.to_numeric(ml_hist.get("actual_result"), errors="coerce")
@@ -632,7 +754,7 @@ def main(argv=None):
                 p_unc = np.where(np.isfinite(p_final), p_final, p_raw)
                 mask_cal = np.isfinite(p_raw) & np.isfinite(y)
                 update_uncertainty(
-                    "nba",
+                    sport_key,
                     p_unc[mask_any],
                     y[mask_any],
                     window=int(mask_any.sum()),
@@ -640,12 +762,13 @@ def main(argv=None):
                     market="ML",
                 )
                 if mask_cal.any():
+                    min_samples = int(os.getenv(f"{sport_key.upper()}_PROB_CAL_MIN_SAMPLES", MIN_SAMPLES))
                     update_prob_calibration(
-                        "nba",
+                        sport_key,
                         p_raw[mask_cal],
                         y[mask_cal],
                         window=int(mask_cal.sum()),
-                        min_samples=int(MIN_SAMPLES),
+                        min_samples=min_samples,
                     )
     except Exception as e:
         print(f"[calibration] WARNING: rolling calibration update failed: {e}")

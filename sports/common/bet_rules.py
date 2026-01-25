@@ -382,9 +382,26 @@ def nhl_goalie_unconfirmed_edge_add(goalie_confirmed: bool) -> float:
     if goalie_confirmed:
         return 0.0
     try:
-        return float(os.getenv("NHL_GOALIE_UNCONF_EDGE_ADD", "0.01"))
+        env = os.getenv("NHL_GOALIE_UNKNOWN_MIN_EDGE_BUMP")
+        if env is None:
+            env = os.getenv("NHL_GOALIE_UNCONF_EDGE_ADD", "0.01")
+        return float(env)
     except Exception:
         return 0.01
+
+
+def nhl_goalie_unknown_penalty() -> float:
+    try:
+        return float(os.getenv("NHL_GOALIE_UNKNOWN_PENALTY", "0.25"))
+    except Exception:
+        return 0.25
+
+
+def nhl_goalie_unknown_max_units() -> float:
+    try:
+        return float(os.getenv("NHL_GOALIE_UNKNOWN_MAX_UNITS", "0.5"))
+    except Exception:
+        return 0.5
 
 
 def nhl_min_edge_cap_value() -> float:
@@ -1045,9 +1062,18 @@ def primary_metrics_for_row(
     existing_flag_list = [f for f in existing_flags.split(",") if f]
 
     calibrator_missing = False
+    calibrator_samples = None
     uncalibrated = False
     if str(primary_market).upper() == "ML":
-        calibrator_missing = load_calibrator(sport) is None
+        calibrator_params = load_calibrator(sport)
+        calibrator_missing = calibrator_params is None
+        if calibrator_params is not None:
+            try:
+                calibrator_samples = int(calibrator_params.get("n_samples", 0))
+            except Exception:
+                calibrator_samples = 0
+            if calibrator_samples <= 0:
+                calibrator_missing = True
     p_model_cal = calibrate_prob(sport, p_model_raw_val, market_type=primary_market)
     if not np.isfinite(p_model_cal):
         p_model_cal = p_model_raw_val
@@ -1084,6 +1110,8 @@ def primary_metrics_for_row(
         model_final_available = np.isfinite(p_model_final)
 
         uncalibrated = not np.isfinite(p_model_cal) or not np.isfinite(p_model_final) or calibrator_missing
+        if calibrator_samples is not None and calibrator_samples <= 0:
+            flags.append("UNCALIBRATED_ZERO_SAMPLES")
 
         if not np.isfinite(p_model_cal):
             p_model_cal = calibrate_prob(sport, p_model_raw_val, market_type=primary_market)
@@ -1114,6 +1142,13 @@ def primary_metrics_for_row(
                     home_status=row.get("goalie_home_status"),
                     away_status=row.get("goalie_away_status"),
                 )
+            if not goalie_confirmed and np.isfinite(p_model_final) and np.isfinite(p_market_val):
+                penalty = nhl_goalie_unknown_penalty()
+                if penalty > 0:
+                    shrink = float(max(0.0, 1.0 - float(penalty)))
+                    edge_prob_final = float(p_model_final - p_market_val) * shrink
+                    p_model_final = float(p_market_val + edge_prob_final)
+                    flags.append("GOALIE_UNKNOWN_PENALTY")
 
         edge_prob_final = (
             float(p_model_final) - float(p_market_val)
@@ -1150,6 +1185,15 @@ def primary_metrics_for_row(
         config=config,
     )
     conf_reason = ", ".join(penalties) if penalties else ""
+    if str(sport).lower() == "nhl" and primary_market == "ML":
+        goalie_confirmed = _nhl_goalie_confirmed(row)
+        if not goalie_confirmed:
+            conf = _downgrade_confidence_tier(conf)
+            value_tier = _downgrade_value_tier(value_tier)
+            if conf_reason:
+                conf_reason = f"{conf_reason}, GOALIE_UNCONFIRMED"
+            else:
+                conf_reason = "GOALIE_UNCONFIRMED"
     if uncalibrated:
         conf = _downgrade_confidence_tier(conf)
         if conf_reason:
@@ -1539,6 +1583,15 @@ def decide_bet_from_row(
         for flag in metric_flags.split(","):
             if flag:
                 flags.append(flag)
+
+    if str(sport).lower() == "nhl":
+        if "GOALIE_UNCONFIRMED" in flags or "GOALIE_UNKNOWN_PENALTY" in flags:
+            max_units = nhl_goalie_unknown_max_units()
+            if max_units > 0:
+                if final_units > float(max_units):
+                    flags.append("GOALIE_UNKNOWN_CAP")
+                    final_units = min(final_units, float(max_units))
+                    reason_parts.append(f"goalie_unconfirmed_cap<{float(max_units):.2f}")
 
     disagreement = abs(float(p_model_cal - p_market)) if np.isfinite(p_model_cal) and np.isfinite(p_market) else 0.0
     if disagreement > float(config.disagree_pass_edge):
