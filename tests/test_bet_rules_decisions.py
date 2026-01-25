@@ -123,7 +123,10 @@ def test_confidence_caps_for_moneyline_underdogs():
     assert metrics[9] == "LOW"
 
 
-def test_ats_uncalibrated_margin_forces_pass():
+def test_ats_uncalibrated_margin_caps_units(monkeypatch):
+    from sports.common import bet_rules
+
+    monkeypatch.setattr(bet_rules, "ATS_UNCALIBRATED_EDGE_OVERRIDE", 0.12)
     row = pd.Series(
         {
             "primary_recommendation": "Model PICK ATS: HOME",
@@ -131,13 +134,14 @@ def test_ats_uncalibrated_margin_forces_pass():
             "primary_side": "HOME",
             "home_spread": -5.5,
             "spread_price": -110,
-            "ats_home_cover_prob": 0.56,
-            "market_spread_prob": 0.5238,
+            "ats_home_cover_prob": 0.59,
+            "market_spread_prob": 0.5,
             "decision_flags": "ATS_UNCALIBRATED_MARGIN",
         }
     )
 
     decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
 
-    assert decision.play_pass == "PASS"
-    assert decision.decision_reason == "NO ATS: margin model uncalibrated"
+    assert decision.play_pass == "PLAY"
+    assert decision.final_units <= 0.5
+    assert "ATS_UNCALIBRATED_CAP" in decision.decision_flags

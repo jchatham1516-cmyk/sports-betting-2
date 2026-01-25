@@ -586,3 +586,140 @@ def update_eval_history_with_scores(
     )
 
     return combined
+
+
+def _normalize_market_label(market: object) -> str:
+    label = str(market or "").upper().strip()
+    if "SPREAD" in label or label == "ATS":
+        return "ATS"
+    if label in {"MONEYLINE", "ML"}:
+        return "ML"
+    if label in {"TOTAL", "TOTALS"}:
+        return "TOTAL"
+    return label
+
+
+def update_eval_history_with_bet_predictions(
+    *,
+    sport: str,
+    preds_dir: str,
+    out_path: str,
+    days_back: int = 30,
+) -> pd.DataFrame:
+    today = datetime.utcnow().date()
+    preds = _load_recent_predictions(sport, preds_dir=preds_dir, today=today, days_back=days_back)
+    if preds.empty:
+        print("[eval history] No recent predictions found; skipping bet history update.")
+        return pd.DataFrame()
+
+    sport_key = SPORT_TO_ODDS_KEY.get(sport)
+    if not sport_key:
+        print(f"[eval history] Unsupported sport for rolling eval: {sport}")
+        return pd.DataFrame()
+
+    events = fetch_scores_history_by_day(sport_key, as_of_date=today, days_back=days_back)
+    scores_df = _scores_events_to_df(events)
+    if scores_df.empty:
+        print("[eval history] No completed scores fetched; skipping bet history update.")
+        return pd.DataFrame()
+
+    market_col = "primary_market" if "primary_market" in preds.columns else "market_type"
+    side_col = "primary_side" if "primary_side" in preds.columns else "side"
+    preds = preds.copy()
+    preds["market_type"] = preds.get(market_col, "").apply(_normalize_market_label)
+    preds["side"] = preds.get(side_col, "").astype(str).str.upper().str.strip()
+
+    if "p_model_final" in preds.columns:
+        preds["model_prob"] = pd.to_numeric(preds.get("p_model_final"), errors="coerce")
+    else:
+        preds["model_prob"] = pd.to_numeric(preds.get("model_prob"), errors="coerce")
+    preds["model_prob_raw"] = pd.to_numeric(preds.get("p_model_raw"), errors="coerce")
+    preds["market_prob"] = pd.to_numeric(preds.get("p_market"), errors="coerce")
+
+    preds["price"] = pd.to_numeric(preds.get("primary_price"), errors="coerce")
+    ml_home = pd.to_numeric(preds.get("home_ml"), errors="coerce")
+    ml_away = pd.to_numeric(preds.get("away_ml"), errors="coerce")
+    preds.loc[(preds["market_type"] == "ML") & (preds["side"] == "HOME") & (~np.isfinite(preds["price"])), "price"] = ml_home
+    preds.loc[(preds["market_type"] == "ML") & (preds["side"] == "AWAY") & (~np.isfinite(preds["price"])), "price"] = ml_away
+    preds.loc[(preds["market_type"] == "ATS") & (~np.isfinite(preds["price"])), "price"] = pd.to_numeric(
+        preds.get("spread_price"), errors="coerce"
+    )
+    preds.loc[(preds["market_type"] == "TOTAL") & (~np.isfinite(preds["price"])), "price"] = pd.to_numeric(
+        preds.get("total_over_price"), errors="coerce"
+    )
+
+    preds["line"] = np.nan
+    preds.loc[preds["market_type"] == "ATS", "line"] = pd.to_numeric(preds.get("home_spread"), errors="coerce")
+    preds.loc[preds["market_type"] == "TOTAL", "line"] = pd.to_numeric(preds.get("total_points"), errors="coerce")
+
+    merged = preds.merge(scores_df, on="game_key", how="inner", suffixes=("", "_score"))
+    if merged.empty:
+        print("[eval history] No prediction/score overlaps; skipping bet history update.")
+        return pd.DataFrame()
+
+    def _actual_outcome(row: pd.Series) -> float:
+        market = str(row.get("market_type", "")).upper()
+        side = str(row.get("side", "")).upper()
+        try:
+            hs = float(row.get("home_score"))
+            aw = float(row.get("away_score"))
+        except Exception:
+            return float("nan")
+        if np.isnan(hs) or np.isnan(aw):
+            return float("nan")
+        margin = hs - aw
+        if market == "ML":
+            actual_home_win = 1.0 if margin > 0 else 0.0
+            return actual_home_win if side == "HOME" else (1.0 - actual_home_win)
+        if market == "ATS":
+            spread = pd.to_numeric(row.get("line"), errors="coerce")
+            if not np.isfinite(spread):
+                return float("nan")
+            cover_margin = margin - float(spread)
+            if abs(float(cover_margin)) < 1e-6:
+                return float("nan")
+            return 1.0 if ((cover_margin > 0 and side == "HOME") or (cover_margin < 0 and side == "AWAY")) else 0.0
+        if market == "TOTAL":
+            total_line = pd.to_numeric(row.get("line"), errors="coerce")
+            if not np.isfinite(total_line):
+                return float("nan")
+            total_scored = hs + aw
+            diff = total_scored - float(total_line)
+            if abs(float(diff)) < 1e-6:
+                return float("nan")
+            return 1.0 if ((diff > 0 and side == "OVER") or (diff < 0 and side == "UNDER")) else 0.0
+        return float("nan")
+
+    merged["actual_result"] = merged.apply(_actual_outcome, axis=1)
+
+    keep_cols = [
+        "game_key",
+        "event_id",
+        "date",
+        "market_type",
+        "side",
+        "price",
+        "line",
+        "model_prob_raw",
+        "model_prob",
+        "market_prob",
+        "actual_result",
+        "home",
+        "away",
+        "score_date",
+        "__source_file",
+    ]
+    merged = merged[[c for c in keep_cols if c in merged.columns]]
+
+    history = pd.DataFrame()
+    try:
+        history = pd.read_csv(out_path)
+    except Exception:
+        history = pd.DataFrame(columns=keep_cols)
+
+    combined = pd.concat([history, merged], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["game_key", "market_type", "side"], keep="last")
+
+    combined.to_csv(out_path, index=False)
+    print(f"[eval history] Saved {len(combined)} bet rows -> {out_path}")
+    return combined

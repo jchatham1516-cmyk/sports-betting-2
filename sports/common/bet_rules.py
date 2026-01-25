@@ -44,6 +44,9 @@ EDGE_SHIFT_DOWNGRADE = float(os.getenv("EDGE_SHIFT_DOWNGRADE", "0.04"))
 EXTREME_ML_POS_ODDS = float(os.getenv("EXTREME_ML_POS_ODDS", "350"))
 EXTREME_ML_NEG_ODDS = float(os.getenv("EXTREME_ML_NEG_ODDS", "-450"))
 EXTREME_EDGE_REQUIREMENT = float(os.getenv("EXTREME_ML_EDGE_REQUIREMENT", "0.12"))
+ATS_UNCALIBRATED_EDGE_ADD = float(os.getenv("ATS_UNCALIBRATED_EDGE_ADD", "0.02"))
+ATS_UNCALIBRATED_MAX_UNITS = float(os.getenv("ATS_UNCALIBRATED_MAX_UNITS", "0.5"))
+ATS_UNCALIBRATED_EDGE_OVERRIDE = float(os.getenv("ATS_UNCALIBRATED_EDGE_OVERRIDE", "0.08"))
 
 
 def _edge_thresholds_for_sport(sport: str) -> Tuple[float, float]:
@@ -811,6 +814,10 @@ def _primary_probabilities(
                     market_prob = 1.0 - float(market_home_cover)
         if market_prob is None or np.isnan(market_prob):
             market_prob = implied_prob_american(spread_price)
+        if model_prob is None or not np.isfinite(model_prob):
+            return None, None, spread_price, None, "missing ATS cover probability"
+        if market_prob is None or not np.isfinite(market_prob):
+            return None, None, spread_price, None, "missing ATS market probability"
         return model_prob, market_prob, spread_price, None, None
 
     if market == "TOTAL":
@@ -1034,7 +1041,11 @@ def primary_metrics_for_row(
     p_model_raw_val = float(p_model_raw) if p_model_raw is not None and np.isfinite(p_model_raw) else float("nan")
     p_market_val = float(p_market) if p_market is not None and np.isfinite(p_market) else float("nan")
 
+    existing_flags = normalize_decision_flags(row.get("decision_flags") or "")
+    existing_flag_list = [f for f in existing_flags.split(",") if f]
+
     calibrator_missing = False
+    uncalibrated = False
     if str(primary_market).upper() == "ML":
         calibrator_missing = load_calibrator(sport) is None
     p_model_cal = calibrate_prob(sport, p_model_raw_val, market_type=primary_market)
@@ -1109,8 +1120,24 @@ def primary_metrics_for_row(
             if np.isfinite(p_model_final) and np.isfinite(p_market_val)
             else float("nan")
         )
+    if primary_market == "ATS":
+        ats_cal_used = row.get("ats_cal_used")
+        if (
+            (ats_cal_used is False)
+            or ("ATS_UNCALIBRATED_MARGIN" in existing_flag_list)
+            or ("ATS_GATED_UNCALIBRATED_MARGIN" in existing_flag_list)
+        ):
+            uncalibrated = True
+        if not np.isfinite(p_model_cal):
+            p_model_cal = p_model_raw_val
+        if not np.isfinite(p_model_final):
+            p_model_final = p_model_cal
+        if np.isfinite(p_model_final) and np.isfinite(p_market_val):
+            edge_prob_final = float(p_model_final) - float(p_market_val)
     if uncalibrated:
         flags.append("UNCALIBRATED_FALLBACK")
+        if primary_market == "ATS":
+            flags.append("ATS_UNCALIBRATED")
 
     base_conf = confidence_tier_from_edge(edge_prob_final, config.min_edge_cal)
     injury_low = _injury_confidence_low(row)
@@ -1123,6 +1150,12 @@ def primary_metrics_for_row(
         config=config,
     )
     conf_reason = ", ".join(penalties) if penalties else ""
+    if uncalibrated:
+        conf = _downgrade_confidence_tier(conf)
+        if conf_reason:
+            conf_reason = f"{conf_reason}, UNCALIBRATED_CONF_DOWN"
+        else:
+            conf_reason = "UNCALIBRATED_CONF_DOWN"
     value_tier = value_tier_from_edge(edge_prob_final, config.min_edge_cal)
 
     edge_shift = (
@@ -1143,11 +1176,14 @@ def primary_metrics_for_row(
 
     extra_edge = 0.0
     decision_flags = [f for f in flags]
-    existing_flags = normalize_decision_flags(row.get("decision_flags") or "")
     if "UNCALIBRATED_FALLBACK" in existing_flags and "UNCALIBRATED_FALLBACK" not in decision_flags:
         decision_flags.append("UNCALIBRATED_FALLBACK")
+    if "ATS_UNCALIBRATED" in existing_flags and "ATS_UNCALIBRATED" not in decision_flags:
+        decision_flags.append("ATS_UNCALIBRATED")
     if "UNCALIBRATED_FALLBACK" in decision_flags:
         extra_edge = float(config.uncalibrated_edge_add)
+    if primary_market == "ATS" and "ATS_UNCALIBRATED" in decision_flags:
+        extra_edge = max(extra_edge, float(ATS_UNCALIBRATED_EDGE_ADD))
 
     min_edge_dynamic = _dynamic_min_edge(sport, config.min_edge_cal, config) + extra_edge
     if str(sport).lower() == "nhl":
@@ -1287,39 +1323,6 @@ def decide_bet_from_row(
             f"{min_primary_edge_abs_used:.3f} unc={uncertainty:.3f} eff_unc={eff_unc:.3f} "
             f"goalie_confirmed={anchor_ctx.goalie_confirmed} anchor_w_used={anchor_ctx.anchor_weight:.3f}"
         )
-
-    if primary_market == "ATS" and (
-        "ATS_UNCALIBRATED_MARGIN" in flags or "ATS_GATED_UNCALIBRATED_MARGIN" in flags
-    ):
-        decision = DecisionOutcome(
-            "PASS",
-            0.0,
-            float(unit_dollars),
-            0.0,
-            "NO ATS: margin model uncalibrated",
-            ",".join(flags),
-            "NO ATS: margin model uncalibrated",
-            0.0,
-            0.0,
-            p_model_raw,
-            p_model_cal,
-            p_model_final,
-            p_market,
-            edge_prob_raw,
-            edge_prob_cal,
-            edge_prob_final,
-        )
-        _print_decision(
-            decision,
-            p_model_raw_val=p_model_raw,
-            p_model_cal_val=p_model_cal,
-            p_model_final_val=p_model_final,
-            p_market_val=p_market,
-            edge_prob_raw_val=edge_prob_raw,
-            edge_prob_final_val=edge_prob_final,
-            min_edge_dyn=min_primary_edge_abs_used,
-        )
-        return decision
 
     if data_reason or not np.isfinite(p_model_cal) or not np.isfinite(p_market):
         flags.append("MISSING_DATA_PASS")
@@ -1575,6 +1578,18 @@ def decide_bet_from_row(
         flags.append("DISAGREE_CAP")
         reason_parts.append(f"|model-market|={disagreement:.3f}>{float(config.disagree_cap_edge):.3f}")
         final_units = min(final_units, float(config.disagree_cap_units))
+
+    ats_uncalibrated = primary_market == "ATS" and (
+        "ATS_UNCALIBRATED" in flags or "ATS_UNCALIBRATED_MARGIN" in flags
+    )
+    if ats_uncalibrated:
+        allow_override = np.isfinite(abs_edge) and abs_edge >= float(ATS_UNCALIBRATED_EDGE_OVERRIDE)
+        if "DISAGREE_CAP" in flags:
+            allow_override = False
+        if not allow_override:
+            flags.append("ATS_UNCALIBRATED_CAP")
+            reason_parts.append("ats_uncalibrated_cap")
+            final_units = min(final_units, float(ATS_UNCALIBRATED_MAX_UNITS))
 
     if final_units > 0 and final_units < 0.25:
         if not {"LONGSHOT_CAP", "DISAGREE_CAP"}.intersection(flags):

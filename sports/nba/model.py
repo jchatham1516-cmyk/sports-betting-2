@@ -867,7 +867,20 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         away_ml = _safe_float((oi or {}).get("away_ml"))
         p_home_imp = american_to_implied_prob(home_ml)
         p_away_imp = american_to_implied_prob(away_ml)
-        mkt_home_p, _ = no_vig_pair(p_home_imp, p_away_imp)
+        home_ml_ok = np.isfinite(home_ml)
+        away_ml_ok = np.isfinite(away_ml)
+        mkt_home_p = float("nan")
+        market_flags: list[str] = []
+        if home_ml_ok and away_ml_ok:
+            mkt_home_p, _ = no_vig_pair(p_home_imp, p_away_imp)
+        else:
+            if home_ml_ok and np.isfinite(p_home_imp):
+                mkt_home_p = float(p_home_imp)
+            elif away_ml_ok and np.isfinite(p_away_imp):
+                mkt_home_p = float(1.0 - p_away_imp)
+            else:
+                mkt_home_p = float("nan")
+            market_flags.append("LOW_QUALITY_MARKET")
 
         inj_list_home = build_injury_list_for_team_nba(home, injury_data)
         inj_list_away = build_injury_list_for_team_nba(away, injury_data)
@@ -1109,10 +1122,9 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         )
 
         ats_sd = float(margin_sd) if (not np.isnan(margin_sd) and margin_sd > 1e-6) else float(ATS_SD_PTS)
+        cover_margin = float(mu_margin_home - home_spread) if not np.isnan(mu_margin_home) and not np.isnan(home_spread) else float("nan")
         p_home_cover_raw = (
-            float(_phi((spread_edge_home / ats_sd)))
-            if not np.isnan(spread_edge_home)
-            else float("nan")
+            float(_phi((cover_margin / ats_sd))) if np.isfinite(cover_margin) else float("nan")
         )
 
         ats_cal_used = ats_cal is not None and np.isfinite(spread_edge_home)
@@ -1129,6 +1141,7 @@ def run_daily_nba(game_date_str: str, *, odds_dict: dict, stats_df: Optional[pd.
         ats_edge_vs_be = float(p_home_cover - be_spread) if np.isfinite(p_home_cover) else float("nan")
 
         decision_flags: list[str] = []
+        decision_flags.extend(market_flags)
         if ats_cal is None:
             decision_flags.append("ATS_UNCALIBRATED_MARGIN")
 
