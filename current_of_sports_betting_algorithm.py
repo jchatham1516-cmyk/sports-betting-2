@@ -10,7 +10,11 @@ import pandas as pd
 
 from recommendations import add_recommendations_to_df, Thresholds
 
-from sports.common.eval import evaluate_predictions, update_eval_history_with_scores
+from sports.common.eval import (
+    evaluate_predictions,
+    update_eval_history_with_scores,
+    update_eval_history_with_bet_predictions,
+)
 from sports.common.odds_sources import (
     fetch_odds_for_date_from_odds_api,
     fetch_odds_for_date_from_csv,
@@ -32,18 +36,20 @@ from sports.common.bet_rules import (
     primary_metrics_for_row,
 )
 from sports.common.bet_config import get_sport_bet_config
-from sports.common.prob_calibration import fit_calibrator, update_daily_ml_calibration
+from sports.common.prob_calibration import fit_calibrator, update_daily_ml_calibration, update_prob_calibration, MIN_SAMPLES
 from sports.common.history_builder import build_historical_dataset, season_string_for_date
 from sports.common.reporting import (
     build_display_columns,
+    build_bet_card,
     build_rankings,
     daily_bet_report,
     generate_backtest_report,
+    render_bet_card_summary,
     render_console_report,
     self_check_recent_bets,
 )
 from sports.common.parlay import build_daily_parlay, build_weekly_parlay, load_recent_predictions, render_parlay_card
-from sports.common.prob_uncertainty import load_uncertainty
+from sports.common.prob_uncertainty import load_uncertainty, update_uncertainty
 
 from sports.nba.bdl_client import (
     get_bdl_api_key,
@@ -497,6 +503,7 @@ def main(argv=None):
     if not results_df.empty:
         results_df = build_display_columns(results_df)
         results_df = build_rankings(results_df)
+        bet_card = build_bet_card(results_df)
 
         sort_key = "rank_value" if args.sort == "value" else "rank_accuracy"
         if sort_key in results_df.columns:
@@ -510,6 +517,20 @@ def main(argv=None):
                 debug=bool(args.debug),
                 sort_by=args.sort,
             )
+        render_bet_card_summary(
+            bet_card,
+            sport=args.sport,
+            date=game_date,
+            max_rows=10,
+        )
+        if args.sport == "nba":
+            date_tag = game_date.replace("/", "-")
+            picks_path = f"results/picks_nba_{date_tag}.csv"
+            try:
+                bet_card.to_csv(picks_path, index=False)
+                print(f"[save] wrote ranked bet card -> {picks_path}")
+            except Exception as e:
+                print(f"[save] WARNING: failed to write bet card: {e}")
 
     out_name = f"results/predictions_{args.sport}_{game_date.replace('/', '-')}.csv"
     print(f"[save] writing {len(results_df)} rows -> {out_name}")
@@ -585,6 +606,49 @@ def main(argv=None):
         )
     except Exception as e:
         print(f"[eval history] WARNING: rolling evaluation update failed: {e}")
+
+    eval_bets = pd.DataFrame()
+    try:
+        eval_bets = update_eval_history_with_bet_predictions(
+            sport=args.sport,
+            preds_dir="results",
+            out_path="results/eval_history.csv",
+            days_back=30,
+        )
+    except Exception as e:
+        print(f"[eval history] WARNING: bet history update failed: {e}")
+
+    try:
+        if args.sport == "nba" and not eval_bets.empty:
+            ml_hist = eval_bets[eval_bets.get("market_type", "").astype(str).str.upper() == "ML"].copy()
+            ml_hist["model_prob_raw"] = pd.to_numeric(ml_hist.get("model_prob_raw"), errors="coerce")
+            ml_hist["model_prob"] = pd.to_numeric(ml_hist.get("model_prob"), errors="coerce")
+            ml_hist["actual_result"] = pd.to_numeric(ml_hist.get("actual_result"), errors="coerce")
+            p_raw = ml_hist["model_prob_raw"].fillna(ml_hist["model_prob"]).to_numpy()
+            p_final = ml_hist["model_prob"].to_numpy()
+            y = ml_hist["actual_result"].to_numpy()
+            mask_any = np.isfinite(y) & (np.isfinite(p_raw) | np.isfinite(p_final))
+            if mask_any.any():
+                p_unc = np.where(np.isfinite(p_final), p_final, p_raw)
+                mask_cal = np.isfinite(p_raw) & np.isfinite(y)
+                update_uncertainty(
+                    "nba",
+                    p_unc[mask_any],
+                    y[mask_any],
+                    window=int(mask_any.sum()),
+                    min_samples=30,
+                    market="ML",
+                )
+                if mask_cal.any():
+                    update_prob_calibration(
+                        "nba",
+                        p_raw[mask_cal],
+                        y[mask_cal],
+                        window=int(mask_cal.sum()),
+                        min_samples=int(MIN_SAMPLES),
+                    )
+    except Exception as e:
+        print(f"[calibration] WARNING: rolling calibration update failed: {e}")
 
     track_target = None
     if args.track_date:

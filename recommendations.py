@@ -323,18 +323,20 @@ def add_recommendations_to_df(
                 out.loc[i, "spread_recommendation"] = "No ATS bet (gated): invalid spread model"
                 continue
             decision_flags = str(out.loc[i, "decision_flags"] or "")
-            if sport == "nba" and (
-                ats_calibrator_missing or "ATS_UNCALIBRATED_MARGIN" in decision_flags
-            ):
-                out.loc[i, "spread_recommendation"] = "No ATS bet (gated): uncalibrated ATS"
-                continue
+            if sport == "nba" and ats_calibrator_missing and "ATS_UNCALIBRATED_MARGIN" not in decision_flags:
+                out.loc[i, "decision_flags"] = (
+                    f"{decision_flags},ATS_UNCALIBRATED_MARGIN".strip(",")
+                    if decision_flags
+                    else "ATS_UNCALIBRATED_MARGIN"
+                )
+                decision_flags = str(out.loc[i, "decision_flags"] or "")
             ms = float(out.loc[i, model_spread_home_col]) if not pd.isna(out.loc[i, model_spread_home_col]) else float("nan")
             hs = float(out.loc[i, "home_spread"]) if not pd.isna(out.loc[i, "home_spread"]) else float("nan")
             ats_edge_vs_be = _to_float(out.loc[i, "ats_edge_vs_be"])
             if np.isfinite(ats_edge_vs_be):
                 out.loc[i, "spread_recommendation"] = _ats_pick_prob(ats_edge_vs_be, thresholds)
             else:
-                out.loc[i, "spread_recommendation"] = _ats_pick(ms, hs, thresholds)
+                out.loc[i, "spread_recommendation"] = "No ATS bet: missing cover prob"
 
         # Helpful numeric edge (pts) for debugging
         if "spread_edge_home" not in out.columns:

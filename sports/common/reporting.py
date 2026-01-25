@@ -637,6 +637,96 @@ def build_rankings(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def build_bet_card(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    if "display_market" not in out.columns:
+        out = build_display_columns(out)
+
+    out["_confidence_score"] = out["confidence"].apply(_confidence_score) if "confidence" in out.columns else np.nan
+    out["_primary_ev"] = out["primary_ev"].apply(_safe_float) if "primary_ev" in out.columns else np.nan
+    out["_abs_edge_prob"] = out["abs_edge_prob"].apply(_safe_float) if "abs_edge_prob" in out.columns else np.nan
+
+    out = out.sort_values(
+        by=["_primary_ev", "_confidence_score", "_abs_edge_prob"],
+        ascending=[False, False, False],
+        kind="mergesort",
+        na_position="last",
+    )
+    out = out.drop(columns=["_confidence_score", "_primary_ev", "_abs_edge_prob"])
+    return out
+
+
+def render_bet_card_summary(
+    df: pd.DataFrame,
+    *,
+    sport: str,
+    date: str,
+    max_rows: int = 10,
+) -> None:
+    if df is None or df.empty:
+        print(f"[bet card] {str(sport).upper()} {date} -> no rows")
+        return
+
+    bet_card = build_bet_card(df)
+    plays = bet_card[bet_card.get("play_pass", "").astype(str) == "PLAY"].copy()
+    top_plays = plays.head(int(max_rows))
+
+    print("\n=== Bet Card ===")
+    print(f"{str(sport).upper()} | {date} | top {int(max_rows)} plays by EV")
+
+    def _game_label(row: pd.Series) -> str:
+        return f"{row.get('away','')} @ {row.get('home','')}".strip()
+
+    def _price_for_row(row: pd.Series) -> str:
+        return _fmt_price(row.get("primary_price"))
+
+    def _flags_short(row: pd.Series) -> str:
+        flags = str(row.get("decision_flags", "") or "").strip()
+        return flags
+
+    def _reason_short(row: pd.Series) -> str:
+        reason = str(row.get("decision_reason", "") or "").replace("\n", " ").strip()
+        if len(reason) > 60:
+            return reason[:57] + "..."
+        return reason
+
+    rows = []
+    for _, r in top_plays.iterrows():
+        rows.append(
+            [
+                _game_label(r),
+                r.get("display_market", r.get("primary_market", "")),
+                r.get("primary_side", ""),
+                _price_for_row(r),
+                _fmt_float(r.get("p_model_final")),
+                _fmt_float(r.get("p_market")),
+                _fmt_float(r.get("edge_prob_final")),
+                _fmt_float(r.get("primary_ev")),
+                _fmt_float(r.get("units")),
+                _flags_short(r),
+                _reason_short(r),
+            ]
+        )
+
+    headers = [
+        "game",
+        "market",
+        "side",
+        "price",
+        "p_model",
+        "p_market",
+        "edge",
+        "ev",
+        "units",
+        "flags",
+        "reason",
+    ]
+    print(_format_table(rows, headers) if rows else "No PLAY rows.")
+
+
 def _format_table(rows: List[List[object]], headers: Iterable[str]) -> str:
     tabulate = _get_tabulate()
     if tabulate is not None:

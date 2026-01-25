@@ -218,3 +218,22 @@ def test_goalie_unconfirmed_single_penalty(monkeypatch):
     assert "GOALIE_UNCONFIRMED" in metrics_unconfirmed[14]
     diff = float(metrics_unconfirmed[16]) - float(metrics_confirmed[16])
     assert abs(diff - 0.01) < 1e-6
+
+
+def test_primary_metrics_handles_uncalibrated_ats():
+    row = pd.Series(
+        {
+            "primary_recommendation": "Model PICK ATS: HOME",
+            "primary_market": "ATS",
+            "primary_side": "HOME",
+            "home_spread": -4.5,
+            "spread_price": -110,
+            "ats_home_cover_prob": 0.58,
+            "market_spread_prob": 0.52,
+            "decision_flags": "ATS_UNCALIBRATED_MARGIN",
+        }
+    )
+    metrics = primary_metrics_for_row(row, sport="nba")
+    flags = metrics[14]
+    assert "ATS_UNCALIBRATED" in flags
+    assert "UNCALIBRATED_FALLBACK" in flags
