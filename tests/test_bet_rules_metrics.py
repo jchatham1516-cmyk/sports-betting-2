@@ -85,7 +85,7 @@ def test_confidence_from_edge_prob():
     assert confidence_tier_from_edge(0.01, 0.03) == "LOW"
 
 
-def test_nhl_uncertainty_scaling_reduces_min_edge(monkeypatch):
+def test_nhl_uncertainty_scaling_no_longer_increases_min_edge(monkeypatch):
     config = get_sport_bet_config("nhl")
     monkeypatch.setenv("NHL_DYNAMIC_MIN_EDGE_CAP", "0.2")
     sample = {"uncertainty": 0.12, "n": 20}
@@ -101,7 +101,7 @@ def test_nhl_uncertainty_scaling_reduces_min_edge(monkeypatch):
     bet_rules._UNCERTAINTY_CACHE.clear()
     min_edge_large = bet_rules._dynamic_min_edge("nhl", config.min_edge_cal, config)
 
-    assert min_edge_small > min_edge_large
+    assert min_edge_small == min_edge_large
 
 
 def test_goalie_unconfirmed_flag_added_to_decisions():

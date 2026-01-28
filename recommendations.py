@@ -463,7 +463,7 @@ def add_recommendations_to_df(
         p_home_cover = _to_float(row.get("ats_home_cover_prob", row.get("p_home_cover", np.nan)))
         p_away_cover = 1.0 - _to_float(p_home_cover) if np.isfinite(_to_float(p_home_cover)) else np.nan
         ats_price = row.get("spread_price")
-        if bool(row.get("ats_gated", False)) or ats_calibrator_missing:
+        if bool(row.get("ats_gated", False)):
             ats_ev = np.nan
             ats_side = ""
             if allow_ats_flags:
@@ -474,12 +474,13 @@ def add_recommendations_to_df(
                     if str(out.loc[i, "decision_reason"]).strip()
                     else "ATS_GATED_INVALID_SPREAD"
                 )
-                if ats_calibrator_missing and "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
-                    flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
         else:
             ats_ev_home = ev_per_dollar(p_home_cover, ats_price)
             ats_ev_away = ev_per_dollar(p_away_cover, ats_price)
             ats_ev, ats_side = _best_ev(ats_ev_home, ats_ev_away, "HOME", "AWAY")
+            if ats_calibrator_missing and allow_ats_flags:
+                if "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
+                    flags.append("ATS_GATED_UNCALIBRATED_MARGIN")
 
         ats_cal_used = row.get("ats_cal_used")
         ats_cal_used = bool(ats_cal_used) if not pd.isna(ats_cal_used) else False
@@ -493,8 +494,6 @@ def add_recommendations_to_df(
             else float("nan")
         )
         if not ats_calibrated:
-            ats_ev = np.nan
-            ats_side = ""
             if allow_ats_flags:
                 if "ATS_GATED_UNCALIBRATED_MARGIN" not in flags:
                     flags.append("ATS_GATED_UNCALIBRATED_MARGIN")

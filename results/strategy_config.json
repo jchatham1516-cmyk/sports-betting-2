@@ -1,0 +1,17 @@
+{
+  "default": {
+    "min_edge_cal": 0.03,
+    "calibration_risk_multiplier": 0.6,
+    "uncertainty_unit_scale": 6.0,
+    "longshot_cap_units": 0.25,
+    "disagree_cap_units": 0.25,
+    "max_units": 1.0
+  },
+  "sports": {
+    "nhl": {
+      "max_units": 0.5
+    }
+  },
+  "updated_at": "2024-01-01T00:00:00Z",
+  "notes": "Baseline strategy overrides; updated via scripts/optimize_strategy.py."
+}

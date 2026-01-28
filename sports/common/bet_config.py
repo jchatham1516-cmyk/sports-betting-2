@@ -184,9 +184,38 @@ def _load_threshold_overrides(sport: str) -> dict[str, object]:
         return {}
 
 
+def _strategy_config_path() -> str:
+    return os.getenv("STRATEGY_CONFIG_PATH", "results/strategy_config.json")
+
+
+def _load_strategy_overrides(sport: str) -> dict[str, object]:
+    path = _strategy_config_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    sport_key = str(sport).lower()
+    overrides: dict[str, object] = {}
+    for key in ("default", "global", "all"):
+        if isinstance(data.get(key), dict):
+            overrides.update(data[key])
+    if isinstance(data.get("sports"), dict) and isinstance(data["sports"].get(sport_key), dict):
+        overrides.update(data["sports"][sport_key])
+    if isinstance(data.get(sport_key), dict):
+        overrides.update(data[sport_key])
+    return overrides
+
+
 def get_sport_bet_config(sport: str) -> SportBetConfig:
     base = SPORT_BET_CONFIGS.get(str(sport).lower(), SPORT_BET_CONFIGS["nba"])
-    overrides = _load_threshold_overrides(sport)
+    overrides = {}
+    overrides.update(_load_threshold_overrides(sport))
+    overrides.update(_load_strategy_overrides(sport))
     if not overrides:
         return base
     valid = {k: v for k, v in overrides.items() if hasattr(base, k)}
