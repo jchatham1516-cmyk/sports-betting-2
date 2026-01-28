@@ -817,9 +817,20 @@ def main(argv=None):
         avg_unc_mult = float(
             pd.to_numeric(results_df.get("uncertainty_multiplier", pd.Series(dtype=float)), errors="coerce").mean()
         )
+        mult_cols = [
+            "calibration_multiplier",
+            "uncertainty_multiplier",
+            "goalie_multiplier",
+            "injury_multiplier",
+        ]
+        mult_stack = pd.to_numeric(results_df.get(mult_cols[0], pd.Series(dtype=float)), errors="coerce")
+        for col in mult_cols[1:]:
+            mult_stack = mult_stack * pd.to_numeric(results_df.get(col, pd.Series(dtype=float)), errors="coerce")
+        avg_stake_mult = float(mult_stack.mean())
     except Exception:
         uncalibrated_count = 0
         avg_unc_mult = float("nan")
+        avg_stake_mult = float("nan")
 
     brier_val = float("nan")
     if "brier" in eval_row.columns and not eval_row.empty:
@@ -828,10 +839,40 @@ def main(argv=None):
         except Exception:
             brier_val = float("nan")
 
+    total_rows = int(len(results_df)) if results_df is not None else 0
+    positive_edge_blocked = 0
+    if total_rows > 0:
+        try:
+            edge_vals = pd.to_numeric(results_df.get("edge_prob_final"), errors="coerce")
+            play_pass = results_df.get("play_pass", pd.Series([""] * total_rows)).astype(str)
+            positive_edge_blocked = int(((edge_vals > 0) & (play_pass == "PASS")).sum())
+        except Exception:
+            positive_edge_blocked = 0
+    calibration_coverage = float("nan")
+    if total_rows > 0:
+        calibration_coverage = 1.0 - (float(uncalibrated_count) / float(total_rows))
+
+    clv_summary = clv_tracker.summarize_clv()
+    avg_clv = float("nan")
+    if not clv_summary.empty:
+        sport_key = str(args.sport).lower()
+        clv_summary["sport_key"] = clv_summary["sport"].astype(str).str.lower()
+        filtered = clv_summary[clv_summary["sport_key"] == sport_key]
+        if not filtered.empty:
+            avg_clv = float(pd.to_numeric(filtered.get("avg_clv_prob"), errors="coerce").mean())
+
+    roi_proxy = float("nan")
+    if np.isfinite(brier_val) or np.isfinite(avg_clv):
+        roi_proxy = (avg_clv if np.isfinite(avg_clv) else 0.0) - (
+            brier_val if np.isfinite(brier_val) else 0.0
+        )
+
     print(
         "[daily summary] "
-        f"uncalibrated={uncalibrated_count} avg_unc_mult={avg_unc_mult:.3f} "
-        f"brier={brier_val:.4f}"
+        f"uncalibrated={uncalibrated_count} calibration_coverage={calibration_coverage:.1%} "
+        f"positive_edge_blocked={positive_edge_blocked} avg_unc_mult={avg_unc_mult:.3f} "
+        f"avg_stake_mult={avg_stake_mult:.3f} brier={brier_val:.4f} "
+        f"avg_clv={avg_clv:.4f} roi_proxy={roi_proxy:.4f}"
     )
     clv_bucket_summary = clv_tracker.summarize_clv_by_bucket()
     if not clv_bucket_summary.empty:

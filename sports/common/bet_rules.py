@@ -338,25 +338,6 @@ def _dynamic_min_edge(
     market: Optional[str] = None,
 ) -> float:
     if str(sport).lower() == "nhl":
-        effective_uncertainty, sample_size, raw_uncertainty = _nhl_uncertainty_context(
-            config, use_floor=True, row=row, market=market
-        )
-        _, _, _, quality, sample_factor, quality_factor = _effective_uncertainty(
-            "nhl", config, use_floor=True, row=row, market=market
-        )
-        _log_uncertainty_once(
-            sport,
-            raw_uncertainty,
-            base_min_edge,
-            config,
-            effective_uncertainty=effective_uncertainty,
-            sample_size=sample_size,
-            quality=quality,
-            sample_factor=sample_factor,
-            quality_factor=quality_factor,
-        )
-        mult = float(config.uncertainty_edge_mult)
-        min_edge = float(base_min_edge) + float(mult) * float(effective_uncertainty)
         cap_env = os.getenv("NHL_DYNAMIC_MIN_EDGE_CAP")
         if cap_env is not None and str(cap_env).strip() != "":
             try:
@@ -365,26 +346,12 @@ def _dynamic_min_edge(
                 cap = float(base_min_edge) + 0.025
         else:
             cap = float(base_min_edge) + 0.025
+        min_edge = float(base_min_edge)
         if cap > 0:
             min_edge = min(float(min_edge), cap)
         return float(max(0.0, float(min_edge)))
-    effective_uncertainty, sample_size, raw_uncertainty, quality, sample_factor, quality_factor = _effective_uncertainty(
-        sport, config, use_floor=True, row=row, market=market
-    )
-    _log_uncertainty_once(
-        sport,
-        raw_uncertainty,
-        base_min_edge,
-        config,
-        effective_uncertainty=effective_uncertainty,
-        sample_size=sample_size,
-        quality=quality,
-        sample_factor=sample_factor,
-        quality_factor=quality_factor,
-    )
-    mult = float(config.uncertainty_edge_mult)
-    min_edge = float(base_min_edge) + float(mult) * float(effective_uncertainty)
     cap_add = float(config.uncertainty_edge_cap_add)
+    min_edge = float(base_min_edge)
     if cap_add > 0:
         min_edge = min(float(min_edge), float(base_min_edge) + float(cap_add))
     return float(max(0.0, float(min_edge)))
@@ -1703,6 +1670,19 @@ def decide_bet_from_row(
     uncertainty_samples = uncertainty_ctx[1]
     uncertainty_raw = float(uncertainty_ctx[2])
     uncertainty_quality = float(uncertainty_ctx[3])
+    uncertainty_sample_factor = float(uncertainty_ctx[4])
+    uncertainty_quality_factor = float(uncertainty_ctx[5])
+    _log_uncertainty_once(
+        sport,
+        uncertainty_raw,
+        config.min_edge_cal,
+        config,
+        effective_uncertainty=uncertainty_effective,
+        sample_size=uncertainty_samples,
+        quality=uncertainty_quality,
+        sample_factor=uncertainty_sample_factor,
+        quality_factor=uncertainty_quality_factor,
+    )
 
     if str(sport).lower() == "nhl":
         nhl_uncertainty_used, nhl_uncertainty_samples, nhl_uncertainty_raw = _nhl_uncertainty_context(
@@ -1806,68 +1786,15 @@ def decide_bet_from_row(
             if np.isfinite(override_val) and override_val > 0:
                 min_primary_edge_abs_used = min(float(min_primary_edge_abs_used), float(override_val))
 
-    if not np.isfinite(abs_edge) or abs_edge < float(min_primary_edge_abs_used):
-        edge_candidates = [
-            float(val)
-            for val in (edge_prob_final, edge_prob_cal, edge_prob_raw)
-            if val is not None and np.isfinite(val)
-        ]
-        edge_positive = any(float(val) > 0.0 for val in edge_candidates)
-        edge_strength = max([abs(val) for val in edge_candidates], default=float("nan"))
-        allow_soft = edge_positive and np.isfinite(edge_strength) and float(edge_strength) >= float(
-            config.min_edge_soft_floor
-        )
-        if not allow_soft:
-            uncertainty_note = ""
-            if str(sport).lower() == "nhl" and nhl_uncertainty_used is not None:
-                sample_str = "NA" if nhl_uncertainty_samples is None else str(nhl_uncertainty_samples)
-                raw_uncertainty = nhl_uncertainty_raw if nhl_uncertainty_raw is not None else nhl_uncertainty_used
-                uncertainty_note = (
-                    f" (unc={raw_uncertainty:.3f} eff={nhl_uncertainty_used:.3f} n={sample_str})"
-                )
-            decision = DecisionOutcome(
-                "PASS",
-                0.0,
-                float(unit_dollars),
-                0.0,
-                f"NO BET: edge_final<{min_primary_edge_abs_used:.3f}{uncertainty_note}",
-                "LOW_EDGE_PASS",
-                f"NO BET: edge_final<{min_primary_edge_abs_used:.3f}{uncertainty_note}",
-                0.0,
-                0.0,
-                p_model_raw,
-                p_model_cal,
-                p_model_final,
-                p_market,
-                edge_prob_raw,
-                edge_prob_cal,
-                edge_prob_final,
-            )
-            _print_decision(
-                decision,
-                p_model_raw_val=p_model_raw,
-                p_model_cal_val=p_model_cal,
-                p_model_final_val=p_model_final,
-                p_market_val=p_market,
-                edge_prob_raw_val=edge_prob_raw,
-                edge_prob_final_val=edge_prob_final,
-                min_edge_dyn=min_primary_edge_abs_used,
-            )
-            return decision
-        flags.append("LOW_EDGE_SIZE_DOWN")
-        reason_parts.append(
-            f"soft_edge_play<{min_primary_edge_abs_used:.3f}>=floor{float(config.min_edge_soft_floor):.3f}"
-        )
-
-    if not np.isfinite(ev) or ev <= 0.0:
+    if not np.isfinite(edge_prob_final):
         decision = DecisionOutcome(
             "PASS",
             0.0,
             float(unit_dollars),
             0.0,
-            "NO BET: primary_ev<=0.000",
-            "LOW_EV_PASS",
-            "NO BET: primary_ev<=0.000",
+            "NO BET: missing edge",
+            "MISSING_EDGE_PASS",
+            "NO BET: missing edge",
             0.0,
             0.0,
             p_model_raw,
@@ -1889,67 +1816,71 @@ def decide_bet_from_row(
             min_edge_dyn=min_primary_edge_abs_used,
         )
         return decision
+    if float(edge_prob_final) <= 0.0:
+        decision = DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            "NO BET: edge_final<=0",
+            "NON_POSITIVE_EDGE",
+            "NO BET: edge_final<=0",
+            0.0,
+            0.0,
+            p_model_raw,
+            p_model_cal,
+            p_model_final,
+            p_market,
+            edge_prob_raw,
+            edge_prob_cal,
+            edge_prob_final,
+        )
+        _print_decision(
+            decision,
+            p_model_raw_val=p_model_raw,
+            p_model_cal_val=p_model_cal,
+            p_model_final_val=p_model_final,
+            p_market_val=p_market,
+            edge_prob_raw_val=edge_prob_raw,
+            edge_prob_final_val=edge_prob_final,
+            min_edge_dyn=min_primary_edge_abs_used,
+        )
+        return decision
+    if abs_edge < float(min_primary_edge_abs_used):
+        flags.append("LOW_EDGE_SIZE_DOWN")
+        reason_parts.append(
+            f"soft_edge_play<{min_primary_edge_abs_used:.3f}>=floor{float(config.min_edge_soft_floor):.3f}"
+        )
 
     min_conf = str(min_confidence or "").upper()
     conf_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
     if str(sport).lower() == "nba" and min_conf in conf_rank:
         decision_conf = str(_conf or "").upper()
         if conf_rank.get(decision_conf, -1) < conf_rank[min_conf]:
-            override = np.isfinite(ev) and np.isfinite(abs_edge) and (
-                ev >= float(MIN_EV_OVERRIDE) and abs_edge >= float(MIN_EV_OVERRIDE_EDGE)
-            )
-            if not override and "LOW_EDGE_SIZE_DOWN" not in flags:
-                decision = DecisionOutcome(
-                    "PASS",
-                    0.0,
-                    float(unit_dollars),
-                    0.0,
-                    f"NO BET: confidence<{min_conf}",
-                    "LOW_CONFIDENCE_PASS",
-                    f"NO BET: confidence<{min_conf}",
-                    0.0,
-                    0.0,
-                    p_model_raw,
-                    p_model_cal,
-                    p_model_final,
-                    p_market,
-                    edge_prob_raw,
-                    edge_prob_cal,
-                    edge_prob_final,
-                )
-                _print_decision(
-                    decision,
-                    p_model_raw_val=p_model_raw,
-                    p_model_cal_val=p_model_cal,
-                    p_model_final_val=p_model_final,
-                    p_market_val=p_market,
-                    edge_prob_raw_val=edge_prob_raw,
-                    edge_prob_final_val=edge_prob_final,
-                    min_edge_dyn=min_primary_edge_abs_used,
-                )
-                return decision
-            if "LOW_EDGE_SIZE_DOWN" in flags:
-                flags.append("LOW_CONFIDENCE_SIZE_DOWN")
+            flags.append("LOW_CONFIDENCE_SIZE_DOWN")
+            reason_parts.append(f"confidence<{min_conf}")
 
     base_units = default_bet_units_from_tier(value_tier)
+    kelly_units = float("nan")
+    if primary_price is not None and np.isfinite(primary_price) and np.isfinite(p_model_final):
+        bankroll = float(unit_dollars) / float(settings.flat_pct) if settings.flat_pct > 0 else float(unit_dollars)
+        kelly_bet_size = bet_size_kelly_ml(
+            bankroll,
+            float(p_model_final),
+            float(primary_price),
+            kelly_mult=settings.kelly_mult,
+            max_pct=settings.kelly_max_pct,
+        )
+        if np.isfinite(kelly_bet_size) and unit_dollars > 0:
+            kelly_units = float(kelly_bet_size) / float(unit_dollars)
+    if np.isfinite(kelly_units):
+        base_units = float(kelly_units)
+
     if "LOW_EDGE_SIZE_DOWN" in flags and base_units <= 0:
         base_units = float(config.soft_edge_base_units)
     bet_size = float(base_units * float(unit_dollars))
 
-    if settings.sizing_mode == "kelly" and primary_market == "ML":
-        if primary_price is None or not np.isfinite(primary_price) or not np.isfinite(p_model_cal):
-            bet_size = float(base_units * float(unit_dollars))
-        else:
-            bet_size = bet_size_kelly_ml(
-                float(unit_dollars) / settings.flat_pct,
-                float(p_model_final),
-                float(primary_price),
-                kelly_mult=settings.kelly_mult,
-                max_pct=settings.kelly_max_pct,
-            )
-
     raw_units = bet_size / float(unit_dollars) if unit_dollars > 0 else 0.0
-    raw_units = min(raw_units, base_units)
 
     calibration_samples = _calibration_sample_count(
         sport,
@@ -1971,9 +1902,18 @@ def decide_bet_from_row(
     uncertainty_multiplier = _uncertainty_multiplier(uncertainty_for_sizing, config)
     goalie_multiplier = _goalie_multiplier(row, config, sport=sport)
     injury_multiplier = _injury_multiplier(row, config, sport=sport)
+    ev_multiplier = 1.0
+    if not np.isfinite(ev) or ev <= 0.0:
+        flags.append("LOW_EV_SIZE_DOWN")
+        reason_parts.append("ev<=0")
+        ev_multiplier = float(os.getenv("EV_NEGATIVE_UNITS_MULT", "0.5"))
 
     multiplier_stack = float(
-        calibration_multiplier * uncertainty_multiplier * goalie_multiplier * injury_multiplier
+        calibration_multiplier
+        * uncertainty_multiplier
+        * goalie_multiplier
+        * injury_multiplier
+        * ev_multiplier
     )
     final_units = float(raw_units) * float(multiplier_stack)
     final_units = min(final_units, float(config.max_units))
@@ -2008,37 +1948,36 @@ def decide_bet_from_row(
 
     disagreement = abs(float(p_model_cal - p_market)) if np.isfinite(p_model_cal) and np.isfinite(p_market) else 0.0
     if disagreement > float(config.disagree_pass_edge):
-        if edge_prob_final < float(config.disagree_pass_min_edge):
-            flags.append("DISAGREE_PASS")
-            decision = DecisionOutcome(
-                "PASS",
-                0.0,
-                float(unit_dollars),
-                0.0,
-                "DISAGREE_PASS",
-                ",".join(flags),
-                "DISAGREE_PASS",
-                raw_units,
-                0.0,
-                p_model_raw,
-                p_model_cal,
-                p_model_final,
-                p_market,
-                edge_prob_raw,
-                edge_prob_cal,
-                edge_prob_final,
-            )
-            _print_decision(
-                decision,
-                p_model_raw_val=p_model_raw,
-                p_model_cal_val=p_model_cal,
-                p_model_final_val=p_model_final,
-                p_market_val=p_market,
-                edge_prob_raw_val=edge_prob_raw,
-                edge_prob_final_val=edge_prob_final,
-                min_edge_dyn=min_primary_edge_abs_used,
-            )
-            return decision
+        flags.append("DISAGREE_PASS")
+        decision = DecisionOutcome(
+            "PASS",
+            0.0,
+            float(unit_dollars),
+            0.0,
+            "DISAGREE_PASS",
+            ",".join(flags),
+            "DISAGREE_PASS",
+            raw_units,
+            0.0,
+            p_model_raw,
+            p_model_cal,
+            p_model_final,
+            p_market,
+            edge_prob_raw,
+            edge_prob_cal,
+            edge_prob_final,
+        )
+        _print_decision(
+            decision,
+            p_model_raw_val=p_model_raw,
+            p_model_cal_val=p_model_cal,
+            p_model_final_val=p_model_final,
+            p_market_val=p_market,
+            edge_prob_raw_val=edge_prob_raw,
+            edge_prob_final_val=edge_prob_final,
+            min_edge_dyn=min_primary_edge_abs_used,
+        )
+        return decision
 
     if disagreement > float(config.disagree_cap_edge):
         flags.append("DISAGREE_CAP")

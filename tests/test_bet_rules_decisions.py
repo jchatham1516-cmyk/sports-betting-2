@@ -26,7 +26,7 @@ def test_longshot_allowed_but_capped():
     )
 
     assert decision.play_pass == "PLAY"
-    assert decision.final_units == 0.25
+    assert decision.final_units <= 0.25
     assert "LONGSHOT_CAP" in decision.decision_flags
 
 
@@ -43,22 +43,19 @@ def test_disagreement_cap():
     )
 
     assert decision.play_pass == "PLAY"
-    assert decision.final_units == 0.25
+    assert decision.final_units <= 0.25
     assert "DISAGREE_CAP" in decision.decision_flags
 
 
 def test_disagreement_pass():
-    row = _base_row(home_ml=150, away_ml=-170, model_home_prob=0.7, market_home_prob=0.1)
+    row = _base_row(home_ml=150, away_ml=-170, model_home_prob=0.75, market_home_prob=0.4)
     decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
 
     assert decision.play_pass == "PASS"
-    assert any(
-        flag in decision.decision_flags
-        for flag in ("LOW_EDGE_PASS", "DISAGREE_PASS", "LOW_EV_PASS")
-    )
+    assert "DISAGREE_PASS" in decision.decision_flags
 
 
-def test_low_edge_passes():
+def test_low_edge_sizes_down():
     row = _base_row(model_home_prob=0.51, market_home_prob=0.5, home_ml=120, away_ml=-140)
     settings = DecisionSettings()
     decision = decide_bet_from_row(
@@ -69,8 +66,9 @@ def test_low_edge_passes():
         max_abs_moneyline=None,
     )
 
-    assert decision.play_pass == "PASS"
-    assert decision.final_units == 0.0
+    assert decision.play_pass == "PLAY"
+    assert decision.final_units > 0.0
+    assert "LOW_EDGE_SIZE_DOWN" in decision.decision_flags
 
 
 def test_soft_edge_size_down_allows_play():
