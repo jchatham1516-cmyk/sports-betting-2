@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -28,6 +29,18 @@ class SportBetConfig:
     disagree_pass_min_edge: float = 0.08
     disagree_pass_max_units: float = 0.10
     uncertainty_edge_cap_add: float = 0.04
+    calibration_risk_multiplier: float = 0.55
+    uncertainty_unit_scale: float = 6.0
+    uncertainty_sample_ref: float = 120.0
+    uncertainty_sample_exp: float = 0.5
+    uncertainty_quality_mult: float = 0.6
+    goalie_unconfirmed_units_mult: float = 0.65
+    injury_low_units_mult: float = 0.7
+    injury_unknown_units_mult: float = 0.85
+    min_edge_soft_floor: float = 0.01
+    soft_edge_base_units: float = 0.2
+    test_bet_min_units_enabled: bool = False
+    test_bet_min_units: float = 0.1
     parlay_min_edge: float = 0.045
     parlay_disagree_cap: float = 0.20
     parlay_disagree_huge_edge: float = 0.12
@@ -57,6 +70,18 @@ SPORT_BET_CONFIGS = {
         uncertainty_flat_threshold=float(os.getenv("NBA_UNCERTAINTY_FLAT_THRESHOLD", "0.06")),
         flat_units_when_uncertain=float(os.getenv("NBA_FLAT_UNITS_WHEN_UNCERTAIN", "0.5")),
         uncertainty_edge_cap_add=float(os.getenv("NBA_UNCERTAINTY_EDGE_CAP_ADD", "0.04")),
+        calibration_risk_multiplier=float(os.getenv("NBA_CALIBRATION_RISK_MULT", "0.6")),
+        uncertainty_unit_scale=float(os.getenv("NBA_UNCERTAINTY_UNIT_SCALE", "6.0")),
+        uncertainty_sample_ref=float(os.getenv("NBA_UNCERTAINTY_SAMPLE_REF", "120")),
+        uncertainty_sample_exp=float(os.getenv("NBA_UNCERTAINTY_SAMPLE_EXP", "0.5")),
+        uncertainty_quality_mult=float(os.getenv("NBA_UNCERTAINTY_QUALITY_MULT", "0.6")),
+        goalie_unconfirmed_units_mult=float(os.getenv("NBA_GOALIE_UNCONF_UNITS_MULT", "1.0")),
+        injury_low_units_mult=float(os.getenv("NBA_INJURY_LOW_UNITS_MULT", "0.7")),
+        injury_unknown_units_mult=float(os.getenv("NBA_INJURY_UNKNOWN_UNITS_MULT", "0.85")),
+        min_edge_soft_floor=float(os.getenv("NBA_MIN_EDGE_SOFT_FLOOR", "0.012")),
+        soft_edge_base_units=float(os.getenv("NBA_SOFT_EDGE_BASE_UNITS", "0.2")),
+        test_bet_min_units_enabled=bool(int(os.getenv("NBA_TEST_BET_MIN_UNITS_ON", "0"))),
+        test_bet_min_units=float(os.getenv("NBA_TEST_BET_MIN_UNITS", "0.1")),
         parlay_min_edge=float(os.getenv("NBA_PARLAY_MIN_EDGE", "0.06")),
         parlay_disagree_cap=float(os.getenv("NBA_PARLAY_DISAGREE_CAP", "0.20")),
         parlay_disagree_huge_edge=float(os.getenv("NBA_PARLAY_HUGE_EDGE", "0.12")),
@@ -82,6 +107,18 @@ SPORT_BET_CONFIGS = {
         uncertainty_flat_threshold=float(os.getenv("NFL_UNCERTAINTY_FLAT_THRESHOLD", "0.06")),
         flat_units_when_uncertain=float(os.getenv("NFL_FLAT_UNITS_WHEN_UNCERTAIN", "0.5")),
         uncertainty_edge_cap_add=float(os.getenv("NFL_UNCERTAINTY_EDGE_CAP_ADD", "0.035")),
+        calibration_risk_multiplier=float(os.getenv("NFL_CALIBRATION_RISK_MULT", "0.55")),
+        uncertainty_unit_scale=float(os.getenv("NFL_UNCERTAINTY_UNIT_SCALE", "6.5")),
+        uncertainty_sample_ref=float(os.getenv("NFL_UNCERTAINTY_SAMPLE_REF", "120")),
+        uncertainty_sample_exp=float(os.getenv("NFL_UNCERTAINTY_SAMPLE_EXP", "0.5")),
+        uncertainty_quality_mult=float(os.getenv("NFL_UNCERTAINTY_QUALITY_MULT", "0.6")),
+        goalie_unconfirmed_units_mult=float(os.getenv("NFL_GOALIE_UNCONF_UNITS_MULT", "1.0")),
+        injury_low_units_mult=float(os.getenv("NFL_INJURY_LOW_UNITS_MULT", "0.7")),
+        injury_unknown_units_mult=float(os.getenv("NFL_INJURY_UNKNOWN_UNITS_MULT", "0.85")),
+        min_edge_soft_floor=float(os.getenv("NFL_MIN_EDGE_SOFT_FLOOR", "0.01")),
+        soft_edge_base_units=float(os.getenv("NFL_SOFT_EDGE_BASE_UNITS", "0.2")),
+        test_bet_min_units_enabled=bool(int(os.getenv("NFL_TEST_BET_MIN_UNITS_ON", "0"))),
+        test_bet_min_units=float(os.getenv("NFL_TEST_BET_MIN_UNITS", "0.1")),
         parlay_min_edge=float(os.getenv("NFL_PARLAY_MIN_EDGE", "0.05")),
         parlay_disagree_cap=float(os.getenv("NFL_PARLAY_DISAGREE_CAP", "0.20")),
         parlay_disagree_huge_edge=float(os.getenv("NFL_PARLAY_HUGE_EDGE", "0.12")),
@@ -107,6 +144,18 @@ SPORT_BET_CONFIGS = {
         uncertainty_flat_threshold=float(os.getenv("NHL_UNCERTAINTY_FLAT_THRESHOLD", "0.06")),
         flat_units_when_uncertain=float(os.getenv("NHL_FLAT_UNITS_WHEN_UNCERTAIN", "0.5")),
         uncertainty_edge_cap_add=float(os.getenv("NHL_UNCERTAINTY_EDGE_CAP_ADD", "0.03")),
+        calibration_risk_multiplier=float(os.getenv("NHL_CALIBRATION_RISK_MULT", "0.5")),
+        uncertainty_unit_scale=float(os.getenv("NHL_UNCERTAINTY_UNIT_SCALE", "7.5")),
+        uncertainty_sample_ref=float(os.getenv("NHL_UNCERTAINTY_SAMPLE_REF", "120")),
+        uncertainty_sample_exp=float(os.getenv("NHL_UNCERTAINTY_SAMPLE_EXP", "0.5")),
+        uncertainty_quality_mult=float(os.getenv("NHL_UNCERTAINTY_QUALITY_MULT", "0.7")),
+        goalie_unconfirmed_units_mult=float(os.getenv("NHL_GOALIE_UNCONF_UNITS_MULT", "0.6")),
+        injury_low_units_mult=float(os.getenv("NHL_INJURY_LOW_UNITS_MULT", "0.85")),
+        injury_unknown_units_mult=float(os.getenv("NHL_INJURY_UNKNOWN_UNITS_MULT", "0.9")),
+        min_edge_soft_floor=float(os.getenv("NHL_MIN_EDGE_SOFT_FLOOR", "0.012")),
+        soft_edge_base_units=float(os.getenv("NHL_SOFT_EDGE_BASE_UNITS", "0.15")),
+        test_bet_min_units_enabled=bool(int(os.getenv("NHL_TEST_BET_MIN_UNITS_ON", "0"))),
+        test_bet_min_units=float(os.getenv("NHL_TEST_BET_MIN_UNITS", "0.1")),
         parlay_min_edge=float(os.getenv("NHL_PARLAY_MIN_EDGE", "0.05")),
         parlay_disagree_cap=float(os.getenv("NHL_PARLAY_DISAGREE_CAP", "0.18")),
         parlay_disagree_huge_edge=float(os.getenv("NHL_PARLAY_HUGE_EDGE", "0.1")),
@@ -119,5 +168,26 @@ SPORT_BET_CONFIGS = {
 }
 
 
+def _thresholds_path(sport: str) -> str:
+    return os.getenv("BET_THRESHOLDS_PATH", f"results/thresholds_{str(sport).lower()}.json")
+
+
+def _load_threshold_overrides(sport: str) -> dict[str, object]:
+    path = _thresholds_path(sport)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def get_sport_bet_config(sport: str) -> SportBetConfig:
-    return SPORT_BET_CONFIGS.get(str(sport).lower(), SPORT_BET_CONFIGS["nba"])
+    base = SPORT_BET_CONFIGS.get(str(sport).lower(), SPORT_BET_CONFIGS["nba"])
+    overrides = _load_threshold_overrides(sport)
+    if not overrides:
+        return base
+    valid = {k: v for k, v in overrides.items() if hasattr(base, k)}
+    return SportBetConfig(**{**base.__dict__, **valid})

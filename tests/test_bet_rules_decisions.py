@@ -52,7 +52,10 @@ def test_disagreement_pass():
     decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
 
     assert decision.play_pass == "PASS"
-    assert "LOW_EDGE_PASS" in decision.decision_flags or "DISAGREE_PASS" in decision.decision_flags
+    assert any(
+        flag in decision.decision_flags
+        for flag in ("LOW_EDGE_PASS", "DISAGREE_PASS", "LOW_EV_PASS")
+    )
 
 
 def test_low_edge_passes():
@@ -68,6 +71,15 @@ def test_low_edge_passes():
 
     assert decision.play_pass == "PASS"
     assert decision.final_units == 0.0
+
+
+def test_soft_edge_size_down_allows_play():
+    row = _base_row(model_home_prob=0.515, market_home_prob=0.5, home_ml=120, away_ml=-140)
+    decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
+
+    assert decision.play_pass == "PLAY"
+    assert decision.final_units > 0.0
+    assert "LOW_EDGE_SIZE_DOWN" in decision.decision_flags
 
 
 def test_min_edge_allows_play_for_nba():
@@ -145,3 +157,25 @@ def test_ats_uncalibrated_margin_caps_units(monkeypatch):
     assert decision.play_pass == "PLAY"
     assert decision.final_units <= 0.5
     assert "ATS_UNCALIBRATED_CAP" in decision.decision_flags
+
+
+def test_uncertainty_multiplier_reduces_units(monkeypatch):
+    from sports.common import bet_rules
+
+    row = _base_row(model_home_prob=0.7, market_home_prob=0.5, home_ml=-120, away_ml=110)
+
+    def _low_unc(_sport, market=None):
+        return {"uncertainty": 0.02, "n": 200}
+
+    def _high_unc(_sport, market=None):
+        return {"uncertainty": 0.15, "n": 20}
+
+    monkeypatch.setattr(bet_rules, "load_uncertainty", _low_unc)
+    bet_rules._UNCERTAINTY_CACHE.clear()
+    low = decide_bet_from_row(row, unit_dollars=40.0, sport="nba").final_units
+
+    monkeypatch.setattr(bet_rules, "load_uncertainty", _high_unc)
+    bet_rules._UNCERTAINTY_CACHE.clear()
+    high = decide_bet_from_row(row, unit_dollars=40.0, sport="nba").final_units
+
+    assert high < low

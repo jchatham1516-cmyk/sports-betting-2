@@ -9,6 +9,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from sports.common.prob_calibration import odds_bucket_from_price
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -151,6 +152,7 @@ def log_open_bets(
                 "side": side,
                 "line": np.nan if line is None else float(line),
                 "price": np.nan if price is None else float(price),
+                "odds_bucket": odds_bucket_from_price(price) if market == "ML" else "N/A",
                 # store model context too:
                 "model_home_prob": _safe_float(r.get("model_home_prob")),
                 "edge_home": _safe_float(r.get("edge_home")),
@@ -176,6 +178,86 @@ def log_open_bets(
 
     all_df.to_csv(clv_log_path, index=False)
     return preds_df
+
+
+def log_close_from_eval_history(
+    *,
+    eval_history_path: str = "results/eval_history.csv",
+    clv_log_path: str = "results/clv_log.csv",
+) -> pd.DataFrame:
+    if not os.path.exists(eval_history_path):
+        return pd.DataFrame()
+    try:
+        hist = pd.read_csv(eval_history_path)
+    except Exception:
+        return pd.DataFrame()
+    if hist.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, r in hist.iterrows():
+        sport = str(r.get("sport", "") or "")
+        date_str = str(r.get("date", "") or "")
+        home = str(r.get("home", "") or "")
+        away = str(r.get("away", "") or "")
+        market = str(r.get("market_type", "") or "").upper()
+        side = str(r.get("side", "") or "").upper()
+        line = _safe_float(r.get("line"))
+
+        if market == "ATS":
+            close_price = _safe_float(r.get("closing_spread_price"))
+        elif market == "TOTAL":
+            close_price = _safe_float(
+                r.get("closing_over_price") if side == "OVER" else r.get("closing_under_price")
+            )
+        else:
+            close_price = float("nan")
+
+        if not np.isfinite(close_price):
+            continue
+
+        bet_id = make_bet_id(
+            sport=sport,
+            date_str=date_str,
+            home=home,
+            away=away,
+            market=market,
+            side=side,
+            line=None if np.isnan(line) else float(line),
+        )
+        rows.append(
+            {
+                "ts": _utc_now_iso(),
+                "stage": "close",
+                "bet_id": bet_id,
+                "sport": sport,
+                "date": date_str,
+                "home": home,
+                "away": away,
+                "market": market,
+                "side": side,
+                "line": np.nan if np.isnan(line) else float(line),
+                "price": float(close_price),
+                "odds_bucket": odds_bucket_from_price(close_price) if market == "ML" else "N/A",
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame()
+
+    new_df = pd.DataFrame(rows)
+    if os.path.exists(clv_log_path):
+        try:
+            old = pd.read_csv(clv_log_path)
+            all_df = pd.concat([old, new_df], ignore_index=True)
+            all_df = all_df.drop_duplicates(subset=["bet_id", "stage"], keep="last")
+        except Exception:
+            all_df = new_df
+    else:
+        all_df = new_df
+
+    all_df.to_csv(clv_log_path, index=False)
+    return all_df
 
 
 def summarize_clv(
@@ -227,5 +309,47 @@ def summarize_clv(
         )
         .reset_index()
         .sort_values(["sport", "market"])
+    )
+    return g
+
+
+def summarize_clv_by_bucket(
+    clv_log_path: str = "results/clv_log.csv",
+) -> pd.DataFrame:
+    if not os.path.exists(clv_log_path):
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(clv_log_path)
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
+
+    open_df = df[df["stage"] == "open"].copy()
+    close_df = df[df["stage"] == "close"].copy()
+    if close_df.empty:
+        g = open_df.groupby(["sport", "market", "odds_bucket"]).size().reset_index(name="open_bets")
+        return g.sort_values(["sport", "market", "odds_bucket"])
+
+    m = open_df.merge(
+        close_df[["bet_id", "price"]].rename(columns={"price": "close_price"}),
+        on="bet_id",
+        how="left",
+    )
+    m["open_price"] = m["price"]
+    m["open_prob"] = m["open_price"].apply(lambda x: _american_to_prob(x) if not pd.isna(x) else np.nan)
+    m["close_prob"] = m["close_price"].apply(lambda x: _american_to_prob(x) if not pd.isna(x) else np.nan)
+    m["clv_prob"] = m["close_prob"] - m["open_prob"]
+
+    g = (
+        m.groupby(["sport", "market", "odds_bucket"])
+        .agg(
+            open_bets=("bet_id", "count"),
+            close_observed=("close_price", lambda s: int(np.sum(~pd.isna(s)))),
+            avg_clv_prob=("clv_prob", "mean"),
+            med_clv_prob=("clv_prob", "median"),
+        )
+        .reset_index()
+        .sort_values(["sport", "market", "odds_bucket"])
     )
     return g

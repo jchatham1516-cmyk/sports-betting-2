@@ -31,3 +31,27 @@ def test_platt_calibration_fit_and_apply(monkeypatch, tmp_path):
     calibrated = prob_calibration.calibrate_prob("nba", p_test, market_type="ML")
 
     assert abs(calibrated - expected) < abs(p_test - expected)
+
+
+def test_ml_bucket_calibration_prefers_bucket(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    prob_calibration._CALIBRATOR_CACHE.clear()
+
+    rng = np.random.default_rng(7)
+    p_raw = rng.uniform(0.1, 0.9, size=350)
+    y = rng.uniform(0.0, 1.0, size=350) < p_raw
+
+    prob_calibration.update_prob_calibration(
+        "nba",
+        p_raw,
+        y,
+        window=300,
+        min_samples=120,
+        market_type="ML",
+        bucket="favorite",
+    )
+    p_test = 0.65
+    calibrated = prob_calibration.calibrate_prob("nba", p_test, market_type="ML", price=-180)
+
+    assert np.isfinite(calibrated)
+    assert calibrated != p_test

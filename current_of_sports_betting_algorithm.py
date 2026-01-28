@@ -23,6 +23,7 @@ from sports.common.odds_sources import (
     SPORT_TO_ODDS_KEY,
 )
 from sports.common import tracker
+from sports.common import clv_tracker
 from sports.common.bet_logger import append_plays_to_bet_log
 
 from sports.common.bankroll import (
@@ -38,7 +39,13 @@ from sports.common.bet_rules import (
     primary_metrics_for_row,
 )
 from sports.common.bet_config import get_sport_bet_config
-from sports.common.prob_calibration import fit_calibrator, update_daily_ml_calibration, update_prob_calibration, MIN_SAMPLES
+from sports.common.prob_calibration import (
+    fit_calibrator,
+    update_daily_ml_calibration,
+    update_daily_market_calibration,
+    update_prob_calibration,
+    MIN_SAMPLES,
+)
 from sports.common.history_builder import build_historical_dataset, season_string_for_date
 from sports.common.reporting import (
     build_display_columns,
@@ -371,13 +378,22 @@ def main(argv=None):
     # Run sport model
     if args.sport == "nba":
         try:
+            days_back = int(os.getenv("NBA_PROB_CAL_DAYS", "45"))
+            min_samples = int(os.getenv("NBA_PROB_CAL_MIN_SAMPLES", "120"))
             update_daily_ml_calibration(
                 "nba",
-                days_back=int(os.getenv("NBA_PROB_CAL_DAYS", "45")),
-                min_samples=int(os.getenv("NBA_PROB_CAL_MIN_SAMPLES", "120")),
+                days_back=days_back,
+                min_samples=min_samples,
             )
+            for market in ("ATS", "TOTAL"):
+                update_daily_market_calibration(
+                    "nba",
+                    market_type=market,
+                    days_back=days_back,
+                    min_samples=min_samples,
+                )
         except Exception as e:
-            print(f"[calibration] WARNING: NBA ML calibration update failed: {e}")
+            print(f"[calibration] WARNING: NBA market calibration update failed: {e}")
 
         api_key = get_bdl_api_key()
         game_date_obj = datetime.strptime(game_date, "%m/%d/%Y").date()
@@ -399,13 +415,22 @@ def main(argv=None):
 
     elif args.sport == "nhl":
         try:
+            days_back = int(os.getenv("NHL_PROB_CAL_DAYS", "45"))
+            min_samples = int(os.getenv("NHL_PROB_CAL_MIN_SAMPLES", "120"))
             update_daily_ml_calibration(
                 "nhl",
-                days_back=int(os.getenv("NHL_PROB_CAL_DAYS", "45")),
-                min_samples=int(os.getenv("NHL_PROB_CAL_MIN_SAMPLES", "120")),
+                days_back=days_back,
+                min_samples=min_samples,
             )
+            for market in ("ATS", "TOTAL"):
+                update_daily_market_calibration(
+                    "nhl",
+                    market_type=market,
+                    days_back=days_back,
+                    min_samples=min_samples,
+                )
         except Exception as e:
-            print(f"[calibration] WARNING: NHL ML calibration update failed: {e}")
+            print(f"[calibration] WARNING: NHL market calibration update failed: {e}")
 
         before_count = len(odds_dict)
         filtered_odds = {}
@@ -557,6 +582,10 @@ def main(argv=None):
         results_df["decision_reason"] = [d.decision_reason for d in decisions]
         results_df["raw_units"] = [d.raw_units for d in decisions]
         results_df["final_units"] = [d.final_units for d in decisions]
+        results_df["calibration_multiplier"] = [d.calibration_multiplier for d in decisions]
+        results_df["uncertainty_multiplier"] = [d.uncertainty_multiplier for d in decisions]
+        results_df["goalie_multiplier"] = [d.goalie_multiplier for d in decisions]
+        results_df["injury_multiplier"] = [d.injury_multiplier for d in decisions]
         results_df["edge_prob_raw"] = [d.edge_prob_raw for d in decisions]
         results_df["edge_prob_cal"] = [d.edge_prob_cal for d in decisions]
         results_df["edge_prob_final"] = [d.edge_prob_final for d in decisions]
@@ -582,6 +611,11 @@ def main(argv=None):
                     print(format_decision_trace(r, d))
 
         results_df = _cap_to_top_plays(results_df, max_plays)
+
+        try:
+            clv_tracker.log_open_bets(results_df)
+        except Exception as e:
+            print(f"[clv] WARNING: failed to log open bets: {e}")
 
     if args.sport == "nhl":
         abs_edges = pd.Series(dtype=float)
@@ -771,40 +805,93 @@ def main(argv=None):
         print(f"[eval history] WARNING: bet history update failed: {e}")
 
     try:
-        if args.sport in {"nba", "nhl"} and not eval_bets.empty:
-            sport_key = str(args.sport).lower()
-            ml_hist = eval_bets[
-                eval_bets.get("market_type", "").astype(str).str.upper() == "ML"
-            ].copy()
-            if "sport" in ml_hist.columns:
-                ml_hist = ml_hist[ml_hist["sport"].astype(str).str.lower() == sport_key].copy()
-            ml_hist["model_prob_raw"] = pd.to_numeric(ml_hist.get("model_prob_raw"), errors="coerce")
-            ml_hist["model_prob"] = pd.to_numeric(ml_hist.get("model_prob"), errors="coerce")
-            ml_hist["actual_result"] = pd.to_numeric(ml_hist.get("actual_result"), errors="coerce")
-            p_raw = ml_hist["model_prob_raw"].fillna(ml_hist["model_prob"]).to_numpy()
-            p_final = ml_hist["model_prob"].to_numpy()
-            y = ml_hist["actual_result"].to_numpy()
-            mask_any = np.isfinite(y) & (np.isfinite(p_raw) | np.isfinite(p_final))
-            if mask_any.any():
-                p_unc = np.where(np.isfinite(p_final), p_final, p_raw)
-                mask_cal = np.isfinite(p_raw) & np.isfinite(y)
-                update_uncertainty(
-                    sport_key,
-                    p_unc[mask_any],
-                    y[mask_any],
-                    window=int(mask_any.sum()),
-                    min_samples=30,
-                    market="ML",
+        clv_tracker.log_close_from_eval_history(
+            eval_history_path="results/eval_history.csv",
+            clv_log_path="results/clv_log.csv",
+        )
+    except Exception as e:
+        print(f"[clv] WARNING: failed to log closing odds: {e}")
+
+    try:
+        uncalibrated_count = int(results_df.get("uncalibrated", pd.Series(dtype=float)).sum())
+        avg_unc_mult = float(
+            pd.to_numeric(results_df.get("uncertainty_multiplier", pd.Series(dtype=float)), errors="coerce").mean()
+        )
+    except Exception:
+        uncalibrated_count = 0
+        avg_unc_mult = float("nan")
+
+    brier_val = float("nan")
+    if "brier" in eval_row.columns and not eval_row.empty:
+        try:
+            brier_val = float(eval_row["brier"].iloc[0])
+        except Exception:
+            brier_val = float("nan")
+
+    print(
+        "[daily summary] "
+        f"uncalibrated={uncalibrated_count} avg_unc_mult={avg_unc_mult:.3f} "
+        f"brier={brier_val:.4f}"
+    )
+    clv_bucket_summary = clv_tracker.summarize_clv_by_bucket()
+    if not clv_bucket_summary.empty:
+        sport_key = str(args.sport).lower()
+        clv_bucket_summary["sport_key"] = clv_bucket_summary["sport"].astype(str).str.lower()
+        filtered = clv_bucket_summary[clv_bucket_summary["sport_key"] == sport_key]
+        if not filtered.empty:
+            print("[daily summary] CLV by market/bucket:")
+            for _, row in filtered.iterrows():
+                avg_clv = row.get("avg_clv_prob")
+                avg_clv_str = "nan" if not np.isfinite(avg_clv) else f"{float(avg_clv):+.4f}"
+                print(
+                    f"  {row.get('market')} {row.get('odds_bucket')}: "
+                    f"avg_clv={avg_clv_str} "
+                    f"open={int(row.get('open_bets', 0))} "
+                    f"close_obs={int(row.get('close_observed', 0))}"
                 )
-                if mask_cal.any():
-                    min_samples = int(os.getenv(f"{sport_key.upper()}_PROB_CAL_MIN_SAMPLES", MIN_SAMPLES))
-                    update_prob_calibration(
+
+    try:
+        if not eval_bets.empty:
+            sport_key = str(args.sport).lower()
+            for market in ("ML", "ATS", "TOTAL"):
+                market_hist = eval_bets[
+                    eval_bets.get("market_type", "").astype(str).str.upper() == market
+                ].copy()
+                if "sport" in market_hist.columns:
+                    market_hist = market_hist[market_hist["sport"].astype(str).str.lower() == sport_key].copy()
+                if market_hist.empty:
+                    continue
+                market_hist["model_prob_raw"] = pd.to_numeric(market_hist.get("model_prob_raw"), errors="coerce")
+                market_hist["model_prob"] = pd.to_numeric(market_hist.get("model_prob"), errors="coerce")
+                market_hist["actual_result"] = pd.to_numeric(market_hist.get("actual_result"), errors="coerce")
+                p_raw = market_hist["model_prob_raw"].fillna(market_hist["model_prob"]).to_numpy()
+                p_final = market_hist["model_prob"].to_numpy()
+                y = market_hist["actual_result"].to_numpy()
+                mask_any = np.isfinite(y) & (np.isfinite(p_raw) | np.isfinite(p_final))
+                if mask_any.any():
+                    p_unc = np.where(np.isfinite(p_final), p_final, p_raw)
+                    update_uncertainty(
                         sport_key,
-                        p_raw[mask_cal],
-                        y[mask_cal],
-                        window=int(mask_cal.sum()),
-                        min_samples=min_samples,
+                        p_unc[mask_any],
+                        y[mask_any],
+                        window=int(mask_any.sum()),
+                        min_samples=30,
+                        market=market,
                     )
+            days_back = int(os.getenv(f"{sport_key.upper()}_PROB_CAL_DAYS", "45"))
+            min_samples = int(os.getenv(f"{sport_key.upper()}_PROB_CAL_MIN_SAMPLES", MIN_SAMPLES))
+            update_daily_ml_calibration(
+                sport_key,
+                days_back=days_back,
+                min_samples=min_samples,
+            )
+            for market in ("ATS", "TOTAL"):
+                update_daily_market_calibration(
+                    sport_key,
+                    market_type=market,
+                    days_back=days_back,
+                    min_samples=min_samples,
+                )
     except Exception as e:
         print(f"[calibration] WARNING: rolling calibration update failed: {e}")
 
