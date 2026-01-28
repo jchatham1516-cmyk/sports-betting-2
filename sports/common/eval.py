@@ -695,6 +695,7 @@ def update_eval_history_with_bet_predictions(
     keep_cols = [
         "game_key",
         "event_id",
+        "sport",
         "date",
         "market_type",
         "side",
@@ -707,6 +708,11 @@ def update_eval_history_with_bet_predictions(
         "home",
         "away",
         "score_date",
+        "closing_home_spread",
+        "closing_spread_price",
+        "closing_total_points",
+        "closing_over_price",
+        "closing_under_price",
         "__source_file",
     ]
     merged = merged[[c for c in keep_cols if c in merged.columns]]
