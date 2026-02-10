@@ -867,12 +867,26 @@ def main(argv=None):
             brier_val if np.isfinite(brier_val) else 0.0
         )
 
+    pass_reasons = _pass_reason_counts(results_df)
+    top_reasons = "none"
+    if not pass_reasons.empty:
+        top_reasons = ", ".join(
+            f"{r.reason}:{int(r.count)}" for r in pass_reasons.head(5).itertuples(index=False)
+        )
+    uncalibrated_pct = (float(uncalibrated_count) / float(total_rows) * 100.0) if total_rows else 0.0
+    bets_by_market = "none"
+    if total_rows and all(c in results_df.columns for c in ("play_pass", "primary_market")):
+        plays = results_df[results_df["play_pass"].astype(str) == "PLAY"]
+        if not plays.empty:
+            market_counts = plays.groupby("primary_market").size().to_dict()
+            bets_by_market = ", ".join(f"{k}:{int(v)}" for k, v in sorted(market_counts.items()))
+
     print(
         "[daily summary] "
-        f"uncalibrated={uncalibrated_count} calibration_coverage={calibration_coverage:.1%} "
-        f"positive_edge_blocked={positive_edge_blocked} avg_unc_mult={avg_unc_mult:.3f} "
-        f"avg_stake_mult={avg_stake_mult:.3f} brier={brier_val:.4f} "
-        f"avg_clv={avg_clv:.4f} roi_proxy={roi_proxy:.4f}"
+        f"positive_edge_rows_passed={positive_edge_blocked} reasons={top_reasons} "
+        f"uncalibrated_pct={uncalibrated_pct:.1f}% avg_unc_mult={avg_unc_mult:.3f} "
+        f"bets[{str(args.sport).upper()}]={bets_by_market} avg_stake_mult={avg_stake_mult:.3f} "
+        f"brier={brier_val:.4f} avg_clv={avg_clv:.4f} roi_proxy={roi_proxy:.4f}"
     )
     clv_bucket_summary = clv_tracker.summarize_clv_by_bucket()
     if not clv_bucket_summary.empty:

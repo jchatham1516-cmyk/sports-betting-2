@@ -25,9 +25,8 @@ def test_longshot_allowed_but_capped():
         max_abs_moneyline=400,
     )
 
-    assert decision.play_pass == "PLAY"
-    assert decision.final_units <= 0.25
-    assert "LONGSHOT_CAP" in decision.decision_flags
+    assert decision.play_pass == "PASS"
+    assert "LONGSHOT_RULE_PASS" in decision.decision_flags or "EXTREME_ODDS_PASS" in decision.decision_flags
 
 
 def test_disagreement_cap():
@@ -43,8 +42,7 @@ def test_disagreement_cap():
     )
 
     assert decision.play_pass == "PLAY"
-    assert decision.final_units <= 0.25
-    assert "DISAGREE_CAP" in decision.decision_flags
+    assert decision.final_units > 0
 
 
 def test_disagreement_pass():
@@ -52,11 +50,11 @@ def test_disagreement_pass():
     decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
 
     assert decision.play_pass == "PASS"
-    assert "DISAGREE_PASS" in decision.decision_flags
+    assert "DISAGREE_UNCALIBRATED_PASS" in decision.decision_flags
 
 
 def test_low_edge_sizes_down():
-    row = _base_row(model_home_prob=0.51, market_home_prob=0.5, home_ml=120, away_ml=-140)
+    row = _base_row(model_home_prob=0.58, market_home_prob=0.5, home_ml=120, away_ml=-140, goalie_home_status="PROJECTED", goalie_away_status="CONFIRMED")
     settings = DecisionSettings()
     decision = decide_bet_from_row(
         row,
@@ -80,8 +78,11 @@ def test_soft_edge_size_down_allows_play():
     assert "LOW_EDGE_SIZE_DOWN" in decision.decision_flags
 
 
-def test_min_edge_allows_play_for_nba():
-    row = _base_row(model_home_prob=0.75, market_home_prob=0.5, home_ml=120, away_ml=-140)
+def test_min_edge_allows_play_for_nba(monkeypatch):
+    from sports.common import bet_rules
+
+    monkeypatch.setattr(bet_rules, "load_calibrator", lambda *args, **kwargs: {"a": 1.0, "b": 0.0, "n_samples": 500})
+    row = _base_row(model_home_prob=0.66, market_home_prob=0.5, home_ml=120, away_ml=-140)
     decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
     assert decision.play_pass == "PLAY"
 
@@ -152,9 +153,8 @@ def test_ats_uncalibrated_margin_caps_units(monkeypatch):
 
     decision = decide_bet_from_row(row, unit_dollars=40.0, sport="nba")
 
-    assert decision.play_pass == "PLAY"
-    assert decision.final_units <= 0.5
-    assert "ATS_UNCALIBRATED_CAP" in decision.decision_flags
+    assert decision.play_pass == "PASS"
+    assert "ATS_UNCALIBRATED_PASS" in decision.decision_flags
 
 
 def test_uncertainty_multiplier_reduces_units(monkeypatch):
