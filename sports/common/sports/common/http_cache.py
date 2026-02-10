@@ -12,7 +12,8 @@ import requests
 
 CACHE_DIR = os.getenv("ODDS_CACHE_DIR", "results/odds_cache")
 DEFAULT_TTL_S = int(os.getenv("ODDS_CACHE_TTL_S", "21600"))  # 6 hours
-SHORT_TTL_S = int(os.getenv("ODDS_CACHE_SHORT_TTL_S", "900"))  # 15 minutes
+SHORT_TTL_MIN_S = int(os.getenv("ODDS_CACHE_SHORT_TTL_MIN_S", "600"))  # 10 minutes
+SHORT_TTL_MAX_S = int(os.getenv("ODDS_CACHE_SHORT_TTL_MAX_S", "1200"))  # 20 minutes
 SHORT_TTL_WINDOW_S = int(os.getenv("ODDS_CACHE_SHORT_TTL_WINDOW_S", "10800"))  # 3 hours
 
 
@@ -39,7 +40,9 @@ def _dynamic_ttl(ttl_s: int, *, event_start: Optional[object]) -> int:
     now = time.time()
     seconds_to_start = event_ts - now
     if 0 <= seconds_to_start <= float(SHORT_TTL_WINDOW_S):
-        return int(min(ttl_s, SHORT_TTL_S))
+        frac = max(0.0, min(1.0, seconds_to_start / float(SHORT_TTL_WINDOW_S)))
+        dynamic_short = float(SHORT_TTL_MIN_S) + (float(SHORT_TTL_MAX_S) - float(SHORT_TTL_MIN_S)) * frac
+        return int(min(ttl_s, dynamic_short))
     return int(ttl_s)
 
 def _key(url: str, params: Dict[str, Any]) -> str:
