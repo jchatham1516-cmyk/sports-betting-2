@@ -1,0 +1,64 @@
+name: Daily Picks
+
+on:
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: "Sport key (nba, nhl, nfl)"
+        required: true
+        default: "nhl"
+      date:
+        description: "Date YYYY-MM-DD (optional; defaults to today in code if supported)"
+        required: false
+      days:
+        description: "Number of days forward to scan"
+        required: true
+        default: "1"
+  schedule:
+    # Runs daily at 10:05 AM America/Chicago = 16:05 UTC (standard)
+    # (DST shifts by an hour; this is fine for most use-cases)
+    - cron: "5 16 * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run model
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          SPORT="${{ github.event.inputs.sport }}"
+          DAYS="${{ github.event.inputs.days }}"
+          DATE_INPUT="${{ github.event.inputs.date }}"
+
+          echo "Sport=$SPORT Days=$DAYS Date=$DATE_INPUT"
+
+          if [ -n "$DATE_INPUT" ]; then
+            python main.py --sport "$SPORT" --date "$DATE_INPUT" --days "$DAYS" --debug
+          else
+            python main.py --sport "$SPORT" --days "$DAYS" --debug
+          fi
+
+      - name: Upload results (CSV/artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: picks-and-logs
+          path: |
+            data/results/**
+            data/raw/**
+          if-no-files-found: warn
