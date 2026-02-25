@@ -3,19 +3,19 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib
+import inspect
 import json
 import logging
 import os
-import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict, List, Optional, Callable
 
 LOG = logging.getLogger("sports-betting")
 
 
 # ----------------------------
-# Helpers
+# Logging / FS
 # ----------------------------
 def setup_logging(debug: bool) -> None:
     level = logging.DEBUG if debug else logging.INFO
@@ -31,6 +31,9 @@ def ensure_dirs() -> None:
     Path("data/inputs").mkdir(parents=True, exist_ok=True)
 
 
+# ----------------------------
+# Parsing helpers
+# ----------------------------
 def parse_date(s: str) -> dt.date:
     s = (s or "").strip()
     for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
@@ -59,12 +62,10 @@ def load_optional_json(path: str) -> Optional[Dict[str, Any]]:
 
 
 def write_csv(rows: List[Dict[str, Any]], out_path: Path) -> None:
-    # Minimal CSV writer (no pandas required)
     if not rows:
         out_path.write_text("", encoding="utf-8")
         return
 
-    # Stable header order: union of keys, sorted but with common columns up front
     preferred = [
         "date",
         "sport",
@@ -83,6 +84,7 @@ def write_csv(rows: List[Dict[str, Any]], out_path: Path) -> None:
         "inputs_used",
         "model_version",
     ]
+
     keys = set()
     for r in rows:
         keys.update(r.keys())
@@ -100,19 +102,76 @@ def write_csv(rows: List[Dict[str, Any]], out_path: Path) -> None:
     lines = [",".join(header)]
     for r in rows:
         lines.append(",".join(esc(r.get(k)) for k in header))
-
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ----------------------------
-# Main runner
+# Dynamic runner detection
+# ----------------------------
+def pick_runner(module: Any, sport: str) -> Callable[..., Any]:
+    """
+    Finds the "runner" function inside sports.<sport>.model regardless of what Codex named it.
+    """
+    candidates = [
+        f"run_{sport}",
+        f"run_daily_{sport}",
+        f"run_{sport}_model",
+        "run_daily",
+        "run_model",
+        "run",
+        "main",
+    ]
+
+    for name in candidates:
+        fn = getattr(module, name, None)
+        if callable(fn):
+            LOG.info("Using runner: %s.%s()", module.__name__, name)
+            return fn
+
+    # fallback: pick first callable that starts with "run"
+    run_like = []
+    for name, obj in vars(module).items():
+        if callable(obj) and name.startswith("run"):
+            run_like.append((name, obj))
+    if run_like:
+        name, fn = run_like[0]
+        LOG.info("Using runner (fallback): %s.%s()", module.__name__, name)
+        return fn
+
+    raise RuntimeError(
+        f"Could not find a runner function in {module.__name__}. "
+        f"Expected one of: {', '.join(candidates)}"
+    )
+
+
+def call_with_supported_kwargs(fn: Callable[..., Any], kwargs: Dict[str, Any]) -> Any:
+    """
+    Calls fn with only the kwargs it accepts (prevents signature mismatch crashes).
+    """
+    sig = inspect.signature(fn)
+    accepted = {}
+    for k, v in kwargs.items():
+        if k in sig.parameters:
+            accepted[k] = v
+
+    # If fn has **kwargs it will accept anything; we can pass everything
+    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    if has_var_kw:
+        accepted = kwargs
+
+    LOG.debug("Calling %s with kwargs: %s", getattr(fn, "__name__", str(fn)), sorted(accepted.keys()))
+    return fn(**accepted)
+
+
+# ----------------------------
+# Main
 # ----------------------------
 def run() -> int:
     parser = argparse.ArgumentParser(description="Daily sports betting picks runner")
-    parser.add_argument("--sport", required=True, choices=["nba", "nhl", "nfl"], help="Sport to run")
-    parser.add_argument("--date", required=False, default=None, help="Target date YYYY-MM-DD (or YYYY/MM/DD)")
-    parser.add_argument("--days", required=False, default="1", help="How many days forward to scan (default 1)")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logs")
+    parser.add_argument("--sport", required=True, choices=["nba", "nhl", "nfl"])
+    parser.add_argument("--date", required=False, default=None, help="YYYY-MM-DD (or YYYY/MM/DD)")
+    parser.add_argument("--days", required=False, default="1")
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
     setup_logging(args.debug)
@@ -120,12 +179,16 @@ def run() -> int:
 
     odds_api_key = os.getenv("ODDS_API_KEY", "").strip()
     if not odds_api_key:
-        LOG.error("ODDS_API_KEY is not set. Add it as a GitHub Actions secret or export it locally.")
+        LOG.error("ODDS_API_KEY is not set. Add it as a GitHub Actions secret or export it.")
         return 2
 
-    # Date handling
+    # Date parsing
     if args.date:
-        target_date = parse_date(args.date)
+        try:
+            target_date = parse_date(args.date)
+        except Exception as e:
+            LOG.error(str(e))
+            return 2
     else:
         target_date = dt.date.today()
 
@@ -138,79 +201,83 @@ def run() -> int:
     dates = daterange(target_date, days)
     LOG.info("Sport=%s Days=%s StartDate=%s", args.sport, days, target_date.isoformat())
 
-    # Optional local inputs
+    # Optional inputs
     injuries = load_optional_json("data/inputs/injuries.json")
     goalies = load_optional_json("data/inputs/goalies.json")
     weather = load_optional_json("data/inputs/weather.json")
 
-    # Dispatch to sport model
-    rows: List[Dict[str, Any]] = []
+    # Import sport module + find runner
+    module_name = f"sports.{args.sport}.model"
+    try:
+        model_module = importlib.import_module(module_name)
+    except Exception as e:
+        LOG.exception("Failed to import %s: %s", module_name, e)
+        return 3
 
     try:
-        if args.sport == "nba":
-            from sports.nba.model import run_nba  # type: ignore
-
-            rows = run_nba(
-                dates=dates,
-                odds_api_key=odds_api_key,
-                injuries=injuries,
-                weather=weather,
-                debug=args.debug,
-            )
-
-        elif args.sport == "nhl":
-            from sports.nhl.model import run_nhl  # type: ignore
-
-            rows = run_nhl(
-                dates=dates,
-                odds_api_key=odds_api_key,
-                injuries=injuries,
-                goalies=goalies,
-                debug=args.debug,
-            )
-
-        elif args.sport == "nfl":
-            from sports.nfl.model import run_nfl  # type: ignore
-
-            rows = run_nfl(
-                dates=dates,
-                odds_api_key=odds_api_key,
-                injuries=injuries,
-                weather=weather,
-                debug=args.debug,
-            )
-
-        else:
-            LOG.error("Unsupported sport: %s", args.sport)
-            return 2
-
-    except ModuleNotFoundError as e:
-        LOG.error("Missing module: %s", e)
-        LOG.error("Make sure you have sports/%s/model.py created.", args.sport)
-        return 3
+        runner = pick_runner(model_module, args.sport)
     except Exception as e:
-        LOG.exception("Run failed: %s", e)
+        LOG.error(str(e))
+        return 3
+
+    # Prepare kwargs; runner will only receive what it supports
+    call_kwargs: Dict[str, Any] = {
+        "dates": dates,
+        "date": target_date,
+        "days": days,
+        "sport": args.sport,
+        "odds_api_key": odds_api_key,
+        "api_key": odds_api_key,
+        "injuries": injuries,
+        "goalies": goalies,
+        "weather": weather,
+        "debug": args.debug,
+        "raw_dir": "data/raw",
+        "results_dir": "data/results",
+    }
+
+    try:
+        result = call_with_supported_kwargs(runner, call_kwargs)
+    except Exception as e:
+        LOG.exception("Runner crashed: %s", e)
         return 1
 
-    # Output
+    # Normalize result into rows
+    rows: List[Dict[str, Any]]
+    if result is None:
+        rows = []
+    elif isinstance(result, list):
+        rows = result  # expected: list[dict]
+    else:
+        # Some implementations might return dict with "rows" or a pandas DataFrame-like
+        if isinstance(result, dict) and "rows" in result and isinstance(result["rows"], list):
+            rows = result["rows"]
+        else:
+            LOG.warning("Unexpected runner return type: %s. Writing empty output.", type(result))
+            rows = []
+
+    # Ensure sport/date fields exist
+    for r in rows:
+        r.setdefault("sport", args.sport)
+        r.setdefault("date", target_date.isoformat())
+
     stamp = target_date.strftime("%Y%m%d")
     out_path = Path(f"data/results/picks_{args.sport}_{stamp}.csv")
     write_csv(rows, out_path)
 
     LOG.info("Wrote %d rows to %s", len(rows), out_path.as_posix())
 
-    # Print a quick console preview (first 10)
-    if rows:
-        preview = rows[:10]
-        LOG.info("Preview (first %d):", len(preview))
-        for r in preview:
-            home = r.get("home", "")
-            away = r.get("away", "")
-            market_type = r.get("market_type", "")
-            edge = r.get("edge", "")
-            play_pass = r.get("play_pass", "")
-            bet_units = r.get("bet_units", "")
-            LOG.info("  %s @ %s | %s | edge=%s | %s | units=%s", away, home, market_type, edge, play_pass, bet_units)
+    # quick preview
+    for r in rows[:10]:
+        LOG.info(
+            "Pick: %s @ %s | %s | edge=%s | %s | units=%s",
+            r.get("away", ""),
+            r.get("home", ""),
+            r.get("market_type", ""),
+            r.get("edge", ""),
+            r.get("play_pass", ""),
+            r.get("bet_units", ""),
+        )
 
     return 0
 
