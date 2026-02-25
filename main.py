@@ -1,160 +1,217 @@
+# main.py
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import logging
 import os
+import sys
 from pathlib import Path
-
-import pandas as pd
-from dotenv import load_dotenv
-
-from sports.common.betting import BettingConfig, size_bet_units
-from sports.common.calibration import load_calibrator
-from sports.common.elo import EloEngine
-from sports.common.ev import edge, expected_value_two_way
-from sports.common.io import DATA_DIR, read_json, write_csv, write_json
-from sports.common.normalization import bounded_probability, remove_vig_two_way
-from sports.common.odds_api import fetch_odds, normalize_odds
-from sports.nba.model import NbaModel
-from sports.nfl.model import NflModel
-from sports.nhl.model import NhlModel
-
-MODEL_VERSION = "v1.0.0"
-LOGGER = logging.getLogger("sports-betting")
+from typing import Any, Dict, List, Optional
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sports betting EV engine")
-    parser.add_argument("--sport", required=True, choices=["nba", "nhl", "nfl"])
-    parser.add_argument("--date", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--days", type=int, default=1)
-    parser.add_argument("--debug", action="store_true")
-    return parser.parse_args()
+LOG = logging.getLogger("sports-betting")
 
 
+# ----------------------------
+# Helpers
+# ----------------------------
 def setup_logging(debug: bool) -> None:
     level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
 
 
-def run() -> int:
-    args = parse_args()
-    setup_logging(args.debug)
-    load_dotenv()
+def ensure_dirs() -> None:
+    Path("data/raw").mkdir(parents=True, exist_ok=True)
+    Path("data/results").mkdir(parents=True, exist_ok=True)
+    Path("data/inputs").mkdir(parents=True, exist_ok=True)
 
-    api_key = os.getenv("ODDS_API_KEY")
-    if not api_key:
-        raise RuntimeError("ODDS_API_KEY is required")
 
- def parse_date(s: str) -> dt.date:
-    s = s.strip()
+def parse_date(s: str) -> dt.date:
+    s = (s or "").strip()
     for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
         try:
             return dt.datetime.strptime(s, fmt).date()
         except ValueError:
-            pass
+            continue
     raise ValueError(f"Invalid --date '{s}'. Use YYYY-MM-DD (or YYYY/MM/DD).")
 
-target_date = parse_date(args.date)
-    raw = fetch_odds(api_key=api_key, sport=args.sport, date=target_date, days=args.days)
 
-    raw_path = DATA_DIR / "raw" / f"{args.sport}_{target_date.strftime('%Y%m%d')}.json"
-    write_json(raw_path, raw)
-    events = normalize_odds(raw, args.sport)
+def daterange(start: dt.date, days: int) -> List[dt.date]:
+    days = max(int(days), 1)
+    return [start + dt.timedelta(days=i) for i in range(days)]
 
-    elo = EloEngine()
-    calibrator = load_calibrator(DATA_DIR / "models", args.sport, "h2h")
 
-    injuries = read_json(DATA_DIR / "inputs" / "injuries.json", default={}) or {}
-    goalies = read_json(DATA_DIR / "inputs" / "goalies.json", default={}) or {}
-    weather = read_json(DATA_DIR / "inputs" / "weather.json", default={}) or {}
+def load_optional_json(path: str) -> Optional[Dict[str, Any]]:
+    p = Path(path)
+    if not p.exists():
+        LOG.warning("Optional input missing: %s (continuing without it)", path)
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        LOG.warning("Failed reading %s: %s (continuing without it)", path, e)
+        return None
 
-    nba_model = NbaModel(elo)
-    nhl_model = NhlModel(elo)
-    nfl_model = NflModel(elo)
-    betting_config = BettingConfig()
 
-    picks: list[dict] = []
+def write_csv(rows: List[Dict[str, Any]], out_path: Path) -> None:
+    # Minimal CSV writer (no pandas required)
+    if not rows:
+        out_path.write_text("", encoding="utf-8")
+        return
 
-    for event in events:
-        for market in event.markets:
-            model_prob_home = 0.5
-            flags: list[str] = []
-            inputs_used: list[str] = ["elo"]
+    # Stable header order: union of keys, sorted but with common columns up front
+    preferred = [
+        "date",
+        "sport",
+        "home",
+        "away",
+        "market_type",
+        "model_prob",
+        "market_prob",
+        "edge",
+        "odds",
+        "ev",
+        "bet_units",
+        "play_pass",
+        "decision_reason",
+        "flags",
+        "inputs_used",
+        "model_version",
+    ]
+    keys = set()
+    for r in rows:
+        keys.update(r.keys())
+    extras = [k for k in sorted(keys) if k not in preferred]
+    header = [k for k in preferred if k in keys] + extras
 
-            if args.sport == "nba":
-                rest = injuries.get("nba_rest_days", {})
-                model_prob_home = nba_model.predict_home_win_prob(
-                    event.home_team,
-                    event.away_team,
-                    rest_days_home=float(rest.get(event.home_team, 1.0)),
-                    rest_days_away=float(rest.get(event.away_team, 1.0)),
-                )
-                inputs_used.append("rest")
-            elif args.sport == "nhl":
-                goalie_delta = goalies.get(event.event_id, {}).get("home_goalie_delta")
-                model_prob_home, nhl_flags = nhl_model.predict_home_win_prob(event.home_team, event.away_team, goalie_delta)
-                flags.extend(nhl_flags)
-                if goalie_delta is not None:
-                    inputs_used.append("goalies")
-            elif args.sport == "nfl":
-                inj = injuries.get(event.event_id, {})
-                weather_delta = weather.get(event.event_id, {}).get("home_weather_delta")
-                model_prob_home, nfl_flags = nfl_model.predict_home_win_prob(
-                    event.home_team,
-                    event.away_team,
-                    injury_delta=inj.get("home_injury_delta"),
-                    qb_delta=inj.get("home_qb_delta"),
-                    weather_delta=weather_delta,
-                )
-                flags.extend(nfl_flags)
-                if inj:
-                    inputs_used.append("injuries")
-                if weather_delta is not None:
-                    inputs_used.append("weather")
+    def esc(v: Any) -> str:
+        if v is None:
+            return ""
+        s = str(v)
+        if any(ch in s for ch in [",", "\n", '"']):
+            s = '"' + s.replace('"', '""') + '"'
+        return s
 
-            if calibrator:
-                model_prob_home = float(calibrator.predict([model_prob_home])[0])
-                inputs_used.append("calibration")
-            model_prob_home = bounded_probability(model_prob_home)
+    lines = [",".join(header)]
+    for r in rows:
+        lines.append(",".join(esc(r.get(k)) for k in header))
 
-            mkt_home, mkt_away = remove_vig_two_way(market.home_price_decimal, market.away_price_decimal)
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-            side = "home" if (model_prob_home - mkt_home) >= ((1.0 - model_prob_home) - mkt_away) else "away"
-            model_prob = model_prob_home if side == "home" else 1.0 - model_prob_home
-            market_prob = mkt_home if side == "home" else mkt_away
-            odds = market.home_price_decimal if side == "home" else market.away_price_decimal
 
-            model_edge = edge(model_prob, market_prob)
-            ev = expected_value_two_way(model_prob, odds)
-            bet_units, reason = size_bet_units(model_prob, odds, model_edge, betting_config)
+# ----------------------------
+# Main runner
+# ----------------------------
+def run() -> int:
+    parser = argparse.ArgumentParser(description="Daily sports betting picks runner")
+    parser.add_argument("--sport", required=True, choices=["nba", "nhl", "nfl"], help="Sport to run")
+    parser.add_argument("--date", required=False, default=None, help="Target date YYYY-MM-DD (or YYYY/MM/DD)")
+    parser.add_argument("--days", required=False, default="1", help="How many days forward to scan (default 1)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logs")
+    args = parser.parse_args()
 
-            picks.append(
-                {
-                    "date": target_date.isoformat(),
-                    "sport": args.sport,
-                    "home": event.home_team,
-                    "away": event.away_team,
-                    "market_type": market.market_type,
-                    "model_prob": round(model_prob, 4),
-                    "market_prob": round(market_prob, 4),
-                    "edge": round(model_edge, 4),
-                    "odds": round(odds, 4),
-                    "ev": round(ev, 4),
-                    "bet_units": bet_units,
-                    "play_pass": "play" if reason == "play" else "pass",
-                    "decision_reason": reason,
-                    "flags": "|".join(flags),
-                    "inputs_used": "|".join(sorted(set(inputs_used))),
-                    "model_version": MODEL_VERSION,
-                }
+    setup_logging(args.debug)
+    ensure_dirs()
+
+    odds_api_key = os.getenv("ODDS_API_KEY", "").strip()
+    if not odds_api_key:
+        LOG.error("ODDS_API_KEY is not set. Add it as a GitHub Actions secret or export it locally.")
+        return 2
+
+    # Date handling
+    if args.date:
+        target_date = parse_date(args.date)
+    else:
+        target_date = dt.date.today()
+
+    try:
+        days = int(args.days)
+    except ValueError:
+        LOG.error("Invalid --days '%s' (must be an integer)", args.days)
+        return 2
+
+    dates = daterange(target_date, days)
+    LOG.info("Sport=%s Days=%s StartDate=%s", args.sport, days, target_date.isoformat())
+
+    # Optional local inputs
+    injuries = load_optional_json("data/inputs/injuries.json")
+    goalies = load_optional_json("data/inputs/goalies.json")
+    weather = load_optional_json("data/inputs/weather.json")
+
+    # Dispatch to sport model
+    rows: List[Dict[str, Any]] = []
+
+    try:
+        if args.sport == "nba":
+            from sports.nba.model import run_nba  # type: ignore
+
+            rows = run_nba(
+                dates=dates,
+                odds_api_key=odds_api_key,
+                injuries=injuries,
+                weather=weather,
+                debug=args.debug,
             )
 
-    frame = pd.DataFrame(picks)
-    out_path = DATA_DIR / "results" / f"picks_{target_date.strftime('%Y%m%d')}.csv"
-    write_csv(out_path, frame)
-    LOGGER.info("Saved %s picks to %s", len(frame), out_path)
+        elif args.sport == "nhl":
+            from sports.nhl.model import run_nhl  # type: ignore
+
+            rows = run_nhl(
+                dates=dates,
+                odds_api_key=odds_api_key,
+                injuries=injuries,
+                goalies=goalies,
+                debug=args.debug,
+            )
+
+        elif args.sport == "nfl":
+            from sports.nfl.model import run_nfl  # type: ignore
+
+            rows = run_nfl(
+                dates=dates,
+                odds_api_key=odds_api_key,
+                injuries=injuries,
+                weather=weather,
+                debug=args.debug,
+            )
+
+        else:
+            LOG.error("Unsupported sport: %s", args.sport)
+            return 2
+
+    except ModuleNotFoundError as e:
+        LOG.error("Missing module: %s", e)
+        LOG.error("Make sure you have sports/%s/model.py created.", args.sport)
+        return 3
+    except Exception as e:
+        LOG.exception("Run failed: %s", e)
+        return 1
+
+    # Output
+    stamp = target_date.strftime("%Y%m%d")
+    out_path = Path(f"data/results/picks_{args.sport}_{stamp}.csv")
+    write_csv(rows, out_path)
+
+    LOG.info("Wrote %d rows to %s", len(rows), out_path.as_posix())
+
+    # Print a quick console preview (first 10)
+    if rows:
+        preview = rows[:10]
+        LOG.info("Preview (first %d):", len(preview))
+        for r in preview:
+            home = r.get("home", "")
+            away = r.get("away", "")
+            market_type = r.get("market_type", "")
+            edge = r.get("edge", "")
+            play_pass = r.get("play_pass", "")
+            bet_units = r.get("bet_units", "")
+            LOG.info("  %s @ %s | %s | edge=%s | %s | units=%s", away, home, market_type, edge, play_pass, bet_units)
+
     return 0
 
 
