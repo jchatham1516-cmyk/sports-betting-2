@@ -47,7 +47,16 @@ def run() -> int:
     if not api_key:
         raise RuntimeError("ODDS_API_KEY is required")
 
-    target_date = dt.datetime.strptime(args.date, "%Y-%m-%d").date()
+    def parse_date(s: str) -> dt.date:
+    s = s.strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return dt.datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+    raise ValueError(f"Invalid --date '{s}'. Use YYYY-MM-DD (or YYYY/MM/DD).")
+
+target_date = parse_date(args.date)
     raw = fetch_odds(api_key=api_key, sport=args.sport, date=target_date, days=args.days)
 
     raw_path = DATA_DIR / "raw" / f"{args.sport}_{target_date.strftime('%Y%m%d')}.json"
