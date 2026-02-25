@@ -1,7 +1,0 @@
-pandas
-numpy
-requests
-beautifulsoup4
-pypdf
-lxml
-PyMuPDF
