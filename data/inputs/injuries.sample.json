@@ -1,0 +1,10 @@
+{
+  "nba_rest_days": {
+    "los angeles lakers": 1,
+    "boston celtics": 2
+  },
+  "example_event_id_nfl": {
+    "home_injury_delta": -0.03,
+    "home_qb_delta": -0.05
+  }
+}
