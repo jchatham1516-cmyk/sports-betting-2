@@ -47,7 +47,7 @@ def run() -> int:
     if not api_key:
         raise RuntimeError("ODDS_API_KEY is required")
 
-    def parse_date(s: str) -> dt.date:
+ def parse_date(s: str) -> dt.date:
     s = s.strip()
     for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
         try:
