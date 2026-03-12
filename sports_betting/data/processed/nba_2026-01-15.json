@@ -1,0 +1,21 @@
+{
+  "games": [
+    {
+      "event_id": "nba1",
+      "date": "2026-01-15T19:30:00",
+      "home_team": "Boston Celtics",
+      "away_team": "Miami Heat",
+      "meta": {
+        "team_ratings": {
+          "Boston Celtics": {"net_rating": 7.8, "rest_days": 2, "injury_impact": 0.1, "pace": 100.4},
+          "Miami Heat": {"net_rating": 1.2, "rest_days": 1, "injury_impact": 0.5, "pace": 97.8}
+        }
+      },
+      "markets": [
+        {"market": "moneyline", "side": "Boston Celtics", "odds": -150, "sportsbook": "book_a"},
+        {"market": "spread", "side": "Boston Celtics", "line": -4.5, "odds": -110, "sportsbook": "book_a"},
+        {"market": "totals", "side": "Under", "line": 228.5, "odds": -108, "sportsbook": "book_a"}
+      ]
+    }
+  ]
+}

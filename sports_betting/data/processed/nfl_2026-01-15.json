@@ -1,0 +1,22 @@
+{
+  "games": [
+    {
+      "event_id": "nfl1",
+      "date": "2026-01-15T20:20:00",
+      "home_team": "Kansas City Chiefs",
+      "away_team": "Buffalo Bills",
+      "meta": {
+        "team_ratings": {
+          "Kansas City Chiefs": {"epa_per_play": 0.11, "qb_impact": 2.5, "success_rate": 0.48, "pace": 0.3},
+          "Buffalo Bills": {"epa_per_play": 0.07, "qb_impact": 1.8, "success_rate": 0.45, "pace": 0.28}
+        },
+        "weather": {"nfl1": {"wind_penalty": 0.01}}
+      },
+      "markets": [
+        {"market": "moneyline", "side": "Kansas City Chiefs", "odds": -125},
+        {"market": "spread", "side": "Kansas City Chiefs", "line": -2.5, "odds": -108},
+        {"market": "totals", "side": "Over", "line": 49.5, "odds": -110}
+      ]
+    }
+  ]
+}
