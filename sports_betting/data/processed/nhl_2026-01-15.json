@@ -1,0 +1,21 @@
+{
+  "games": [
+    {
+      "event_id": "nhl1",
+      "date": "2026-01-15T21:00:00",
+      "home_team": "Edmonton Oilers",
+      "away_team": "Vancouver Canucks",
+      "meta": {
+        "team_ratings": {
+          "Edmonton Oilers": {"xg_for": 0.45, "goalie_rating": 0.3, "special_teams": 0.2},
+          "Vancouver Canucks": {"xg_for": 0.2, "goalie_rating": 0.15, "special_teams": 0.12}
+        }
+      },
+      "markets": [
+        {"market": "moneyline", "side": "Edmonton Oilers", "odds": -132},
+        {"market": "spread", "side": "Edmonton Oilers", "line": -1.5, "odds": 150},
+        {"market": "totals", "side": "Over", "line": 6.5, "odds": -105}
+      ]
+    }
+  ]
+}

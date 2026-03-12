@@ -1,0 +1,19 @@
+{
+  "logging": {"level": "INFO"},
+  "sports": ["nba", "nfl", "nhl"],
+  "bankroll": {
+    "mode": "fractional_kelly",
+    "bankroll": 10000,
+    "unit_size": 100,
+    "fractional_kelly": 0.25,
+    "max_units": 2.0,
+    "min_units": 0.25,
+    "uncertainty_penalty": 0.35
+  },
+  "thresholds": {
+    "default": {"min_edge": 0.02, "min_ev": 0.01, "min_confidence": 0.55},
+    "nba": {"min_edge": 0.02, "min_ev": 0.01, "min_confidence": 0.56},
+    "nfl": {"min_edge": 0.025, "min_ev": 0.015, "min_confidence": 0.58},
+    "nhl": {"min_edge": 0.023, "min_ev": 0.012, "min_confidence": 0.57}
+  }
+}
