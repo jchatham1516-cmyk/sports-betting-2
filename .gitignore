@@ -4,3 +4,7 @@ __pycache__/
 .env
 data/raw/*.json
 data/results/*.csv
+
+# Local training artifacts
+sports_betting/data/models/
+sports_betting/data/historical/*.tmp
